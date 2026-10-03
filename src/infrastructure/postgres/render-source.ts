@@ -634,11 +634,21 @@ export class PostgresRenderSource implements RenderSource {
       }
     }
 
-    const priced = lines.some((l) => l.line_total !== null);
-    const subtotal = lines.reduce(
-      (sum, l) => sum + (l.line_total === null ? 0 : Number(l.line_total)),
-      0,
-    );
+    // THE TOTALS, ONE PER FREQUENCY, SUMMED BY THE DATABASE (B46, audit
+    // 2026-10-03). This was `Number()` summed and `toFixed(2)`: binary
+    // floating point on money, and one "Total" adding a monthly fee to a
+    // one-off one, which is a figure nobody owes. A letter whose priced lines
+    // all bill alike keeps its one "Total", the same figure as before.
+    const byFrequency = await db<{ frequency: string | null; total: string }[]>`
+      SELECT l.billing_frequency AS frequency,
+             sum(round(l.quantity * l.unit_amount * (1 - l.discount_percent / 100), 2))::text AS total
+        FROM crm.engagement_letter_line l
+       WHERE l.engagement_letter_id = ${letterId} AND l.removed_at IS NULL AND l.unit_amount IS NOT NULL
+       GROUP BY l.billing_frequency
+       ORDER BY coalesce(array_position(
+                  ARRAY['monthly', 'quarterly', 'annually', 'one_time', 'custom'],
+                  l.billing_frequency::text), 99)
+    `;
 
     const document: RenderableDocument = {
       documentTitle: row.title,
@@ -689,9 +699,14 @@ export class PostgresRenderSource implements RenderSource {
                   : money(l.line_total, row.currency),
               ]),
             },
-      totals: priced
-        ? [{ label: "Total", value: money(subtotal.toFixed(2), row.currency), emphasis: true }]
-        : [],
+      totals:
+        byFrequency.length === 1
+          ? [{ label: "Total", value: money(byFrequency[0]?.total ?? "0", row.currency), emphasis: true }]
+          : byFrequency.map((f) => ({
+              label: `Total, ${(f.frequency === null ? "frequency not stated" : (FREQUENCY_LABELS[f.frequency] ?? f.frequency)).toLowerCase()}`,
+              value: money(f.total, row.currency),
+              emphasis: true,
+            })),
       footer: row.signed_by_name === null
         ? row.entity_name
         : `${row.entity_name}   ·   signed by ${row.signed_by_name}${row.signed_by_title === null ? "" : `, ${row.signed_by_title}`}`,

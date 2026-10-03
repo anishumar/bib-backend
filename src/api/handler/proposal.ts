@@ -460,6 +460,12 @@ const ProposalRecordSchema = z
     /** The money per billing frequency, summed by the database (D8): what a
      *  reader is shown instead of one net that adds monthly to one-time. */
     totalsByFrequency: z.array(FrequencyTotalSchema),
+    annualValue: AmountSchema.nullable().openapi({
+      description:
+        "What the recurring fees come to over a year (CA#42): monthly x 12, quarterly x 4, annually " +
+        "x 1, added by the database. No one-off or custom fee is in it. Null when nothing priced " +
+        "recurs, or for a caller without the fee axis.",
+    }),
     /** Sections and codes, from the SAME plan the PDF is rendered from. */
     document: ProposalPlanSchema,
     lines: z.array(ProposalLineSchema),
@@ -1438,6 +1444,7 @@ function toRecordBody(record: ProposalView, fees: boolean): z.infer<typeof Propo
       jurisdiction: record.issuer.jurisdiction,
     },
     issuedOn: record.issuedOn,
+    annualValue: fees ? record.annualValue : null,
     totalsByFrequency: record.totalsByFrequency.map((t) => ({
       frequency: t.frequency,
       net: fees ? t.net : null,

@@ -21,6 +21,9 @@ import type {
   BillingDueDesk,
   BillingDueRecord,
   BillingSchedules,
+  ClaimToken,
+  RaisePlan,
+  RaiseWritten,
   DueFilters,
   DueStatus,
   PersonRef,
@@ -28,6 +31,8 @@ import type {
   ScheduleRecord,
 } from "../../usecase/billing/ports";
 import { isoInstant } from "./instant";
+import { insertDraftInvoice, insertInvoiceLine } from "./invoice-repository";
+import type { Invoice } from "../../domain/invoice/model";
 import { BILLING_TIMINGS, type BillingTiming } from "../../domain/billing/model";
 import { BILL_KINDS, type BillKind } from "../../domain/billing/advance";
 
@@ -387,6 +392,73 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
     });
   }
 
+  async raiseAtomically(tenantId: string, plan: RaisePlan): Promise<RaiseWritten> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const covered: string[] = [];
+      const conflicts: string[] = [];
+      const invoiced: { dueId: string; lineId: string }[] = [];
+      for (const c of plan.covered) {
+        if (!(await takeFromPool(db, c.applied))) {
+          conflicts.push(c.dueId);
+          continue;
+        }
+        const rows = await db<{ id: string }[]>`
+          UPDATE crm.billing_due d
+             SET covered_at = now(), invoice_id = NULL, invoice_line_id = NULL,
+                 advance_invoice_id = ${c.applied.invoiceId}, advance_applied = ${c.applied.amount}::numeric
+           WHERE d.id = ${c.dueId}
+             AND ${db.unsafe(OPEN_DUE_SQL)}
+          RETURNING d.id
+        `;
+        if (rows.length === 1) covered.push(c.dueId);
+        else conflicts.push(c.dueId);
+      }
+
+      let invoice: Invoice | null = null;
+      for (const item of plan.invoiced) {
+        // Checked BEFORE anything is written for it, so a bill that cannot go
+        // on the invoice leaves no line behind: its advance still covers what
+        // it takes, and it is still open (held, so nobody settles it now).
+        if (item.applied !== null && !(await takeFromPool(db, item.applied))) {
+          conflicts.push(item.dueId);
+          continue;
+        }
+        const [open] = await db<{ kind: string; invoice_id: string | null }[]>`
+          SELECT d.kind, d.invoice_id FROM crm.billing_due d
+           WHERE d.id = ${item.dueId} AND ${db.unsafe(OPEN_DUE_SQL)}
+             FOR UPDATE OF d
+        `;
+        if (!open) {
+          conflicts.push(item.dueId);
+          continue;
+        }
+        if (invoice === null) {
+          if (plan.draft === null) throw new Error("a raise with bills to invoice came with no draft");
+          invoice = await insertDraftInvoice(db, plan.draft);
+        }
+        const line = await insertInvoiceLine(db, item.line);
+        await db`
+          UPDATE crm.billing_due d
+             SET invoice_id = ${invoice.id}, invoice_line_id = ${line.id},
+                 advance_invoice_id = ${item.applied?.invoiceId ?? null},
+                 advance_applied = ${item.applied?.amount ?? null}::numeric,
+                 covered_at = NULL
+           WHERE d.id = ${item.dueId}
+        `;
+        // AN ADVANCE RAISED AGAIN after its invoice was cancelled (0321): the
+        // bills that took from it move onto the new invoice, as `markInvoiced`.
+        if (open.kind === "advance" && open.invoice_id !== null) {
+          await db`
+            UPDATE crm.billing_due SET advance_invoice_id = ${invoice.id}
+             WHERE advance_invoice_id = ${open.invoice_id}
+          `;
+        }
+        invoiced.push({ dueId: item.dueId, lineId: line.id });
+      }
+      return { invoice, covered, invoiced, conflicts };
+    });
+  }
+
   async markCovered(
     tenantId: string,
     dueId: string,
@@ -563,9 +635,9 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
     });
   }
 
-  async claim(tenantId: string, dueIds: readonly string[]): Promise<boolean> {
+  async claim(tenantId: string, dueIds: readonly string[]): Promise<ClaimToken | null> {
     const ids = [...new Set(dueIds)].sort();
-    if (ids.length === 0) return true;
+    if (ids.length === 0) return "nothing-claimed";
     return withTenant(this.app, tenantId, async (db) => {
       // Locked in id order, so two claims over overlapping bills cannot
       // deadlock; then all free or none claimed. An id that is no bill here is
@@ -577,16 +649,32 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
          ORDER BY id
            FOR UPDATE
       `;
-      if (rows.some((r) => !r.free)) return false;
+      if (rows.some((r) => !r.free)) return null;
+      // THE CLAIM'S OWN INSTANT IS ITS TOKEN (B35): `now()` is this
+      // transaction's, held to the microsecond, and a later claim of the same
+      // bill can only come after this one lapsed, so it differs.
+      // An id that is no bill here still gets a token: the caller's read says
+      // "not found", not "busy".
+      // In whole microseconds since the epoch, as text: exact, and never a
+      // timestamp on the wire (postgres.js would round one to milliseconds).
+      const [stamp] = await db<{ at: string }[]>`SELECT (extract(epoch FROM now()) * 1000000)::bigint::text AS at`;
       await db`UPDATE crm.billing_due SET claimed_at = now() WHERE id = ANY(${db.array(ids)}::uuid[])`;
-      return true;
+      if (!stamp) throw new Error("now() returned no row");
+      return stamp.at;
     });
   }
 
-  async release(tenantId: string, dueIds: readonly string[]): Promise<void> {
+  async release(tenantId: string, dueIds: readonly string[], token: ClaimToken): Promise<void> {
     if (dueIds.length === 0) return;
     await withTenant(this.app, tenantId, async (db) => {
-      await db`UPDATE crm.billing_due SET claimed_at = NULL WHERE id = ANY(${db.array([...dueIds])}::uuid[])`;
+      // Only this request's claim: a newer one on the same bills stays.
+      // Compared in microseconds: a parameter typed timestamptz goes through
+      // a JS Date in postgres.js and loses them, so it never matched.
+      await db`
+        UPDATE crm.billing_due SET claimed_at = NULL
+         WHERE id = ANY(${db.array([...dueIds])}::uuid[])
+           AND (extract(epoch FROM claimed_at) * 1000000)::bigint = ${token}::bigint
+      `;
     });
   }
 
@@ -796,6 +884,21 @@ export class PostgresAutoBillingSetting implements AutoBillingSetting {
                auto_billing_since = CASE WHEN ${on} THEN ${since}::date ELSE auto_billing_since END
          WHERE id = ${tenantId}
       `;
+    });
+  }
+
+  async dueInDays(tenantId: string): Promise<number | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ invoice_due_days: number | null }[]>`
+        SELECT invoice_due_days FROM tenancy.tenant WHERE id = ${tenantId}
+      `;
+      return row?.invoice_due_days ?? null;
+    });
+  }
+
+  async setDueInDays(tenantId: string, days: number | null): Promise<void> {
+    await withTenant(this.app, tenantId, async (db) => {
+      await db`UPDATE tenancy.tenant SET invoice_due_days = ${days} WHERE id = ${tenantId}`;
     });
   }
 }

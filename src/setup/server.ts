@@ -91,6 +91,7 @@ import { PostgresEngagementRepository } from "../infrastructure/postgres/engagem
 import { PostgresEngagementLifecycle } from "../infrastructure/postgres/engagement-lifecycle";
 import { PostgresDocumentRepository } from "../infrastructure/postgres/document-repository";
 import { PostgresFirmEntityRepository } from "../infrastructure/postgres/firm-entity-repository";
+import { PostgresInvoiceFirmSettings } from "../infrastructure/postgres/invoice-settings";
 import { PostgresInvoiceRepository } from "../infrastructure/postgres/invoice-repository";
 import { PostgresDocumentStoreRepository } from "../infrastructure/postgres/document-store-repository";
 import { Sha256ByteDigest } from "../infrastructure/storage/filesystem-blob-store";
@@ -600,6 +601,8 @@ export function wire(cfg: Config, log: Logger): Wired {
     issuedCopies: invoiceIssuedCopies(fileStore, log),
     // A manager a person names must be on the roster today (T4).
     staff: memberships,
+    // Reporting currency, financial year start and payment terms (audit 2026-10-03).
+    settings: new PostgresInvoiceFirmSettings(pools.app),
   });
 
   // BILL DUES (0318): what a manager does with a bill the sweep found owed.
@@ -609,8 +612,9 @@ export function wire(cfg: Config, log: Logger): Wired {
   const billing = new BillingDeskService({
     desk: new PostgresBillingDueDesk(pools.app),
     invoices: {
-      raise: (input, actor) => invoices.raise(input, actor),
-      addLine: (input) => invoices.addLine(input),
+      prepareDraft: (input) => invoices.prepareDraft(input),
+      prepareLine: (draft, input) => invoices.prepareLine(draft, input),
+      recordRaised: (invoice, actor) => invoices.recordRaised(invoice, actor),
       find: (tenantId, invoiceId) => invoiceRepository.find(tenantId, invoiceId),
       issueCreditNote: (input, actor) => invoices.issueCreditNote(input, actor),
     },

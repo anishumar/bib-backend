@@ -35,6 +35,7 @@ import {
   CREDIT_REASONS,
   PAYMENT_METHODS,
   canTransition,
+  INDIAN_FY_START_MONTH,
   financialYearOf,
   isCreditReason,
   isPaymentMethod,
@@ -46,7 +47,6 @@ import {
   isCurrencyCode,
   isSignedAmount,
   normalizeCurrency,
-  subtractAmounts,
 } from "../../domain/money/model";
 import {
   EmptyInvoice,
@@ -73,17 +73,28 @@ import {
   InvoicePartyArchived,
   InvoiceManagerFrozen,
   ManagerNotStaff,
+  CreditNoteDateOutOfRange,
+  InvoiceHasPayments,
+  CreditExceedsUnusedAdvance,
+  FxRateNotOne,
+  FxRateRequired,
+  DueBeforeIssue,
+  DueDateInThePast,
 } from "../../domain/invoice/errors";
+import { addDays } from "../../domain/scheduler/model";
 import { dayInZone, isCallersToday } from "../../domain/scheduler/zone";
 import type {
   FirmEntities,
   FirmTimeZone,
   InvoiceFilters,
+  InvoiceFirmSettings,
   InvoiceRecord,
   InvoiceRepository,
   InvoiceSeriesRecord,
   InvoiceSummary,
   IssuedCopies,
+  NewInvoice,
+  NewInvoiceLine,
   PartyStanding,
   ReceivableRecord,
   StaffDirectory,
@@ -104,6 +115,9 @@ export interface Deps {
   readonly issuedCopies: IssuedCopies;
   /** The roster, for a manager a person names (auto-invoice T4). */
   readonly staff: StaffDirectory;
+  /** The firm's reporting currency, financial year start and payment terms
+   *  (audit 2026-10-03). */
+  readonly settings: InvoiceFirmSettings;
 }
 
 export interface RaiseInvoiceInput {
@@ -111,12 +125,15 @@ export interface RaiseInvoiceInput {
   readonly partyId: string;
   readonly entityPartyId: string;
   readonly currency: string;
-  readonly fxRate: string;
-  readonly fxRateDate: string;
+  /** Required when the currency is not the firm's reporting one (B07); in the
+   *  reporting currency it is 1, and may be left out. */
+  readonly fxRate?: string | undefined;
+  /** The day the rate is from; defaults to today. */
+  readonly fxRateDate?: string | undefined;
   readonly dueOn?: string | undefined;
   readonly notes?: string | undefined;
-  /** Which year's books this belongs to. Defaults to today, and a firm raising
-   *  an invoice on 2 April for March's work overrides it. */
+  /** The draft's PROVISIONAL year (defaults to today). Since B03 the number's
+   *  year is the ISSUE date's, whatever this says. */
   readonly seriesDate?: string | undefined;
   /** The caller's today (see `isCallersToday`); the firm's day when absent. */
   readonly asOf?: string | undefined;
@@ -149,8 +166,8 @@ export class InvoiceService {
   constructor(private readonly deps: Deps) {}
 
   /**
-   * Start an invoice: a DRAFT, with no number yet (0322). `seriesDate` chooses
-   * which financial year's series the issue will number it in.
+   * Start an invoice: a DRAFT, with no number yet (0322). Its financial year is
+   * provisional: the issue takes the year of the issue date (B03).
    *
    * The currency and the FX rate are fixed HERE, at the top of the document,
    * and the lines are held to the currency by a composite foreign key — a
@@ -158,20 +175,45 @@ export class InvoiceService {
    * as on a proposal. The rate is stored even when the currencies match.
    */
   async raise(input: RaiseInvoiceInput, actor: Actor): Promise<Invoice> {
+    const invoice = await this.deps.invoices.create(await this.prepareDraft(input));
+    await this.recordRaised(invoice, actor);
+    return invoice;
+  }
+
+  /**
+   * Every rule a new draft answers to, and the row it would be, WITHOUT
+   * writing it (B34). `raise` writes it at once; the billing desk writes it in
+   * the same transaction as its lines and the bills they settle, so a request
+   * that fails half-way leaves neither a partial draft nor a bill marked
+   * raised on nothing.
+   */
+  async prepareDraft(input: RaiseInvoiceInput): Promise<NewInvoice> {
     const currency = normalizeCurrency(input.currency);
     if (!isCurrencyCode(currency)) throw new InvalidInvoiceCurrency(input.currency);
+    const today = await this.today(input.tenantId, input.asOf);
+    const seriesDate = input.seriesDate ?? today;
+    this.dateOrThrow("seriesDate", seriesDate);
+    const settings = await this.deps.settings.invoiceSettingsFor(input.tenantId);
+    // THE RATE IS A PERSON'S, NEVER A DEFAULT (B07). In another currency than
+    // the firm's reporting one it is required: a default of 1 counted USD
+    // 10,000 as INR 10,000 everywhere money is added up. In the firm's own
+    // currency it is exactly 1, stored and dated as the rule above says.
+    const ownCurrency = currency === normalizeCurrency(settings.reportingCurrency);
+    const typedRate = input.fxRate?.trim() ?? "";
+    if (!ownCurrency && typedRate === "") throw new FxRateRequired(currency, settings.reportingCurrency);
+    const fxRate = typedRate === "" ? "1" : typedRate;
     // Positive, not merely non-negative: a rate of zero would make every
     // converted total zero and nothing would look wrong until a report did.
     // A RATE, not a price: `numeric(20,10)` on this column, so a stored
     // rate read back at full scale ("1.0000000000") has to be acceptable
     // input. `isAmount` allows four places and refused it — see
     // `isExchangeRate`.
-    if (!isExchangeRate(input.fxRate) || Number(input.fxRate) <= 0) {
-      throw new InvalidInvoiceAmount("fxRate", input.fxRate);
+    if (!isExchangeRate(fxRate) || compareAmounts(fxRate, "0") <= 0) {
+      throw new InvalidInvoiceAmount("fxRate", fxRate);
     }
-    this.dateOrThrow("fxRateDate", input.fxRateDate);
-    const seriesDate = input.seriesDate ?? (await this.today(input.tenantId, input.asOf));
-    this.dateOrThrow("seriesDate", seriesDate);
+    if (ownCurrency && compareAmounts(fxRate, "1") !== 0) throw new FxRateNotOne(currency, fxRate);
+    const fxRateDate = input.fxRateDate?.trim() || today;
+    this.dateOrThrow("fxRateDate", fxRateDate);
     if (input.dueOn !== undefined) this.dateOrThrow("dueOn", input.dueOn);
 
     // WHO issues it and WHO it bills, before anything is written (F-10-1). The
@@ -191,20 +233,23 @@ export class InvoiceService {
       await this.requireStaff(input.tenantId, input.managerUserId);
     }
 
-    const invoice = await this.deps.invoices.create({
+    return {
       id: this.deps.ids.newId(),
       tenantId: input.tenantId,
       partyId: input.partyId,
       entityPartyId: input.entityPartyId,
       currency,
-      fxRate: input.fxRate,
-      fxRateDate: input.fxRateDate,
+      fxRate,
+      fxRateDate,
       dueOn: input.dueOn ?? null,
       notes: input.notes ?? null,
       managerUserId: input.managerUserId ?? null,
-      seriesDate,
-    });
+      financialYear: financialYearOf(seriesDate, settings.fiscalYearStartMonth ?? INDIAN_FY_START_MONTH),
+    };
+  }
 
+  /** The ledger's line for a draft that now exists, after its write committed. */
+  async recordRaised(invoice: Invoice, actor: Actor): Promise<void> {
     await this.deps.events.recordEvent({
       tenantId: invoice.tenantId,
       verb: "invoice.raised",
@@ -223,7 +268,6 @@ export class InvoiceService {
         managerUserId: invoice.managerUserId,
       },
     });
-    return invoice;
   }
 
   /**
@@ -255,8 +299,51 @@ export class InvoiceService {
     return saved;
   }
 
+  /**
+   * Set or clear a DRAFT's due date (B20). Bills drafted by the billing desk
+   * carried none and nothing could give them one, so client reminders never
+   * chased them. Today or later; an issued invoice's due date is what was
+   * sent, and does not change.
+   */
+  async setDueDate(
+    tenantId: string,
+    invoiceId: string,
+    dueOn: string | null,
+    actor: Actor,
+    asOf?: string,
+  ): Promise<Invoice> {
+    const invoice = await this.editableOrThrow(tenantId, invoiceId);
+    if (dueOn !== null) {
+      this.dateOrThrow("dueOn", dueOn);
+      const today = await this.today(tenantId, asOf);
+      if (dueOn < today) throw new DueDateInThePast(dueOn, today);
+    }
+    if (invoice.dueOn === dueOn) return invoice;
+    const saved = await this.deps.invoices.setDueOn(tenantId, invoiceId, dueOn);
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "invoice.due_date_set",
+      objectId: saved.id,
+      actor,
+      payload: { dueOn: saved.dueOn, previousDueOn: invoice.dueOn },
+    });
+    return saved;
+  }
+
   async addLine(input: AddInvoiceLineInput): Promise<InvoiceLine> {
     const invoice = await this.editableOrThrow(input.tenantId, input.invoiceId);
+    return this.deps.invoices.addLine(await this.prepareLine(invoice, input));
+  }
+
+  /**
+   * Every rule a line answers to, for an invoice that may not be written yet
+   * (B34: the billing desk writes the draft, its lines and its bills in one
+   * transaction), and the row it would be.
+   */
+  async prepareLine(
+    invoice: { readonly id: string; readonly partyId: string; readonly entityPartyId: string; readonly currency: string },
+    input: Omit<AddInvoiceLineInput, "invoiceId">,
+  ): Promise<NewInvoiceLine> {
     if (!isAmount(input.quantity) || Number(input.quantity) <= 0) {
       throw new InvalidInvoiceAmount("quantity", input.quantity);
     }
@@ -308,10 +395,10 @@ export class InvoiceService {
       }
     }
 
-    return this.deps.invoices.addLine({
+    return {
       id: this.deps.ids.newId(),
       tenantId: input.tenantId,
-      invoiceId: input.invoiceId,
+      invoiceId: invoice.id,
       engagementId: input.engagementId ?? null,
       description: input.description.trim(),
       quantity: input.quantity,
@@ -322,7 +409,7 @@ export class InvoiceService {
       currency: invoice.currency,
       discountPercent: discount,
       taxPercent: tax,
-    });
+    };
   }
 
   async removeLine(tenantId: string, invoiceId: string, lineId: string): Promise<void> {
@@ -348,8 +435,25 @@ export class InvoiceService {
     // Greenwich's, which dated an invoice issued at 02:00 in Delhi the day
     // before it was issued.
     const issuedOn = await this.today(tenantId, asOf);
+    // AND ITS YEAR IS THAT DAY'S (B03). It was the draft's, so a March draft
+    // issued in April took last year's series with an April date on it. The
+    // firm's own year when it has said when that starts, else 1 April.
+    const settings = await this.deps.settings.invoiceSettingsFor(tenantId);
+    const startMonth = settings.fiscalYearStartMonth ?? INDIAN_FY_START_MONTH;
+    // NOT ALREADY OVERDUE (B21): a draft that lingered past its due date would
+    // go out late, and the next sweep fire every reminder at once. The person
+    // changes the date on the draft; nothing guesses a new one.
+    if (invoice.dueOn !== null && invoice.dueOn < issuedOn) throw new DueBeforeIssue(invoice.dueOn, issuedOn);
+    // THE FIRM'S OWN TERMS (B20, 0327): an invoice issued with no due date is
+    // due N days after its date when the firm has said N; never a guessed N.
+    const dueOnIfUnset = settings.dueInDays === null ? null : addDays(issuedOn, settings.dueInDays);
     // THE NUMBER IS DRAWN HERE (0322), in the same transaction as the status.
-    const issued = await this.deps.invoices.issue(tenantId, invoiceId, issuedOn);
+    const issued = await this.deps.invoices.issue(tenantId, invoiceId, {
+      issuedOn,
+      financialYear: financialYearOf(issuedOn, startMonth),
+      fiscalYearStartMonth: startMonth,
+      dueOnIfUnset,
+    });
     await this.deps.events.recordEvent({
       tenantId,
       verb: "invoice.issued",
@@ -365,6 +469,7 @@ export class InvoiceService {
         partyId: issued.partyId,
         entityPartyId: issued.entityPartyId,
         issuedOn: issued.issuedOn,
+        dueOn: issued.dueOn,
         lineCount: lines.length,
       },
     });
@@ -388,7 +493,12 @@ export class InvoiceService {
     if (!canTransition(invoice.status, "cancelled")) {
       throw new InvalidInvoiceTransition(invoice.status, "cancelled");
     }
-    const cancelled = await this.deps.invoices.cancel(tenantId, invoiceId);
+    // NOT WITH MONEY ON IT (B05). A paid invoice cancelled orphaned the
+    // payment and re-opened the bill behind it to be raised again. The money
+    // is taken off with a credit note, or a mistaken payment is reversed first.
+    const outcome = await this.deps.invoices.cancel(tenantId, invoiceId);
+    if ("paid" in outcome) throw new InvoiceHasPayments(invoice.number, outcome.paid, invoice.currency);
+    const cancelled = outcome.cancelled;
     await this.deps.events.recordEvent({
       tenantId,
       verb: "invoice.cancelled",
@@ -555,9 +665,11 @@ export class InvoiceService {
       verb: "payment.recorded",
       objectId: payment.id,
       actor,
-      // Ids and machine facts. The bank REFERENCE is in, because it is the
-      // counterparty's own machine identifier and is what a reconciliation
-      // dispute turns on; the free-text note is not.
+      // Ids and machine facts. NOT the reference (B26, audit 2026-10-03):
+      // it is free text up to 200 characters, and a UPI reference is very
+      // often a phone number ("98…@ybl"); the PII guard checks key names, not
+      // values, and this log cannot be erased. It stays on the payment row,
+      // which can be; the event says only whether there was one. Nor the note.
       payload: {
         invoiceId: payment.invoiceId,
         invoiceNumber: invoice.number,
@@ -565,7 +677,7 @@ export class InvoiceService {
         currency: payment.currency,
         receivedOn: payment.receivedOn,
         method: payment.method,
-        reference: payment.reference,
+        hasReference: payment.reference !== null && payment.reference.trim() !== "",
       },
     });
     return payment;
@@ -603,29 +715,25 @@ export class InvoiceService {
     if (!isCreditReason(input.reason)) {
       throw new InvalidCreditReason(input.reason, CREDIT_REASONS);
     }
-    const issuedOn = input.issuedOn ?? (await this.today(input.tenantId, input.asOf));
+    const today = await this.today(input.tenantId, input.asOf);
+    const issuedOn = input.issuedOn ?? today;
     this.dateOrThrow("issuedOn", issuedOn);
-
-    // A firm cannot credit more than it billed. Checked here rather than in a
-    // CHECK constraint because the limit depends on the SUM of every OTHER
-    // credit note against this invoice, which a row-level constraint cannot
-    // see — the honest place for it is the one that can read the siblings.
-    const balance = await this.deps.invoices.balanceOf(input.tenantId, input.invoiceId);
-    if (balance !== null) {
-      // ON THE DIGITS, never on a float. This was
-      // `Number(invoiced) - Number(credited)` compared with `Number(amount)`,
-      // which is the one rule this codebase states about money broken on the
-      // one check that decides whether money may leave: 100.10 less 100.00 is
-      // 0.09999999999999432 in binary floating point, so the last ten paise of
-      // a legitimate credit note were refused — and a cap could be passed by
-      // the same error in the other direction.
-      const remaining = subtractAmounts(balance.invoiced, balance.credited);
-      if (compareAmounts(input.amount, remaining) > 0) {
-        throw new CreditExceedsInvoice(input.invoiceId, input.amount, remaining);
-      }
+    // INSIDE THE INVOICE'S LIFE (B45). A caller-chosen date could predate the
+    // invoice it credits, or land in any year's series; a credit note is dated
+    // between the invoice's issue and today.
+    if ((invoice.issuedOn !== null && issuedOn < invoice.issuedOn) || issuedOn > today) {
+      throw new CreditNoteDateOutOfRange(issuedOn, invoice.issuedOn, today);
     }
+    const settings = await this.deps.settings.invoiceSettingsFor(input.tenantId);
+    const startMonth = settings.fiscalYearStartMonth ?? INDIAN_FY_START_MONTH;
 
-    const credit = await this.deps.invoices.issueCreditNote({
+    // A firm cannot credit more than it billed, nor give back an advance that
+    // later bills already took (B06). Checked by the repository INSIDE the
+    // transaction that writes the credit note, under the invoice's row lock
+    // and the advance's lock (B15): read here and written there, two credits
+    // at once both passed the same cap. Not a CHECK constraint, because the
+    // limit is a sum over sibling rows.
+    const outcome = await this.deps.invoices.issueCreditNote({
       id: this.deps.ids.newId(),
       tenantId: input.tenantId,
       invoiceId: input.invoiceId,
@@ -635,8 +743,17 @@ export class InvoiceService {
       issuedOn,
       reason: input.reason,
       note: input.note ?? null,
-      seriesDate: issuedOn,
+      // Its own date's series, never the invoice's (B45).
+      financialYear: financialYearOf(issuedOn, startMonth),
+      fiscalYearStartMonth: startMonth,
     });
+    if (!("credit" in outcome)) {
+      if (outcome.takenByBills !== null) {
+        throw new CreditExceedsUnusedAdvance(invoice.number, outcome.takenByBills, outcome.maxCredit, invoice.currency);
+      }
+      throw new CreditExceedsInvoice(invoice.number ?? input.invoiceId, input.amount, outcome.maxCredit);
+    }
+    const credit = outcome.credit;
 
     await this.deps.events.recordEvent({
       tenantId: input.tenantId,

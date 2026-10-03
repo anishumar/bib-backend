@@ -267,9 +267,8 @@ describe("skipping and linking", () => {
     const w = world();
     const d = due();
     w.desk.rows.push(d);
-    const manual = await w.invoices.raise(
+    const manual = await w.invoices.prepareDraft(
       { tenantId: FIRM, partyId: CLIENT, entityPartyId: ISSUER, currency: "INR", fxRate: "1", fxRateDate: "2026-11-01" },
-      ME,
     );
     await w.service.link({ tenantId: FIRM, dueId: d.id, invoiceId: manual.id }, ME);
     expect((await w.desk.findMany(FIRM, [d.id]))[0]?.status).toBe("drafted");
@@ -280,16 +279,14 @@ describe("skipping and linking", () => {
     const w = world();
     const d = due();
     w.desk.rows.push(d);
-    const theirs = await w.invoices.raise(
+    const theirs = await w.invoices.prepareDraft(
       { tenantId: FIRM, partyId: OTHER_CLIENT, entityPartyId: ISSUER, currency: "INR", fxRate: "1", fxRateDate: "2026-11-01" },
-      ME,
     );
     await expect(w.service.link({ tenantId: FIRM, dueId: d.id, invoiceId: theirs.id }, ME)).rejects.toMatchObject({
       code: "INVOICE_DOES_NOT_FIT_DUE",
     });
-    const cancelled = await w.invoices.raise(
+    const cancelled = await w.invoices.prepareDraft(
       { tenantId: FIRM, partyId: CLIENT, entityPartyId: ISSUER, currency: "INR", fxRate: "1", fxRateDate: "2026-11-01" },
-      ME,
     );
     const row = w.invoices.invoices.find((i) => i.id === cancelled.id);
     if (row) row.status = "cancelled";
@@ -557,5 +554,46 @@ describe("the schedule an engagement starts with, from its letter", () => {
     await live(w, [ENG, ENG2]);
     expect(w.schedules.rows.map((r) => r.firstInvoiceOn)).toEqual(["2026-10-01", "2026-10-01"]);
     expect(w.events.verbs()).toHaveLength(2);
+  });
+});
+
+describe("the firm's own payment terms (B20, audit 2026-10-03)", () => {
+  it("has none until the firm sets one, and never a guessed number", async () => {
+    const w = world();
+    expect((await w.service.settings(FIRM)).invoiceDueDays).toBeNull();
+    await w.service.setInvoiceDueDays(FIRM, 15, ME);
+    expect((await w.service.settings(FIRM)).invoiceDueDays).toBe(15);
+    expect(w.events.recorded.at(-1)).toMatchObject({ verb: "tenant.invoice_due_days_set", payload: { from: null, to: 15 } });
+    await w.service.setInvoiceDueDays(FIRM, null, ME);
+    expect((await w.service.settings(FIRM)).invoiceDueDays).toBeNull();
+  });
+
+  it("refuses a number of days outside 0 to 365", async () => {
+    const w = world();
+    await expect(w.service.setInvoiceDueDays(FIRM, 400, ME)).rejects.toMatchObject({ code: "INVALID_BILLING_INPUT" });
+    await expect(w.service.setInvoiceDueDays(FIRM, -1, ME)).rejects.toMatchObject({ code: "INVALID_BILLING_INPUT" });
+  });
+});
+
+describe("a schedule set before the work started says so (CA#35)", () => {
+  it("answers with a plain-words notice, and saves what was asked", async () => {
+    const w = world();
+    w.schedules.rows.push(schedule({ effectiveFrom: "2026-10-03" }));
+    const saved = await w.service.setSchedule(
+      { tenantId: FIRM, engagementId: ENG, billingFrom: "2026-09-01", firstInvoiceOn: "2026-10-01" },
+      ME,
+    );
+    expect(saved.billingFrom).toBe("2026-09-01");
+    expect(saved.notice).toContain("nothing before 3 October 2026 is billed");
+    const later = await w.service.setSchedule(
+      { tenantId: FIRM, engagementId: ENG, billingFrom: "2026-10-01", firstInvoiceOn: "2026-11-01" },
+      ME,
+    );
+    expect(later.notice).toContain("nothing before 3 October 2026");
+    const clean = await w.service.setSchedule(
+      { tenantId: FIRM, engagementId: ENG, billingFrom: "2026-11-01", firstInvoiceOn: "2026-12-01" },
+      ME,
+    );
+    expect(clean.notice).toBeNull();
   });
 });

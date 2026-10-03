@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 import {
   addMonthsClamped,
   billingDues,
+  scheduleNotice,
   goesLiveFrom,
   resolveBillingManager,
   scheduleFor,
@@ -324,5 +325,22 @@ describe("goesLiveFrom: which day the first billed period must contain", () => {
     expect(goesLiveFrom("2026-07-01", "2026-10-15")).toBe("2026-10-15");
     // Signed ahead of a start in December.
     expect(goesLiveFrom("2026-12-01", "2026-10-15")).toBe("2026-12-01");
+  });
+});
+
+describe("scheduleNotice: a Bill from before the work started is said, not hidden (CA#35)", () => {
+  // Backdating "Bill from" to 1 September for work that started on 3 October
+  // was saved, and the sweep then wrote nothing for September, because a
+  // period is billed only for the days the work ran. Nothing said so.
+  it("says the work's start, and that nothing before it is billed", () => {
+    expect(scheduleNotice("2026-09-01", "2026-10-03")).toBe(
+      "This work started on 3 October 2026, and a period is billed only for the days the work ran. " +
+        "So nothing before 3 October 2026 is billed, even though billing is set from 1 September 2026.",
+    );
+  });
+
+  it("says nothing when billing starts on or after the work's first day", () => {
+    expect(scheduleNotice("2026-10-01", "2026-10-01")).toBeNull();
+    expect(scheduleNotice("2026-11-01", "2026-10-03")).toBeNull();
   });
 });

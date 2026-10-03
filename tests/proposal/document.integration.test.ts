@@ -388,6 +388,8 @@ describe("the columns 0084 added", () => {
       { frequency: "quarterly", net: "25000.0000", lineCount: 1, unpricedLineCount: 0 },
       { frequency: "annually", net: "50000.0000", lineCount: 1, unpricedLineCount: 0 },
     ]);
+    // A year of it (CA#42): four quarters and the annual fee.
+    expect(view.annualValue).toBe("150000.0000");
 
     // The issuer, and where it is registered: the seeded fallback has no
     // legal-entity row, so the answer is null rather than a guess.

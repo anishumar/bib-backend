@@ -79,7 +79,9 @@ const InvoiceSchema = z
         "one issued, and both stay readable.",
     }),
     financialYear: z.number().int().openapi({
-      description: "The financial year whose series the number is (or will be) drawn from, chosen at the draft.",
+      description:
+        "The financial year whose series the number was drawn from. On a draft it is provisional: " +
+        "issuing takes the year of the issue date, in the firm's own financial year (B03).",
     }),
     sequenceNumber: z.number().int().nullable(),
     status: z.enum(STATUS_VALUES),
@@ -157,6 +159,17 @@ const InvoiceRecordSchema = z
     letters: z.array(z.object({ id: z.string().uuid(), ref: z.string() })).openapi({
       description: "The engagement letters this invoice's lines bill, by reference (0318).",
     }),
+    taxSuggestions: z
+      .object({
+        companyDefault: Decimal.nullable(),
+        byEngagement: z.array(z.object({ engagementId: z.string().uuid(), taxPercent: Decimal })),
+      })
+      .openapi({
+        description:
+          "The tax rate a line added by hand starts at (CA#5), by the automatic advance's rule: the " +
+          "rate last invoiced on that engagement, else the issuing company's default tax rate (Your " +
+          "firm), else none. A tax rate is a statutory fact, not a price: never redacted.",
+      }),
   })
   .openapi("InvoiceRecord");
 
@@ -211,14 +224,19 @@ const RaiseInvoiceRequest = z
     partyId: z.string().uuid(),
     entityPartyId: z.string().uuid(),
     currency: z.string().length(3),
-    fxRate: Decimal,
-    fxRateDate: z.string(),
+    fxRate: Decimal.optional().openapi({
+      description:
+        "How many of the firm's reporting currency one unit of `currency` was worth. REQUIRED when " +
+        "`currency` is not the firm's reporting currency (FX_RATE_REQUIRED, 400; it used to default " +
+        "to 1, B07); in the reporting currency leave it out (it is 1; anything else is FX_RATE_NOT_ONE).",
+    }),
+    fxRateDate: z.string().optional().openapi({ description: "The day the rate is from. Defaults to today." }),
     dueOn: z.string().optional(),
     notes: z.string().max(2000).optional(),
     seriesDate: z.string().optional().openapi({
       description:
-        "Which financial year's series this belongs to. Defaults to today; a firm raising an " +
-        "invoice on 2 April for March's work sets it deliberately.",
+        "The draft's provisional financial year (defaults to today). It does not decide the " +
+        "number: an invoice is numbered in the series of the year it is ISSUED in (B03).",
     }),
     managerUserId: z.string().uuid().nullable().optional().openapi({
       description:
@@ -260,8 +278,8 @@ const raiseRoute = createRoute({
   description:
     "A DRAFT, with no number (0322). The number comes from a gapless per-entity, " +
     "per-financial-year series when the invoice is ISSUED, taken under a row lock inside the " +
-    "same transaction as the issue, so a draft cancelled before issue spends nothing. " +
-    "`seriesDate` chooses which financial year's series it will be numbered in.",
+    "same transaction as the issue, so a draft cancelled before issue spends nothing, and in the " +
+    "series of the year the issue date falls in (the firm's financial year, else 1 April).",
   request: {
     query: CallerDayQuery,
     body: { content: { "application/json": { schema: RaiseInvoiceRequest } }, required: true },
@@ -368,7 +386,9 @@ const issueRoute = createRoute({
   description:
     "Refuses an invoice with no lines: it would ask the client for nothing. The date on it is " +
     "the caller's `asOf`, or the firm's day. This is when the number is drawn (0322): the next " +
-    "in the draft's series, in the same transaction as the issue.",
+    "in the draft's series, in the same transaction as the issue. A draft whose due date is before " +
+    "the issue date is refused (DUE_BEFORE_ISSUE, 409: change it with PUT /due-date); one with no " +
+    "due date takes the firm's payment terms when it has set them (0327), else stays without one.",
   request: { params: z.object({ invoiceId: z.string().uuid() }), query: CallerDayQuery },
   responses: {
     200: { description: "Issued", content: { "application/json": { schema: InvoiceSchema } } },
@@ -376,7 +396,7 @@ const issueRoute = createRoute({
     403: errorResponse("No org selected, or the role does not permit it"),
     404: errorResponse("No such invoice at this firm"),
     400: errorResponse("asOf is not today anywhere"),
-    409: errorResponse("Not a draft, or it has no lines"),
+    409: errorResponse("Not a draft, it has no lines, or its due date is before today's issue date"),
   },
 });
 
@@ -429,6 +449,40 @@ const setManagerRoute = createRoute({
     403: errorResponse("No org selected, or the role does not permit it"),
     404: errorResponse("No such invoice at this firm"),
     409: errorResponse("The invoice is no longer a draft, or the person is not active staff here"),
+  },
+});
+
+const setDueDateRoute = createRoute({
+  method: "put",
+  path: "/api/v1/invoices/{invoiceId}/due-date",
+  tags: ["invoices"],
+  summary: "Set, change or clear a draft's due date",
+  description:
+    "Drafts only (INVOICE_NOT_EDITABLE, 409, once issued: the due date is what was sent). Today or " +
+    "later (DUE_DATE_IN_THE_PAST, 400); null clears it. A draft whose due date has passed by the " +
+    "time it is issued is refused at issue (DUE_BEFORE_ISSUE), so this is how it is fixed. Writes " +
+    "`invoice.due_date_set` when it changes (audit 2026-10-03, B20/B21).",
+  request: {
+    params: z.object({ invoiceId: z.string().uuid() }),
+    query: CallerDayQuery,
+    body: {
+      content: {
+        "application/json": {
+          schema: z
+            .object({ dueOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable() })
+            .openapi("SetInvoiceDueDateRequest"),
+        },
+      },
+      required: true,
+    },
+  },
+  responses: {
+    200: { description: "Saved", content: { "application/json": { schema: InvoiceSchema } } },
+    400: errorResponse("Not a day, or a day already past"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such invoice at this firm"),
+    409: errorResponse("The invoice is no longer a draft"),
   },
 });
 
@@ -552,7 +606,8 @@ const BalanceSchema = z
     invoiced: Decimal.nullable(),
     paid: Decimal.nullable(),
     credited: Decimal.nullable(),
-    /** invoiced − paid − credited, computed by Postgres. Never a stored column:
+    /** invoiced − paid − credited, computed by Postgres, for an ISSUED invoice;
+     *  0 for a draft or a cancelled one (0326, B22). Never a stored column:
      *  a `paid` flag drifts the first time a payment is corrected. */
     outstanding: Decimal.nullable(),
   })
@@ -628,7 +683,9 @@ const creditNoteRoute = createRoute({
   description:
     "Its own document with its own gapless series. The reason is mandatory and closed — " +
     "without it revenue leakage is invisible, because the numbers always reconcile and why " +
-    "does not. A firm cannot credit more than it billed.",
+    "does not. A firm cannot credit more than it billed. `issuedOn` (default today) must be on " +
+    "or after the invoice's issue date and not after today (CREDIT_NOTE_DATE_OUT_OF_RANGE, 400); " +
+    "it is numbered in the series of its own date's year.",
   request: {
     params: z.object({ invoiceId: z.string().uuid() }),
     query: CallerDayQuery,
@@ -737,6 +794,11 @@ const PendingDunningSchema = z
     outstanding: Decimal.nullable(),
     currency: z.string().length(3),
     dueOn: z.string().nullable(),
+    invoiceStatus: z.enum(STATUS_VALUES).openapi({
+      description:
+        "The invoice as it stands now. A step on an invoice cancelled since (outstanding 0) can " +
+        "only be rejected (DUNNING_NOTHING_OWED, 409, on approve).",
+    }),
   })
   .openapi("PendingDunningAction");
 
@@ -804,7 +866,10 @@ const decideDunningRoute = createRoute({
     401: errorResponse("Not signed in"),
     403: errorResponse("No org selected, or the role does not permit it"),
     404: errorResponse("No such dunning action at this firm"),
-    409: errorResponse("Not awaiting approval, or already decided"),
+    409: errorResponse(
+      "Not awaiting approval, already decided, or (approving) the invoice was cancelled or is paid " +
+        "in full since the step fired (DUNNING_NOTHING_OWED): reject it instead",
+    ),
   },
 });
 
@@ -937,6 +1002,19 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
     return c.json(toInvoiceBody(saved, seesFees(c.get("principal"))), 200);
   });
 
+  app.openapi(setDueDateRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const saved = await deps.service.setDueDate(
+      s.tenantId,
+      c.req.valid("param").invoiceId,
+      c.req.valid("json").dueOn,
+      s.actor,
+      c.req.valid("query").asOf,
+    );
+    return c.json(toInvoiceBody(saved, seesFees(c.get("principal"))), 200);
+  });
+
   app.openapi(registerIrnRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
@@ -1060,6 +1138,7 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
           outstanding: fees ? a.outstanding : null,
           currency: a.currency,
           dueOn: a.dueOn,
+          invoiceStatus: a.invoiceStatus,
         })),
       },
       200,
@@ -1199,5 +1278,12 @@ function toRecordBody(record: InvoiceRecord, fees: boolean): z.infer<typeof Invo
         ? null
         : { userId: record.manager.userId, displayName: record.manager.displayName, email: record.manager.email },
     letters: record.letters.map((l) => ({ id: l.id, ref: l.ref })),
+    taxSuggestions: {
+      companyDefault: record.taxSuggestions.companyDefault,
+      byEngagement: record.taxSuggestions.byEngagement.map((t) => ({
+        engagementId: t.engagementId,
+        taxPercent: t.taxPercent,
+      })),
+    },
   };
 }

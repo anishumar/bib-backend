@@ -212,3 +212,29 @@ describe("the billing sweep", () => {
     ]);
   });
 });
+
+describe("a long schedule pages forward (B23, audit 2026-10-03)", () => {
+  // Periods were always counted from `billingFrom` and capped at 60, so a
+  // monthly engagement got no bill from month 61 (five years) on, silently.
+  it("writes at most 60 bills a pass and carries on from the last one the next pass", async () => {
+    const w = world({ now: "2026-12-05T06:00:00.000Z" });
+    w.dues.add(
+      FIRM,
+      subject({
+        billingFrom: "2020-01-01",
+        firstInvoiceOn: "2020-02-01",
+        engagements: [engagement({ effectiveFrom: "2020-01-01" })],
+      }),
+    );
+    // January 2020 to November 2026: 83 months whose bill date has come.
+    expect((await w.service.sweep())[0]?.created).toBe(60);
+    expect((await w.service.sweep())[0]?.created).toBe(23);
+    expect((await w.service.sweep())[0]?.created).toBe(0);
+    const starts = w.dues.dues.map((d) => d.periodStart).sort();
+    expect(starts[0]).toBe("2020-01-01");
+    expect(starts.at(-1)).toBe("2026-11-01");
+    expect(new Set(starts).size).toBe(83);
+    // Each bill is dated the month after its period, wherever the page began.
+    expect(w.dues.dues.find((d) => d.periodStart === "2026-11-01")?.billOn).toBe("2026-12-01");
+  });
+});

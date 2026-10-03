@@ -25,7 +25,9 @@ import {
   DunningActionNotFound,
   DunningAlreadyDecided,
   DunningNotAwaitingApproval,
+  DunningNothingOwed,
 } from "../../domain/invoice/errors";
+import { compareAmounts } from "../../domain/money/model";
 import type {
   DunningActionRecord,
   DunningLadderSource,
@@ -225,6 +227,19 @@ export class DunningService {
     // `dunning_action_decided_chk` refuses, and it should never get that far.
     if (actor.type !== "human" || actor.id === null) {
       throw new DunningNotAwaitingApproval(input.actionId, existing.action);
+    }
+
+    // ONLY OVER MONEY STILL OWED (B22). A hold approved over a cancelled or
+    // settled invoice is a hold over nothing; rejecting stays open.
+    if (input.approve) {
+      const invoice = await this.deps.invoices.find(input.tenantId, existing.invoiceId);
+      const balance = await this.deps.invoices.balanceOf(input.tenantId, existing.invoiceId);
+      if (invoice === null || invoice.status !== "issued") {
+        throw new DunningNothingOwed(invoice?.number ?? null, "cancelled");
+      }
+      if (balance !== null && compareAmounts(balance.outstanding, "0") <= 0) {
+        throw new DunningNothingOwed(invoice.number, "settled");
+      }
     }
 
     const decided = await this.deps.dunning.decide(

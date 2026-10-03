@@ -66,9 +66,11 @@ export interface BillingSweepReport {
   readonly failure?: string;
 }
 
-/** How far back one subject may reach in one pass. A schedule set years in
+/** How many bills one subject may get in one pass. A schedule set years in
  *  the past is a typo far more often than a decade of unbilled work, and the
- *  bound keeps one bad date from writing thousands of rows. */
+ *  bound keeps one bad date from writing thousands of rows at once. It bounds
+ *  a PASS, not the schedule (B23): the next pass carries on from the last bill
+ *  written. It counted periods from `billingFrom`, so month 61 never came. */
 const MAX_PERIODS_PER_SUBJECT = 60;
 
 export class BillingService {
@@ -110,15 +112,22 @@ export class BillingService {
       if (subject.firstInvoiceOn > today) continue;
 
       const span = monthsPerPeriod(recurrence);
-      const count = Math.min(MAX_PERIODS_PER_SUBJECT, Math.floor(monthsBetween(subject.firstInvoiceOn, today) / span) + 1);
+      // EVERY period from `billingFrom` whose bill date has come (a schedule's
+      // dates are 2000 to 2099, so at most a few hundred strings), each dated
+      // by its place in the schedule; then the ones not billed yet, oldest
+      // first, at most MAX a pass.
+      const count = Math.floor(monthsBetween(subject.firstInvoiceOn, today) / span) + 1;
       const periods = periodsFrom(subject.billingFrom, recurrence, count, fiscalYearStartMonth ?? 1);
+      const billed = new Set(subject.duePeriodStarts);
       const dues = billingDues({
         periods,
         spanMonths: span,
         firstInvoiceOn: subject.firstInvoiceOn,
         today,
         windows: subject.engagements.map(serviceWindowOf),
-      }).filter((d) => !subject.duePeriodStarts.includes(d.period.start));
+      })
+        .filter((d) => !billed.has(d.period.start))
+        .slice(0, MAX_PERIODS_PER_SUBJECT);
       if (dues.length === 0) continue;
 
       const manager = await this.managerFor(tenantId, subject, today, managers);

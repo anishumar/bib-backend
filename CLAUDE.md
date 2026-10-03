@@ -1737,9 +1737,10 @@ read it as a suppressed sale.
 was created, so an automatic draft a firm then cancelled left a cancelled number in the series,
 which is why the billing desk only ever wrote bills. GST's consecutive-serial rule is about
 ISSUED tax invoices, and a draft is not one (Tally and Zoho number at issue too). Now
-`InvoiceRepository.create` writes an UNNUMBERED draft (its financial year, "which year's
-books", is still chosen there) and `InvoiceRepository.issue` **both allocates and writes**: the
-next number of the draft's series, in the same transaction as the status change. The
+`InvoiceRepository.create` writes an UNNUMBERED draft (its financial year there is only
+provisional) and `InvoiceRepository.issue` **both allocates and writes**: the next number of
+the series of the ISSUE DATE's year (audit 2026-10-03, B03, 0326), in the same transaction as
+the status change. The
 mechanism is a counter row taken under `SELECT … FOR UPDATE`: a second writer blocks until the
 first commits or rolls back, and a rollback releases the number because the counter never
 moved. **Never a sequence** — `nextval` survives rollback by design, which is what makes it
@@ -1753,9 +1754,11 @@ The series is per **(entity, financial year)**, because two of a firm's companie
 their own returns and each owes its own consecutive series. Both correctly issue
 `INV/2026-27/0001`, which is why `UNIQUE` is scoped to `(tenant, entity, number)`; the
 `prefix` on the series row is how a firm tells them apart when it wants to. The financial
-year is 1 April and that is hardcoded — right for India, wrong for the UK and the US, and
-generalising it through `core.legal_entity.financial_year_end` would make a series' year
-depend on a mutable column, which is a decision a firm has to take.
+year is the FIRM's (its compliance policy's `fiscalYearStartMonth`), else 1 April as before;
+read at issue, so changing it moves only numbers not yet drawn. A year starting in January is
+labelled as one year (`INV/2027/0001`). It is per firm, not per company: a firm whose
+companies keep different years (an Indian April year beside a Gulf calendar year) numbers all
+of them on the firm's, which is a decision still to take.
 
 **The number, the series and an issued invoice's money are frozen by a trigger** (0322 admits
 one change: an empty number filled in the same write that issues the draft), not by a
@@ -1784,6 +1787,39 @@ invoice number an auditor cannot account for. **Its reason is mandatory and clos
 without it the numbers always reconcile and *why* money came off does not — and "how much did
 we write off to service failures" is a GROUP BY, which free text cannot answer. The reason
 travels in the ledger payload for the same reason.
+
+## Invoice correctness (audit 2026-10-03, billing cluster; 0325-0327)
+
+Every rule below came from the audit of 3 October 2026 (`bib/qa/audit-2026-10-03/`,
+`fix-billing.md`), each with a test.
+
+- **Whole minor units (B02, 0325).** `crm.invoice_line_amount` rounds each line's gross, net
+  and tax (on the rounded net) half up to the currency's minor unit
+  (`crm.currency_minor_unit`: INR 2, JPY 0, KWD 3), at scale 4 on the wire; every total is a
+  sum of rounded lines. Before, tax kept four places and 0.003 stayed owed for ever.
+- **Positions among live lines (B04/B36, 0326)**: a partial unique index; `addLine` holds the
+  invoice row before `MAX(position)+1`.
+- **The year at issue (B03)**, above. A credit note is dated between its invoice's issue and
+  today (`CREDIT_NOTE_DATE_OUT_OF_RANGE`, B45) and numbered in its own date's year.
+- **Money on it, no cancelling (B05, 0326)**: `INVOICE_HAS_PAYMENTS`; a trigger refuses it too,
+  and the payment guard reads the invoice `FOR SHARE`. Reverse a mistaken payment first.
+- **Outstanding means issued (B22, 0326)**: `crm.invoice_balance.outstanding` is 0 for a draft or
+  a cancelled invoice; approving a credit hold over nothing owed is `DUNNING_NOTHING_OWED`; the
+  portal policy admits only invoices that were issued (F06).
+- **A credit note on an advance (B06/B15)** gives back only what bills have not taken
+  (`CREDIT_EXCEEDS_UNUSED_ADVANCE`), checked in the writing transaction under the invoice row
+  and the advance's advisory lock.
+- **The rate (B07)**: required when the currency is not the reporting one (`FX_RATE_REQUIRED`),
+  exactly 1 otherwise (`FX_RATE_NOT_ONE`).
+- **Due dates (B20/B21, 0327)**: `PUT /invoices/{id}/due-date` on a draft (today or later);
+  issue refuses a due date before the issue date (`DUE_BEFORE_ISSUE`); the firm's own payment
+  terms `tenancy.tenant.invoice_due_days` (NO default) fill an empty due date at issue.
+- **The desk** raises in ONE transaction (`raiseAtomically`, B34), lets a claim go only with its
+  token (B35), pages forward past 60 periods (B23), says when "Bill from" is before the work
+  started (CA#35), and the invoice read suggests a manual line's tax (`taxSuggestions`, CA#5).
+- **Quantity is how many each billing period** (the user, 2026-10-03, F03): a monthly line bills
+  quantity x fee x (1 - discount) every month. The screens say so; the demo seed uses 1.
+- The payment `reference` stays out of the ledger (`hasReference`, B26).
 
 ## Billing by company — the one dashboard figure cut by MONTH (Wave 5, 2026-09-29)
 

@@ -4,6 +4,8 @@
 import type { BillingTiming, ManagerHow, SpocWithManager } from "../../domain/billing/model";
 import type { AdvancePolicy, AdvanceStage, BillKind } from "../../domain/billing/advance";
 import type { Actor } from "../../domain/ledger/model";
+import type { Invoice } from "../../domain/invoice/model";
+import type { NewInvoice, NewInvoiceLine } from "../invoice/ports";
 
 /**
  * Something that is billed on a schedule: one engagement priced on its own, or
@@ -266,6 +268,40 @@ export interface DueFilters {
   } | undefined;
 }
 
+/**
+ * One raise, written as ONE transaction (B34): the bills the advance pays in
+ * full marked covered, and the draft invoice with a line per remaining bill,
+ * each bill marked raised on its line. It was several transactions, so a crash
+ * or a conflict half-way left a draft with some lines, or a "less advance"
+ * line on no bill. A bill somebody else settled meanwhile is left out and
+ * reported; the draft is written only when at least one bill goes on it.
+ */
+export interface RaisePlan {
+  readonly draft: NewInvoice | null;
+  readonly covered: readonly {
+    readonly dueId: string;
+    readonly applied: { readonly invoiceId: string; readonly amount: string };
+  }[];
+  readonly invoiced: readonly {
+    readonly dueId: string;
+    readonly line: NewInvoiceLine;
+    readonly applied: { readonly invoiceId: string; readonly amount: string } | null;
+  }[];
+}
+
+export interface RaiseWritten {
+  /** The draft, when any bill went on it. */
+  readonly invoice: Invoice | null;
+  readonly covered: readonly string[];
+  readonly invoiced: readonly { readonly dueId: string; readonly lineId: string }[];
+  /** Bills somebody else settled meanwhile, or whose advance ran out. */
+  readonly conflicts: readonly string[];
+}
+
+/** Whose claim it is (B35): an opaque token `claim` hands back and `release`
+ *  must show. Null from `claim` means somebody else holds a bill. */
+export type ClaimToken = string;
+
 export interface BillingDueDesk {
   list(tenantId: string, filters: DueFilters): Promise<readonly BillingDueRecord[]>;
   findMany(tenantId: string, ids: readonly string[]): Promise<readonly BillingDueRecord[]>;
@@ -282,6 +318,8 @@ export interface BillingDueDesk {
     invoiceLineId: string | null,
     applied?: { readonly invoiceId: string; readonly amount: string } | null,
   ): Promise<boolean>;
+  /** A whole raise in one transaction (B34); see `RaisePlan`. */
+  raiseAtomically(tenantId: string, plan: RaisePlan): Promise<RaiseWritten>;
   /** The advance paid this bill in full: no invoice (0320). Same re-check. */
   markCovered(
     tenantId: string,
@@ -304,9 +342,13 @@ export interface BillingDueDesk {
    * number is drawn, so a second raise of the same bill, or of a bill taking the
    * same advance, is refused while nothing is numbered.
    */
-  claim(tenantId: string, dueIds: readonly string[]): Promise<boolean>;
-  /** Let them go again; always called once the settling is over. */
-  release(tenantId: string, dueIds: readonly string[]): Promise<void>;
+  claim(tenantId: string, dueIds: readonly string[]): Promise<ClaimToken | null>;
+  /**
+   * Let them go again; always called once the settling is over. ONLY the claim
+   * this token names (B35): a request that ran past the claim's lifetime must
+   * not clear a newer request's claim on the same bills.
+   */
+  release(tenantId: string, dueIds: readonly string[], token: ClaimToken): Promise<void>;
   /** How an invoice is already used by bills (0321): as some bill's advance
    *  invoice, and how many bills name it as theirs. */
   invoiceUse(tenantId: string, invoiceId: string): Promise<{ readonly asAdvance: boolean; readonly byBills: number }>;
@@ -316,7 +358,8 @@ export interface BillingDueDesk {
  *  `setup/` so every rule an invoice has (the issuer, the client, the
  *  currency, the gapless number) is applied exactly as for a hand-raised one. */
 export interface InvoiceDrafter {
-  raise(
+  /** Every rule a new draft answers to, and its row, unwritten (B34). */
+  prepareDraft(
     input: {
       readonly tenantId: string;
       readonly partyId: string;
@@ -330,17 +373,21 @@ export interface InvoiceDrafter {
       /** Always true from the desk: the bills resolved the manager. */
       readonly managerFromBills?: boolean | undefined;
     },
-    actor: Actor,
-  ): Promise<{ readonly id: string; readonly number: string | null }>;
-  addLine(input: {
-    readonly tenantId: string;
-    readonly invoiceId: string;
-    readonly engagementId?: string | undefined;
-    readonly description: string;
-    readonly quantity: string;
-    readonly unitAmount: string;
-    readonly taxPercent?: string | undefined;
-  }): Promise<{ readonly id: string }>;
+  ): Promise<NewInvoice>;
+  /** Every rule a line answers to, for that unwritten draft, and its row. */
+  prepareLine(
+    draft: NewInvoice,
+    input: {
+      readonly tenantId: string;
+      readonly engagementId?: string | undefined;
+      readonly description: string;
+      readonly quantity: string;
+      readonly unitAmount: string;
+      readonly taxPercent?: string | undefined;
+    },
+  ): Promise<NewInvoiceLine>;
+  /** The ledger's `invoice.raised`, once the draft's transaction committed. */
+  recordRaised(invoice: Invoice, actor: Actor): Promise<void>;
   find(
     tenantId: string,
     invoiceId: string,
@@ -601,4 +648,8 @@ export interface AutoBillingSetting {
   /** Switching on also records the firm's day it went on (0321), `since`:
    *  final bills are written only for work finished from then. */
   set(tenantId: string, on: boolean, since: string): Promise<void>;
+  /** The firm's own payment terms (0327): days from an invoice's date to its
+   *  due date when none was typed. Null: none. */
+  dueInDays(tenantId: string): Promise<number | null>;
+  setDueInDays(tenantId: string, days: number | null): Promise<void>;
 }

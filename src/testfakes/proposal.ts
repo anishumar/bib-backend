@@ -387,6 +387,7 @@ export class FakeProposalRepo implements ProposalRepository {
       },
       issuedOn: (proposal.sentAt ?? "2026-06-01T09:00:00.000Z").slice(0, 10),
       totalsByFrequency: totalsByFrequencyOf(lines),
+      annualValue: annualValueOf(lines),
       depts: this.axes
         .filter((a) => a.axis === "dept")
         .map((a) => ({ code: a.code, name: a.name, sortOrder: a.sortOrder })),
@@ -1007,6 +1008,23 @@ function totalsByFrequencyOf(
     }
     return [{ frequency, net: fromScaled(net), lineCount: at.length, unpricedLineCount: unpriced }];
   });
+}
+
+/** A year of the recurring fees (CA#42), as the adapter's SQL adds it. */
+function annualValueOf(
+  lines: readonly Pick<ProposalLine, "unitAmount" | "quantity" | "discountPercent" | "billingFrequency">[],
+): string | null {
+  const perYear: Partial<Record<string, bigint>> = { monthly: 12n, quarterly: 4n, annually: 1n };
+  let total = 0n;
+  let any = false;
+  for (const line of lines) {
+    const times = line.billingFrequency === null ? undefined : perYear[line.billingFrequency];
+    const lineNet = netScaled(line);
+    if (times === undefined || lineNet === null) continue;
+    total += lineNet * times;
+    any = true;
+  }
+  return any ? fromScaled(total) : null;
 }
 
 /**

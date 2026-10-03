@@ -47,6 +47,7 @@ import {
 import { FinalBiller } from "../../src/usecase/billing/final";
 import { BillingDeskService } from "../../src/usecase/billing/desk";
 import { InvoiceService } from "../../src/usecase/invoice/service";
+import { PostgresInvoiceFirmSettings } from "../../src/infrastructure/postgres/invoice-settings";
 import type { Actor } from "../../src/domain/ledger/model";
 import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
 import { FakeStaffDirectory } from "../../src/testfakes/lead";
@@ -117,12 +118,14 @@ const invoicing = new InvoiceService({
   events,
   issuedCopies: { file: () => Promise.resolve() },
   staff: new FakeStaffDirectory(),
+  settings: new PostgresInvoiceFirmSettings(app),
 });
 const desk = new BillingDeskService({
   desk: deskAdapter,
   invoices: {
-    raise: (input, actor) => invoicing.raise(input, actor),
-    addLine: (input) => invoicing.addLine(input),
+    prepareDraft: (input) => invoicing.prepareDraft(input),
+    prepareLine: (draft, input) => invoicing.prepareLine(draft, input),
+    recordRaised: (invoice, actor) => invoicing.recordRaised(invoice, actor),
     find: (t, id) => invoiceRepository.find(t, id),
     issueCreditNote: (input, actor) => invoicing.issueCreditNote(input, actor),
   },
@@ -539,7 +542,10 @@ describe("an advance cancelled and raised again (0321)", () => {
     await expect(desk.link({ tenantId, dueId: oct, invoiceId: first }, me)).rejects.toBeInstanceOf(InvoiceDoesNotFitDue);
     await raiseAndIssue(oct);
 
-    // The advance invoice was wrong: cancelled, and raised again from its bill.
+    // The advance invoice was wrong: its payment is moved off it (a refund on
+    // it, B05: a paid invoice is not cancelled), it is cancelled, and raised
+    // again from its bill.
+    await invoicing.recordPayment({ tenantId, invoiceId: first, amount: "-23600", receivedOn: "2026-12-06", method: "bank_transfer" }, me);
     await invoicing.cancel(tenantId, first, { type: "human", id: admin });
     const second = await raiseAndIssue(advId);
     const [pool] = await owner<{ remaining: string; applied: string }[]>`
@@ -564,6 +570,7 @@ describe("an advance cancelled and raised again (0321)", () => {
     const oct = await periodDue(booksId, "10");
     expect((await desk.raise({ tenantId, dueIds: [oct], lines: [{ dueId: oct, taxPercent: "18" }] }, me)).covered).toEqual([oct]);
 
+    await invoicing.recordPayment({ tenantId, invoiceId: adv, amount: "-59000", receivedOn: "2026-12-06", method: "bank_transfer" }, me);
     await invoicing.cancel(tenantId, adv, { type: "human", id: admin });
     expect((await desk.list({ tenantId, filters: { status: "all" } })).dues.find((d) => d.id === oct)?.status).toBe("open");
     const out = await desk.raise({ tenantId, dueIds: [oct], lines: [{ dueId: oct, taxPercent: "18" }] }, me);
@@ -696,5 +703,109 @@ describe("a claim on a bill that is not there (0321)", () => {
     await expect(
       desk.skip({ tenantId, dueId: "00000000-0000-4000-8000-000000000001", reason: "probe" }, me),
     ).rejects.toMatchObject({ code: "BILLING_DUE_NOT_FOUND" });
+  });
+});
+
+describe("a credit note on an advance (B06, B15, audit 2026-10-03)", () => {
+  // The plain credit-note route capped a credit at invoiced - credited and
+  // never asked what the advance had already paid for. Advance 40,000 (47,200
+  // with tax), October takes 30,000 of it: a credit note of 23,600 was issued
+  // and the advance pool went to -10,000: the client got the advance back and
+  // kept the deduction. And the cap was read in one transaction and the credit
+  // note written in another, with no lock.
+  async function advanceWithOctoberTaken() {
+    const { letterId, advId, booksId } = await advancedLetter("40000");
+    const adv = await raiseAndIssue(advId);
+    await invoicing.recordPayment({ tenantId, invoiceId: adv, amount: "47200", receivedOn: "2026-12-05", method: "bank_transfer" }, me);
+    const oct = await periodDue(booksId, "10");
+    expect((await desk.raise({ tenantId, dueIds: [oct], lines: [{ dueId: oct, taxPercent: "18" }] }, me)).covered).toEqual([oct]);
+    return { letterId, adv };
+  }
+
+  it("refuses to credit what bills have already taken, in plain words", async () => {
+    const { letterId, adv } = await advanceWithOctoberTaken();
+    const refused = await invoicing
+      .issueCreditNote({ tenantId, invoiceId: adv, amount: "23600", reason: "advance_refund" }, me)
+      .catch((e: unknown) => e);
+    expect(refused).toMatchObject({ code: "CREDIT_EXCEEDS_UNUSED_ADVANCE" });
+    expect((refused as Error).message).toContain("INR 11,800.00");
+
+    // What is left with its tax may go back, and the pool reaches 0, not below.
+    await invoicing.issueCreditNote({ tenantId, invoiceId: adv, amount: "11800", reason: "advance_refund" }, me);
+    const [pool] = await owner<{ remaining: string }[]>`
+      SELECT remaining::text FROM crm.advance_pool WHERE engagement_letter_id = ${letterId}
+    `;
+    expect(pool?.remaining).toBe("0.00");
+  });
+
+  it("lets only one of two credit notes for the last of it through at the same moment", async () => {
+    const { adv } = await advanceWithOctoberTaken();
+    const both = await Promise.allSettled(
+      [0, 1].map(() => invoicing.issueCreditNote({ tenantId, invoiceId: adv, amount: "11800", reason: "advance_refund" }, me)),
+    );
+    expect(both.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const rejected = both.find((r) => r.status === "rejected");
+    expect(rejected?.status === "rejected" ? rejected.reason : null).toMatchObject({ code: "CREDIT_EXCEEDS_UNUSED_ADVANCE" });
+  });
+});
+
+describe("a claim is let go only by whoever holds it (B35, audit 2026-10-03)", () => {
+  it("does not clear a newer request's claim when an older, slow one finishes", async () => {
+    // A raise that ran past the two-minute claim lifetime cleared whatever
+    // claim was on its bills when it finished, including a newer request's.
+    const { booksId } = await advancedLetter("1000");
+    const oct = await periodDue(booksId, "10");
+    const slow = await deskAdapter.claim(tenantId, [oct]);
+    expect(slow).not.toBeNull();
+    // Two minutes pass: the slow claim has lapsed, and somebody else claims.
+    await owner`UPDATE crm.billing_due SET claimed_at = claimed_at - interval '3 minutes' WHERE id = ${oct}`;
+    const fresh = await deskAdapter.claim(tenantId, [oct]);
+    expect(fresh).not.toBeNull();
+
+    await deskAdapter.release(tenantId, [oct], slow ?? "");
+    const [row] = await owner<{ held: boolean }[]>`SELECT claimed_at IS NOT NULL AS held FROM crm.billing_due WHERE id = ${oct}`;
+    expect(row?.held).toBe(true);
+
+    await deskAdapter.release(tenantId, [oct], fresh ?? "");
+    const [after] = await owner<{ held: boolean }[]>`SELECT claimed_at IS NOT NULL AS held FROM crm.billing_due WHERE id = ${oct}`;
+    expect(after?.held).toBe(false);
+  });
+});
+
+describe("a raise is one transaction (B34, audit 2026-10-03)", () => {
+  it("leaves no draft, no line and no bill marked when a write fails half-way", async () => {
+    // It was several transactions: create the draft, add lines, mark bills.
+    // A crash or a conflict half-way left a draft with some lines, or a bill
+    // marked raised on an invoice that billed something else.
+    const { booksId } = await advancedLetter("1000");
+    const oct = await periodDue(booksId, "10");
+    const nov = await periodDue(booksId, "11");
+    const draft = await invoicing.prepareDraft({
+      tenantId, partyId: client, entityPartyId: firm, currency: "INR", fxRate: "1", fxRateDate: "2026-12-05",
+    });
+    const line = (description: string) =>
+      invoicing.prepareLine(draft, { tenantId, description, quantity: "1", unitAmount: "30000", taxPercent: "18" });
+    const good = await line("Bookkeeping, Oct 2026");
+    // The second line names an engagement that is not there: its insert fails
+    // on the foreign key, after the draft, the first line and October were written.
+    const broken = { ...(await line("Bookkeeping, Nov 2026")), engagementId: systemIds.newId() };
+
+    await expect(
+      deskAdapter.raiseAtomically(tenantId, {
+        draft,
+        covered: [],
+        invoiced: [
+          { dueId: oct, line: good, applied: null },
+          { dueId: nov, line: broken, applied: null },
+        ],
+      }),
+    ).rejects.toThrow();
+
+    const [invoices] = await owner<{ n: number }[]>`SELECT count(*)::int AS n FROM crm.invoice WHERE id = ${draft.id}`;
+    expect(invoices?.n).toBe(0);
+    const [lines] = await owner<{ n: number }[]>`SELECT count(*)::int AS n FROM crm.invoice_line WHERE invoice_id = ${draft.id}`;
+    expect(lines?.n).toBe(0);
+    const [bill] = await owner<{ invoice_id: string | null }[]>`SELECT invoice_id FROM crm.billing_due WHERE id = ${oct}`;
+    expect(bill?.invoice_id).toBeNull();
   });
 });

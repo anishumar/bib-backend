@@ -1738,7 +1738,7 @@ describe("who a letter and an invoice name, in the database (F-10-1, 0306)", () 
       fxRateDate: "2026-07-01",
       dueOn: null,
       notes: null,
-      seriesDate: "2026-07-01",
+      financialYear: 2026,
     };
     const issuedByClient = await invoices
       .create({ ...draft, id: systemIds.newId(), partyId: entityA1, entityPartyId: partyA })
@@ -1762,7 +1762,7 @@ describe("who a letter and an invoice name, in the database (F-10-1, 0306)", () 
       fxRateDate: "2026-07-01",
       dueOn: null,
       notes: null,
-      seriesDate: "2026-07-01",
+      financialYear: 2026,
       entityPartyId: firmEntityA,
     };
     const acmes = await invoices.create({ ...base, id: systemIds.newId(), partyId: partyA });
@@ -1957,5 +1957,46 @@ describe("a letter the client accepted outside bib, in the database (0317)", () 
       SELECT count(*)::int AS n FROM crm.recorded_acceptance WHERE engagement_letter_id = ${other}
     `);
     expect(seen[0]?.n).toBe(0);
+  });
+});
+
+describe("the classic letter's totals (B46, audit 2026-10-03)", () => {
+  // The classic letter summed every line with Number() and printed one
+  // "Total" with toFixed(2), adding a monthly fee to a one-time one: a figure
+  // nobody owes. It now prints one total per billing frequency, summed by the
+  // database, and the one "Total" only when every priced line bills alike.
+  const source = new PostgresRenderSource(app, () => Promise.resolve(null));
+
+  it("prints a total per frequency, never one mixed sum", async () => {
+    const letter = await service.draft(
+      {
+        tenantId: tenantA, partyId: partyA, jurisdiction: "IN", title: "Acme, mixed fees",
+        currency: "INR", fxRate: "1", fxRateDate: "2026-07-01", advanceRequired: false,
+      },
+      SYSTEM_ACTOR,
+    );
+    await owner`UPDATE crm.engagement_letter SET layout = 'classic' WHERE id = ${letter.id}`;
+    const line = (description: string, unitAmount: string, billingFrequency: string) =>
+      service.addLine({
+        tenantId: tenantA, letterId: letter.id, entityPartyId: entityA1, serviceVersionId: gstV1,
+        description, quantity: "1", unitAmount, discountPercent: "0", billingFrequency,
+      });
+    await line("Bookkeeping", "22500.10", "monthly");
+    await line("GST returns", "6000.20", "monthly");
+    await line("Incorporation", "15000", "one_time");
+
+    const described = await source.describe({ tenantId: tenantA, kind: "engagement_letter", subjectRef: letter.id });
+    expect(described?.document.totals).toEqual([
+      { label: "Total, monthly", value: "INR 28,500.30", emphasis: true },
+      { label: "Total, one-off", value: "INR 15,000.00", emphasis: true },
+    ]);
+  });
+
+  it("keeps the one Total when every priced line bills alike", async () => {
+    const id = await signedLetter(undefined, "classic");
+    const described = await source.describe({ tenantId: tenantA, kind: "engagement_letter", subjectRef: id });
+    const totals = described?.document.totals ?? [];
+    expect(totals).toHaveLength(1);
+    expect(totals[0]?.label).toBe("Total");
   });
 });

@@ -8,6 +8,8 @@ import type { SpocWithManager } from "../domain/billing/model";
 import { DEFAULT_ADVANCE_POLICY, type AdvancePolicy } from "../domain/billing/advance";
 import { compareAmounts, subtractAmounts } from "../domain/money/model";
 import type { Actor } from "../domain/ledger/model";
+import type { Invoice } from "../domain/invoice/model";
+import type { NewInvoice, NewInvoiceLine } from "../usecase/invoice/ports";
 import type {
   AdvanceBillFacts,
   AdvanceDigestLetter,
@@ -39,6 +41,8 @@ import type {
   RefundCandidate,
   ScheduleRecord,
   WorkRelease,
+  RaisePlan,
+  RaiseWritten,
 } from "../usecase/billing/ports";
 
 export interface StoredDue extends NewBillingDue {
@@ -239,6 +243,49 @@ export class FakeBillingDueDesk implements BillingDueDesk {
     return Promise.resolve(true);
   }
 
+  /** The adapter's one transaction, as the fake's own marks (B34). The draft
+   *  itself is the drafter's (it recorded it when prepared). */
+  async raiseAtomically(t: string, plan: RaisePlan): Promise<RaiseWritten> {
+    const covered: string[] = [];
+    const conflicts: string[] = [];
+    const invoiced: { dueId: string; lineId: string }[] = [];
+    for (const c of plan.covered) {
+      if (await this.markCovered(t, c.dueId, c.applied)) covered.push(c.dueId);
+      else conflicts.push(c.dueId);
+    }
+    for (const item of plan.invoiced) {
+      if (plan.draft !== null && (await this.markInvoiced(t, item.dueId, plan.draft.id, item.line.id, item.applied))) {
+        invoiced.push({ dueId: item.dueId, lineId: item.line.id });
+      } else {
+        conflicts.push(item.dueId);
+      }
+    }
+    const d = plan.draft;
+    const invoice: Invoice | null =
+      d === null || invoiced.length === 0
+        ? null
+        : {
+            id: d.id,
+            tenantId: d.tenantId,
+            partyId: d.partyId,
+            entityPartyId: d.entityPartyId,
+            number: null,
+            financialYear: d.financialYear,
+            sequenceNumber: null,
+            status: "draft",
+            currency: d.currency,
+            fxRate: d.fxRate,
+            fxRateDate: d.fxRateDate,
+            issuedOn: null,
+            dueOn: d.dueOn,
+            irn: null,
+            irnRegisteredAt: null,
+            notes: d.notes,
+            managerUserId: d.managerUserId ?? null,
+          };
+    return { invoice, covered, invoiced, conflicts };
+  }
+
   markCovered(_t: string, dueId: string, applied: { readonly invoiceId: string; readonly amount: string }): Promise<boolean> {
     const i = this.rows.findIndex((r) => r.id === dueId);
     const row = this.rows[i];
@@ -300,24 +347,29 @@ export class FakeBillingDueDesk implements BillingDueDesk {
   readonly heldElsewhere = new Set<string>();
   /** Every claim and release, in order, so a test sees what was held. */
   readonly claims: { readonly op: "claim" | "release"; readonly ids: readonly string[] }[] = [];
-  private readonly held = new Set<string>();
+  /** Held bill to the token of the claim holding it. */
+  private readonly heldBy = new Map<string, string>();
+  private tokens = 0;
 
-  claim(_t: string, dueIds: readonly string[]): Promise<boolean> {
-    if (dueIds.some((id) => this.held.has(id) || this.heldElsewhere.has(id))) return Promise.resolve(false);
-    for (const id of dueIds) this.held.add(id);
+  claim(_t: string, dueIds: readonly string[]): Promise<string | null> {
+    if (dueIds.some((id) => this.heldBy.has(id) || this.heldElsewhere.has(id))) return Promise.resolve(null);
+    this.tokens += 1;
+    const token = `claim-${String(this.tokens)}`;
+    for (const id of dueIds) this.heldBy.set(id, token);
     this.claims.push({ op: "claim", ids: [...dueIds] });
-    return Promise.resolve(true);
+    return Promise.resolve(token);
   }
 
-  release(_t: string, dueIds: readonly string[]): Promise<void> {
-    for (const id of dueIds) this.held.delete(id);
+  /** As the adapter: only the bills this token still holds (B35). */
+  release(_t: string, dueIds: readonly string[], token: string): Promise<void> {
+    for (const id of dueIds) if (this.heldBy.get(id) === token) this.heldBy.delete(id);
     this.claims.push({ op: "release", ids: [...dueIds] });
     return Promise.resolve();
   }
 
   /** Held right now (a test asserts it is empty after an act). */
   get holding(): readonly string[] {
-    return [...this.held];
+    return [...this.heldBy.keys()];
   }
 
   invoiceUse(_t: string, invoiceId: string): Promise<{ readonly asAdvance: boolean; readonly byBills: number }> {
@@ -356,9 +408,10 @@ export class FakeInvoiceDrafter implements InvoiceDrafter {
   /** Who asked for each draft, in order. */
   readonly actors: Actor[] = [];
 
-  raise(input: Parameters<InvoiceDrafter["raise"]>[0], actor: Actor): Promise<{ id: string; number: string | null }> {
+  /** Drafts are recorded here as they are prepared (the real draft is
+   *  written by the desk's one transaction, B34); `recordRaised` says who. */
+  prepareDraft(input: Parameters<InvoiceDrafter["prepareDraft"]>[0]): Promise<NewInvoice> {
     this.n += 1;
-    this.actors.push(actor);
     const id = `00000000-0000-4000-8000-${String(this.n).padStart(12, "0")}`;
     const invoice: DraftedInvoice = {
       id,
@@ -374,11 +427,28 @@ export class FakeInvoiceDrafter implements InvoiceDrafter {
       lines: [],
     };
     this.invoices.push(invoice);
-    return Promise.resolve({ id, number: invoice.number });
+    return Promise.resolve({
+      id,
+      tenantId: input.tenantId,
+      partyId: input.partyId,
+      entityPartyId: input.entityPartyId,
+      currency: input.currency,
+      fxRate: input.fxRate,
+      fxRateDate: input.fxRateDate,
+      dueOn: input.dueOn ?? null,
+      notes: null,
+      managerUserId: input.managerUserId ?? null,
+      financialYear: 2026,
+    });
   }
 
-  addLine(input: Parameters<InvoiceDrafter["addLine"]>[0]): Promise<{ id: string }> {
-    const invoice = this.invoices.find((i) => i.id === input.invoiceId);
+  recordRaised(_invoice: Invoice, actor: Actor): Promise<void> {
+    this.actors.push(actor);
+    return Promise.resolve();
+  }
+
+  prepareLine(draft: NewInvoice, input: Parameters<InvoiceDrafter["prepareLine"]>[1]): Promise<NewInvoiceLine> {
+    const invoice = this.invoices.find((i) => i.id === draft.id);
     if (invoice === undefined) return Promise.reject(new Error("no such invoice"));
     const id = `00000000-0000-4000-9000-${String(this.invoices.indexOf(invoice) * 100 + invoice.lines.length + 1).padStart(12, "0")}`;
     invoice.lines.push({
@@ -388,7 +458,18 @@ export class FakeInvoiceDrafter implements InvoiceDrafter {
       unitAmount: input.unitAmount,
       taxPercent: input.taxPercent,
     });
-    return Promise.resolve({ id });
+    return Promise.resolve({
+      id,
+      tenantId: input.tenantId,
+      invoiceId: draft.id,
+      engagementId: input.engagementId ?? null,
+      description: input.description,
+      quantity: input.quantity,
+      unitAmount: input.unitAmount,
+      currency: draft.currency,
+      discountPercent: "0",
+      taxPercent: input.taxPercent ?? "0",
+    });
   }
 
   readonly creditNotes: { invoiceId: string; amount: string; reason: string; note: string | undefined }[] = [];
@@ -698,6 +779,19 @@ export class FakeAutoBillingSetting implements AutoBillingSetting {
     if (on) this.on.add(tenantId);
     else this.on.delete(tenantId);
     if (on && since !== undefined) this.since.set(tenantId, since);
+    return Promise.resolve();
+  }
+
+  /** Each firm's payment terms (0327); none until a test sets them. */
+  readonly dueDays = new Map<string, number>();
+
+  dueInDays(tenantId: string): Promise<number | null> {
+    return Promise.resolve(this.dueDays.get(tenantId) ?? null);
+  }
+
+  setDueInDays(tenantId: string, days: number | null): Promise<void> {
+    if (days === null) this.dueDays.delete(tenantId);
+    else this.dueDays.set(tenantId, days);
     return Promise.resolve();
   }
 }

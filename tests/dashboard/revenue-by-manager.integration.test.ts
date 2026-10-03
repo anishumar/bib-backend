@@ -175,7 +175,12 @@ beforeAll(async () => {
 
   const cancelled = await invoice({ ...A, manager: mona, unit: "50000", taxPercent: "0", status: "issued", issuedOn: "2026-09-06" });
   await pay(firmA, cancelled, "5000", "INR", "2026-09-07");
-  await owner`UPDATE crm.invoice SET status = 'cancelled' WHERE id = ${cancelled}`;
+  // A paid invoice cancelled BEFORE 0326 (B05 refuses it since; the audit found
+  // 16 such rows): written with the triggers off, as the data already stands.
+  await owner.begin(async (tx) => {
+    await tx`SET LOCAL session_replication_role = replica`;
+    await tx`UPDATE crm.invoice SET status = 'cancelled' WHERE id = ${cancelled}`;
+  });
 
   draft = await invoice({ ...A, manager: mona, unit: "70000", taxPercent: "18", status: "draft", issuedOn: null });
   await invoice({ ...A, manager: zubin, unit: "8000", taxPercent: "0", status: "issued", issuedOn: "2026-08-20" });

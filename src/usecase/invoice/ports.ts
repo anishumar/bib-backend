@@ -27,14 +27,50 @@ export interface NewInvoice {
   /** Whose revenue (0318). Absent: nobody named. */
   readonly managerUserId?: string | null | undefined;
   /**
-   * The date whose FINANCIAL YEAR decides which series this invoice belongs to.
-   *
-   * Passed in rather than read from a clock inside the adapter, because it is a
-   * business fact — "which year's books does this belong to" — and a firm
-   * raising an invoice on 2 April for March's work is deciding it, not
-   * discovering it.
+   * The financial year the draft is filed under until it is issued. PROVISIONAL
+   * since the audit of 2026-10-03 (B03): issuing re-derives it from the issue
+   * date, in the same transaction that draws the number, so a March draft
+   * issued in April is numbered in April's year.
    */
-  readonly seriesDate: string;
+  readonly financialYear: number;
+}
+
+/**
+ * A credit note, or why its amount is more than may be credited (B06, B15):
+ * checked inside the transaction that writes it, under the invoice's row lock
+ * and the advance's lock, so two credits cannot both take the last of it.
+ * `maxCredit` is what may still be credited; `takenByBills` (with its tax) is
+ * set when the invoice is an advance part of which later bills already took.
+ */
+export type CreditNoteOutcome =
+  | { readonly credit: CreditNote }
+  | { readonly maxCredit: string; readonly takenByBills: string | null };
+
+/** A cancellation, or the money that stopped it (B05). */
+export type CancelOutcome = { readonly cancelled: Invoice } | { readonly paid: string };
+
+/** What `issue` writes besides the status: the day, the year that day falls
+ *  in (and the month that year starts in, for the number's label), and the due
+ *  date to fill in when the draft has none (the firm's terms, or null). */
+export interface IssueOn {
+  readonly issuedOn: string;
+  readonly financialYear: number;
+  readonly fiscalYearStartMonth: number;
+  readonly dueOnIfUnset: string | null;
+}
+
+/**
+ * What invoicing needs to know about the firm itself (audit 2026-10-03).
+ * `fiscalYearStartMonth` is the compliance policy's (null when the firm has not
+ * said, which numbers on 1 April as before); `dueInDays` is the firm's own
+ * payment terms (null: no default, never a guessed number).
+ */
+export interface InvoiceFirmSettings {
+  invoiceSettingsFor(tenantId: string): Promise<{
+    readonly reportingCurrency: string;
+    readonly fiscalYearStartMonth: number | null;
+    readonly dueInDays: number | null;
+  }>;
 }
 
 export interface NewInvoiceLine {
@@ -68,6 +104,15 @@ export interface InvoiceRecord {
   /** The engagement letters its lines bill, by reference (0318): an invoice
    *  can always be traced back to what the client signed. */
   readonly letters: readonly { readonly id: string; readonly ref: string }[];
+  /**
+   * The tax rate a line typed by hand starts at (CA#5), by 0322's own rule for
+   * the automatic advance: the rate last invoiced on that work, else the
+   * issuing company's default (Your firm), else nothing (the person types it).
+   */
+  readonly taxSuggestions: {
+    readonly companyDefault: string | null;
+    readonly byEngagement: readonly { readonly engagementId: string; readonly taxPercent: string }[];
+  };
 }
 
 export interface InvoiceLineRecord {
@@ -169,8 +214,8 @@ export interface EngagementBilling {
 
 export interface InvoiceRepository {
   /**
-   * Create the DRAFT, in its company's series for the financial year of
-   * `seriesDate`, with NO number (0322): the number is drawn by `issue`. A
+   * Create the DRAFT, filed under a provisional financial year, with NO
+   * number (0322): the number is drawn by `issue`. A
    * draft cancelled before issue therefore spends nothing, which is what lets a
    * draft be made by the system (the advance at signing) without a cancelled
    * number ever sitting in the series.
@@ -202,9 +247,17 @@ export interface InvoiceRepository {
    * The same reasoning `AssignmentStrategy.assign` gives for choosing and
    * recording being one method, reached from money instead of from fairness.
    */
-  issue(tenantId: string, invoiceId: string, issuedOn: string): Promise<Invoice>;
-  cancel(tenantId: string, invoiceId: string): Promise<Invoice>;
+  issue(tenantId: string, invoiceId: string, on: IssueOn): Promise<Invoice>;
+  /**
+   * Cancel it, unless it is ISSUED and money was received against it (B05):
+   * then nothing changes and the net paid comes back. Checked under the
+   * invoice's row lock, so a payment recorded at the same moment cannot slip
+   * between the check and the write (a trigger refuses it too).
+   */
+  cancel(tenantId: string, invoiceId: string): Promise<CancelOutcome>;
   registerIrn(tenantId: string, invoiceId: string, irn: string, at: string): Promise<Invoice>;
+  /** A DRAFT's due date (null: none). `status = 'draft'` in the write (B20). */
+  setDueOn(tenantId: string, invoiceId: string, dueOn: string | null): Promise<Invoice>;
   /** A DRAFT's manager (null: nobody). `status = 'draft'` in the write. */
   setManager(tenantId: string, invoiceId: string, managerUserId: string | null): Promise<Invoice>;
 
@@ -223,7 +276,7 @@ export interface InvoiceRepository {
    * legal document with its own consecutive series, so it cannot borrow the
    * invoice counter and cannot be numbered by a caller.
    */
-  issueCreditNote(c: NewCreditNote): Promise<CreditNote>;
+  issueCreditNote(c: NewCreditNote): Promise<CreditNoteOutcome>;
   listCreditNotes(tenantId: string, invoiceId: string): Promise<readonly CreditNote[]>;
 
   /** What one invoice still owes, computed by Postgres. */
@@ -270,8 +323,10 @@ export interface NewCreditNote {
   readonly issuedOn: string;
   readonly reason: CreditReason;
   readonly note: string | null;
-  /** Which financial year's credit-note series this belongs to. */
-  readonly seriesDate: string;
+  /** Which financial year's credit-note series this belongs to: its OWN
+   *  date's (B45), and the month that year starts in, for the label. */
+  readonly financialYear: number;
+  readonly fiscalYearStartMonth: number;
 }
 
 export interface InvoiceSeriesRecord {
@@ -310,6 +365,9 @@ export interface PendingDunningRecord {
   readonly outstanding: string;
   readonly currency: string;
   readonly dueOn: string | null;
+  /** The invoice as it stands now: a step on an invoice cancelled since is one
+   *  to reject (B22), and the screen says why. */
+  readonly invoiceStatus: InvoiceStatus;
 }
 
 export interface NewDunningAction {

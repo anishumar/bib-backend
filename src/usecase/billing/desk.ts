@@ -24,6 +24,7 @@ import type { EventSink } from "../ledger/ports";
 import { dayInZone } from "../../domain/scheduler/zone";
 import { addDays, periodsFrom, recurrenceOfService } from "../../domain/scheduler/model";
 import { isCalendarDay } from "../../domain/engagement/model";
+import { scheduleNotice } from "../../domain/billing/model";
 import { compareAmounts, isAmount, isExchangeRate } from "../../domain/money/model";
 import {
   advancePolicyProblem,
@@ -91,6 +92,8 @@ export interface BillingSettings {
   readonly autoBilling: boolean;
   readonly advancePolicy: AdvancePolicy;
   readonly taxDefaults: readonly { readonly entityPartyId: string; readonly taxPercent: string }[];
+  /** The firm's own payment terms in days (0327); null: none, never a guess. */
+  readonly invoiceDueDays: number | null;
 }
 
 /** A week: an untouched bill then shows to the manager's own manager too
@@ -269,14 +272,15 @@ export class BillingDeskService {
     for (const id of ids) {
       if (!seen.some((d) => d.id === id)) throw new BillingDueNotFound(id);
     }
-    const claimed = [...ids, ...poolsOf(seen)];
-    if (!(await this.deps.desk.claim(input.tenantId, claimed))) {
-      throw new BillBusy("one of these bills, or the advance it is taken off,");
-    }
+    const first = [...ids, ...poolsOf(seen)];
+    const token = await this.deps.desk.claim(input.tenantId, first);
+    if (token === null) throw new BillBusy("one of these bills, or the advance it is taken off,");
+    // Every claim this raise makes, each let go with its own token (B35).
+    const claims: { ids: string[]; token: string }[] = [{ ids: first, token }];
     try {
-      return await this.raiseClaimed(input, ids, claimed, actor);
+      return await this.raiseClaimed(input, ids, claims, actor);
     } finally {
-      await this.deps.desk.release(input.tenantId, claimed);
+      for (const c of claims) await this.deps.desk.release(input.tenantId, c.ids, c.token);
     }
   }
 
@@ -286,7 +290,7 @@ export class BillingDeskService {
   private async raiseClaimed(
     input: RaiseFromDuesInput,
     ids: readonly string[],
-    claimed: string[],
+    claims: { ids: string[]; token: string }[],
     actor: Actor,
   ): Promise<{
     readonly invoiceId: string | null;
@@ -300,12 +304,11 @@ export class BillingDeskService {
     }
     // An advance a bill now takes from that was not held (another advance ran
     // out meanwhile): hold it too, or refuse.
-    const extra = poolsOf(found).filter((id) => !claimed.includes(id));
+    const extra = poolsOf(found).filter((id) => !claims.some((c) => c.ids.includes(id)));
     if (extra.length > 0) {
-      if (!(await this.deps.desk.claim(input.tenantId, extra))) {
-        throw new BillBusy("the advance these bills are taken off");
-      }
-      claimed.push(...extra);
+      const token = await this.deps.desk.claim(input.tenantId, extra);
+      if (token === null) throw new BillBusy("the advance these bills are taken off");
+      claims.push({ ids: extra, token });
     }
     const dues = [...found].sort(
       (a, b) =>
@@ -375,15 +378,55 @@ export class BillingDeskService {
     const coveredInFull = planned.filter((p) => p.applied !== null && compareAmounts(p.balance, "0") === 0);
     const toInvoice = planned.filter((p) => !coveredInFull.includes(p));
 
-    const conflicts: string[] = [];
-    const covered: string[] = [];
-    for (const p of coveredInFull) {
-      if (p.applied === null) continue;
-      if (!(await this.deps.desk.markCovered(input.tenantId, p.due.id, p.applied))) {
-        conflicts.push(p.due.id);
-        continue;
+    // EVERY RULE FIRST, NOTHING WRITTEN (B34): the draft and each line are
+    // checked and built here, then written with the bills they settle in ONE
+    // transaction. It was several, so a crash or a refusal half-way left a
+    // draft with some lines, or a "less advance" line on no bill.
+    const draft =
+      toInvoice.length === 0
+        ? null
+        : await this.deps.invoices.prepareDraft({
+            tenantId: input.tenantId,
+            partyId: first.party.id,
+            entityPartyId: first.issuer.id,
+            currency: first.currency,
+            fxRate: rate.fxRate,
+            fxRateDate: rate.fxRateDate,
+            dueOn: input.dueOn,
+            asOf: input.asOf,
+            managerUserId: manager ?? undefined,
+            managerFromBills: true,
+          });
+    const lines: { p: (typeof toInvoice)[number]; line: Awaited<ReturnType<InvoiceDrafter["prepareLine"]>> }[] = [];
+    if (draft !== null) {
+      for (const p of toInvoice) {
+        const line = await this.deps.invoices.prepareLine(draft, {
+          tenantId: input.tenantId,
+          engagementId: p.due.engagementIds[0],
+          description: lineDescription(p.due, p.applied === null ? null : { invoiceNumber: p.applied.invoiceNumber }),
+          quantity: "1",
+          unitAmount: p.balance,
+          taxPercent: p.tax,
+        });
+        lines.push({ p, line });
       }
-      covered.push(p.due.id);
+    }
+    // Settled in the write's own WHERE: somebody who raised or skipped a due
+    // in the same minute keeps their answer, and it is reported. The advance
+    // each takes is re-checked there too, under a lock.
+    const written = await this.deps.desk.raiseAtomically(input.tenantId, {
+      draft,
+      covered: coveredInFull.flatMap((p) => (p.applied === null ? [] : [{ dueId: p.due.id, applied: p.applied }])),
+      invoiced: lines.map(({ p, line }) => ({
+        dueId: p.due.id,
+        line,
+        applied: p.applied === null ? null : { invoiceId: p.applied.invoiceId, amount: p.applied.amount },
+      })),
+    });
+
+    // The ledger, after the commit.
+    for (const p of coveredInFull) {
+      if (p.applied === null || !written.covered.includes(p.due.id)) continue;
       await this.deps.events.recordEvent({
         tenantId: input.tenantId,
         verb: "billing_due.covered",
@@ -392,42 +435,12 @@ export class BillingDeskService {
         payload: { advanceInvoiceId: p.applied.invoiceId, advanceApplied: p.applied.amount },
       });
     }
-    if (toInvoice.length === 0) return { invoiceId: null, number: null, covered, conflicts };
-
-    const invoice = await this.deps.invoices.raise(
-      {
-        tenantId: input.tenantId,
-        partyId: first.party.id,
-        entityPartyId: first.issuer.id,
-        currency: first.currency,
-        fxRate: rate.fxRate,
-        fxRateDate: rate.fxRateDate,
-        dueOn: input.dueOn,
-        asOf: input.asOf,
-        managerUserId: manager ?? undefined,
-        managerFromBills: true,
-      },
-      actor,
-    );
-
-    for (const p of toInvoice) {
-      const line = await this.deps.invoices.addLine({
-        tenantId: input.tenantId,
-        invoiceId: invoice.id,
-        engagementId: p.due.engagementIds[0],
-        description: lineDescription(p.due, p.applied === null ? null : { invoiceNumber: p.applied.invoiceNumber }),
-        quantity: "1",
-        unitAmount: p.balance,
-        taxPercent: p.tax,
-      });
-      // Settled in the write's own WHERE: somebody who raised or skipped this
-      // due in the same minute keeps their answer, and it is reported. The
-      // advance it took is re-checked there too, under a lock.
+    const invoice = written.invoice;
+    if (invoice !== null) await this.deps.invoices.recordRaised(invoice, actor);
+    for (const { p } of lines) {
+      const on = written.invoiced.find((w) => w.dueId === p.due.id);
+      if (on === undefined || invoice === null) continue;
       const applied = p.applied === null ? null : { invoiceId: p.applied.invoiceId, amount: p.applied.amount };
-      if (!(await this.deps.desk.markInvoiced(input.tenantId, p.due.id, invoice.id, line.id, applied))) {
-        conflicts.push(p.due.id);
-        continue;
-      }
       await this.deps.events.recordEvent({
         tenantId: input.tenantId,
         verb: "billing_due.invoiced",
@@ -435,7 +448,7 @@ export class BillingDeskService {
         actor,
         payload: {
           invoiceId: invoice.id,
-          invoiceLineId: line.id,
+          invoiceLineId: on.lineId,
           how: "raised",
           ...(applied === null ? {} : { advanceInvoiceId: applied.invoiceId, advanceApplied: applied.amount }),
           // A price the letter fixed, billed at another figure (0321): both, so
@@ -444,7 +457,12 @@ export class BillingDeskService {
         },
       });
     }
-    return { invoiceId: invoice.id, number: invoice.number, covered, conflicts };
+    return {
+      invoiceId: invoice?.id ?? null,
+      number: invoice?.number ?? null,
+      covered: written.covered,
+      conflicts: written.conflicts,
+    };
   }
 
   /**
@@ -467,11 +485,12 @@ export class BillingDeskService {
     },
     actor: Actor,
   ): Promise<void> {
-    if (!(await this.deps.desk.claim(input.tenantId, [input.dueId]))) throw new BillBusy("this bill");
+    const token = await this.deps.desk.claim(input.tenantId, [input.dueId]);
+    if (token === null) throw new BillBusy("this bill");
     try {
       await this.linkClaimed(input, actor);
     } finally {
-      await this.deps.desk.release(input.tenantId, [input.dueId]);
+      await this.deps.desk.release(input.tenantId, [input.dueId], token);
     }
   }
 
@@ -564,7 +583,8 @@ export class BillingDeskService {
     const reason = input.reason.trim();
     if (reason.length === 0) throw new InvalidBillingInput("Say why this bill is being skipped.");
     if (reason.length > 500) throw new InvalidBillingInput("Keep the reason to 500 characters.");
-    if (!(await this.deps.desk.claim(input.tenantId, [input.dueId]))) throw new BillBusy("this bill");
+    const token = await this.deps.desk.claim(input.tenantId, [input.dueId]);
+    if (token === null) throw new BillBusy("this bill");
     try {
       const due = await this.openDue(input.tenantId, input.dueId);
       if (due.kind === "advance" && due.advanceHoldsWork) throw new AdvanceNotSkippable();
@@ -580,7 +600,7 @@ export class BillingDeskService {
         payload: { partyId: due.party.id, periodStart: due.periodStart },
       });
     } finally {
-      await this.deps.desk.release(input.tenantId, [input.dueId]);
+      await this.deps.desk.release(input.tenantId, [input.dueId], token);
     }
   }
 
@@ -604,7 +624,8 @@ export class BillingDeskService {
     // Held while the credit note is written (0321): a double click credited
     // the same remainder twice. The second waits out the claim, then finds
     // nothing left.
-    if (!(await this.deps.desk.claim(input.tenantId, [input.dueId]))) throw new BillBusy("this advance");
+    const token = await this.deps.desk.claim(input.tenantId, [input.dueId]);
+    if (token === null) throw new BillBusy("this advance");
     try {
       const c = await this.refundCandidate(input.tenantId, input.dueId);
       return await this.deps.invoices.issueCreditNote(
@@ -619,7 +640,7 @@ export class BillingDeskService {
         actor,
       );
     } finally {
-      await this.deps.desk.release(input.tenantId, [input.dueId]);
+      await this.deps.desk.release(input.tenantId, [input.dueId], token);
     }
   }
 
@@ -634,7 +655,8 @@ export class BillingDeskService {
     if (reason.length > 500) throw new InvalidBillingInput("Keep the reason to 500 characters.");
     if (actor.type !== "human" || actor.id === null) throw new InvalidBillingInput("A person decides to keep an advance.");
     const by = actor.id;
-    if (!(await this.deps.desk.claim(input.tenantId, [input.dueId]))) throw new BillBusy("this advance");
+    const token = await this.deps.desk.claim(input.tenantId, [input.dueId]);
+    if (token === null) throw new BillBusy("this advance");
     try {
       const c = await this.refundCandidate(input.tenantId, input.dueId);
       if (!(await this.deps.desk.waiveRefund(input.tenantId, c.advance.id, by, reason))) {
@@ -648,7 +670,7 @@ export class BillingDeskService {
         payload: { partyId: c.advance.party.id, invoiceId: c.invoice.id, remaining: c.remaining },
       });
     } finally {
-      await this.deps.desk.release(input.tenantId, [input.dueId]);
+      await this.deps.desk.release(input.tenantId, [input.dueId], token);
     }
   }
 
@@ -679,7 +701,7 @@ export class BillingDeskService {
       readonly firstInvoiceOn: string | null;
     },
     actor: Actor,
-  ): Promise<ScheduleRecord> {
+  ): Promise<ScheduleRecord & { readonly notice: string | null }> {
     const current = await this.deps.schedules.find(input.tenantId, input.engagementId);
     if (current === null) throw new BillingEngagementNotFound(input.engagementId);
 
@@ -734,7 +756,9 @@ export class BillingDeskService {
     }
     const after = await this.deps.schedules.find(input.tenantId, input.engagementId);
     if (after === null) throw new BillingEngagementNotFound(input.engagementId);
-    return after;
+    // SAID, NOT HIDDEN (CA#35): a "Bill from" before the work started bills
+    // nothing for those days, and the sweep used to just write no bill.
+    return { ...after, notice: billingFrom === null ? null : scheduleNotice(billingFrom, after.effectiveFrom) };
   }
 
   // ── The switch, and the advance's settings ───────────────────────────────
@@ -744,12 +768,35 @@ export class BillingDeskService {
   }
 
   async settings(tenantId: string): Promise<BillingSettings> {
-    const [autoBilling, advancePolicy, taxDefaults] = await Promise.all([
+    const [autoBilling, advancePolicy, taxDefaults, invoiceDueDays] = await Promise.all([
       this.deps.setting.isOn(tenantId),
       this.deps.policy.policyFor(tenantId),
       this.deps.taxDefaults.list(tenantId),
+      this.deps.setting.dueInDays(tenantId),
     ]);
-    return { autoBilling, advancePolicy, taxDefaults };
+    return { autoBilling, advancePolicy, taxDefaults, invoiceDueDays };
+  }
+
+  /**
+   * The firm's own payment terms (B20, 0327): an invoice issued with no due
+   * date is due this many days after its date. Null clears it. No default:
+   * 7, 15 or 30 days is the firm's commercial fact, not ours.
+   */
+  async setInvoiceDueDays(tenantId: string, days: number | null, actor: Actor): Promise<number | null> {
+    if (days !== null && (!Number.isInteger(days) || days < 0 || days > 365)) {
+      throw new InvalidBillingInput("Payment terms are a whole number of days from 0 (due on receipt) to 365.");
+    }
+    const from = await this.deps.setting.dueInDays(tenantId);
+    if (from === days) return days;
+    await this.deps.setting.setDueInDays(tenantId, days);
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "tenant.invoice_due_days_set",
+      objectId: tenantId,
+      actor,
+      payload: { from, to: days },
+    });
+    return days;
   }
 
   /** How the firm's advances are chased (0322): its own numbers, checked. */

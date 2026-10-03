@@ -43,6 +43,7 @@ import {
 import { PostgresInvoiceRepository } from "../../src/infrastructure/postgres/invoice-repository";
 import { PostgresRenderSource } from "../../src/infrastructure/postgres/render-source";
 import { InvoiceService } from "../../src/usecase/invoice/service";
+import { PostgresInvoiceFirmSettings } from "../../src/infrastructure/postgres/invoice-settings";
 import type { Actor } from "../../src/domain/ledger/model";
 import { FakeStaffDirectory } from "../../src/testfakes/lead";
 
@@ -401,13 +402,15 @@ describe("the billing desk on a real database (0318)", () => {
     events: new RecordingEventSink(),
     issuedCopies: { file: () => Promise.resolve() },
     staff: new FakeStaffDirectory(),
+    settings: new PostgresInvoiceFirmSettings(app),
   });
   const deskAdapter = new PostgresBillingDueDesk(app);
   const desk = new BillingDeskService({
     desk: deskAdapter,
     invoices: {
-      raise: (input, actor) => invoicing.raise(input, actor),
-      addLine: (input) => invoicing.addLine(input),
+      prepareDraft: (input) => invoicing.prepareDraft(input),
+      prepareLine: (draft, input) => invoicing.prepareLine(draft, input),
+      recordRaised: (invoice, actor) => invoicing.recordRaised(invoice, actor),
       find: (t, id) => invoiceRepository.find(t, id),
       issueCreditNote: (input, actor) => invoicing.issueCreditNote(input, actor),
     },
@@ -497,6 +500,20 @@ describe("the billing desk on a real database (0318)", () => {
     expect(after[0]?.invoice).toMatchObject({ id: invoiceId, status: "draft" });
     // The next bill for this engagement offers the rate it was billed at.
     expect(after[0]?.lastTaxPercent).toBe("18.00");
+  });
+
+  it("offers a manual line the rate last used on that work, else the company's default (CA#5)", async () => {
+    // A line typed by hand started at 0% tax although the firm had saved 18%:
+    // a hurried accounts person issued a tax invoice with no tax on it.
+    const record = await new PostgresInvoiceRepository(app).describe(tenantId, invoiceId);
+    expect(record?.taxSuggestions.byEngagement).toEqual([{ engagementId: monthly, taxPercent: "18.00" }]);
+    expect(record?.taxSuggestions.companyDefault).toBeNull();
+    await owner`
+      INSERT INTO crm.issuer_tax_default (tenant_id, entity_party_id, tax_percent) VALUES (${tenantId}, ${firm}, 12)
+    `;
+    const after = await new PostgresInvoiceRepository(app).describe(tenantId, invoiceId);
+    await owner`DELETE FROM crm.issuer_tax_default WHERE tenant_id = ${tenantId}`;
+    expect(after?.taxSuggestions.companyDefault).toBe("12.00");
   });
 
   it("refuses to raise a due that is already on an invoice", async () => {

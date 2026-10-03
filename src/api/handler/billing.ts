@@ -259,6 +259,14 @@ const ScheduleSchema = z
   })
   .openapi("BillingSchedule");
 
+const ScheduleSetSchema = ScheduleSchema.extend({
+  notice: z.string().nullable().openapi({
+    description:
+      "Plain words to show the person who set it, or null: e.g. that \"Bill from\" is before the work " +
+      "started, so nothing before the start is billed (a period is billed only for the days the work ran).",
+  }),
+}).openapi("BillingScheduleSet");
+
 const UnscheduledSchema = ScheduleSchema.extend({
   suggestion: z
     .object({ billingFrom: z.string(), firstInvoiceOn: z.string(), periodLabel: z.string() })
@@ -333,7 +341,7 @@ const scheduleRoute = createRoute({
     },
   },
   responses: {
-    200: { description: "Set", content: { "application/json": { schema: ScheduleSchema } } },
+    200: { description: "Set", content: { "application/json": { schema: ScheduleSetSchema } } },
     400: errorResponse("Not a real date, or only one of the two given"),
     401: errorResponse("Not signed in"),
     403: errorResponse("No org selected, or the role does not permit it"),
@@ -628,6 +636,11 @@ const SettingsSchema = z
     taxDefaults: z.array(TaxDefaultSchema).openapi({
       description: "Each company's default tax rate. A company with none gets no automatic advance draft.",
     }),
+    invoiceDueDays: z.number().int().nullable().openapi({
+      description:
+        "The firm's own payment terms (0327): an invoice issued with no due date is due this many " +
+        "days after its date. Null (the default) means none: no due date unless a person types one.",
+    }),
   })
   .openapi("BillingSettings");
 
@@ -661,6 +674,9 @@ const putSettingsRoute = createRoute({
               autoBilling: z.boolean().optional(),
               advancePolicy: AdvancePolicySchema.optional(),
               taxDefaults: z.array(TaxDefaultSchema).max(50).optional(),
+              invoiceDueDays: z.number().int().min(0).max(365).nullable().optional().openapi({
+                description: "Payment terms in days (0 = due on receipt); null clears them.",
+              }),
             })
             .openapi("SetBillingSettings"),
         },
@@ -788,6 +804,7 @@ function settingsBody(s: BillingSettings) {
       digestHour: s.advancePolicy.digestHour,
     },
     taxDefaults: s.taxDefaults.map((t) => ({ entityPartyId: t.entityPartyId, taxPercent: t.taxPercent })),
+    invoiceDueDays: s.invoiceDueDays,
   };
 }
 
@@ -890,7 +907,7 @@ export function registerBillingRoutes(app: OpenAPIHono<AppEnv>, deps: BillingDep
       },
       s.actor,
     );
-    return c.json(scheduleBody(set), 200);
+    return c.json({ ...scheduleBody(set), notice: set.notice }, 200);
   });
 
   app.openapi(raiseRoute, async (c) => {
@@ -1018,6 +1035,9 @@ export function registerBillingRoutes(app: OpenAPIHono<AppEnv>, deps: BillingDep
     const body = c.req.valid("json");
     if (body.autoBilling !== undefined) await deps.service.setAutoBilling(s.tenantId, body.autoBilling, s.actor);
     if (body.advancePolicy !== undefined) await deps.service.setAdvancePolicy(s.tenantId, body.advancePolicy, s.actor);
+    if (body.invoiceDueDays !== undefined) {
+      await deps.service.setInvoiceDueDays(s.tenantId, body.invoiceDueDays, s.actor);
+    }
     for (const t of body.taxDefaults ?? []) {
       await deps.service.setTaxDefault(
         { tenantId: s.tenantId, entityPartyId: t.entityPartyId, taxPercent: t.taxPercent },

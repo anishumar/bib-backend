@@ -39,7 +39,15 @@ export type InvoiceErrorCode =
   | "ENGAGEMENT_OF_ANOTHER_ISSUER"
   | "ENGAGEMENT_IN_ANOTHER_CURRENCY"
   | "MANAGER_NOT_STAFF"
-  | "INVOICE_MANAGER_FROZEN";
+  | "INVOICE_MANAGER_FROZEN"
+  | "CREDIT_NOTE_DATE_OUT_OF_RANGE"
+  | "INVOICE_HAS_PAYMENTS"
+  | "DUNNING_NOTHING_OWED"
+  | "CREDIT_EXCEEDS_UNUSED_ADVANCE"
+  | "FX_RATE_REQUIRED"
+  | "FX_RATE_NOT_ONE"
+  | "DUE_DATE_IN_THE_PAST"
+  | "DUE_BEFORE_ISSUE";
 
 /** `asOf` is the caller's TODAY, not a date to choose (see `isCallersToday`).
  *  A document that genuinely belongs to another day has its own field. */
@@ -49,7 +57,7 @@ export class NotCallersToday extends InvoiceError {
       "NOT_CALLERS_TODAY",
       `The day sent as asOf, ${JSON.stringify(given)}, cannot be today where you are: the firm's ` +
         `day is ${firmDay}, and anywhere in the world today is that day or the one either side. ` +
-        `To put an invoice in another year's books use seriesDate; a credit note takes issuedOn.`,
+        `An invoice is dated the day it is issued; a credit note may take its own issuedOn.`,
     );
   }
 }
@@ -304,9 +312,9 @@ export class CreditExceedsInvoice extends InvoiceError {
   constructor(id: string, requested: string, remaining: string) {
     super(
       "CREDIT_EXCEEDS_INVOICE",
-      `Crediting ${requested} against invoice ${JSON.stringify(id)} would exceed it — only ` +
-        `${remaining} of it is uncredited. Credit the remainder, or check whether this belongs ` +
-        `against a different invoice.`,
+      `A credit of ${requested} is more than is left on invoice ${JSON.stringify(id)}: only ` +
+        `${remaining} of it has not been credited already. Credit at most that, or check whether ` +
+        `this belongs against a different invoice.`,
     );
   }
 }
@@ -379,6 +387,154 @@ export class InvoiceManagerFrozen extends InvoiceError {
       "INVOICE_MANAGER_FROZEN",
       `Invoice ${JSON.stringify(id)} is ${status}, so whose revenue it is was fixed when it was ` +
         `issued. Only a draft's manager can change.`,
+    );
+  }
+}
+
+/** "10 July 2026": a day as a person reads it, for a refusal. ISO in, words
+ *  out, no `Date` (a day is a calendar fact, not an instant). */
+export function dayInWords(iso: string): string {
+  const months = ["January", "February", "March", "April", "May", "June", "July", "August",
+    "September", "October", "November", "December"];
+  const [y, m, d] = iso.split("-");
+  const month = months[Number(m) - 1];
+  return month === undefined || d === undefined || y === undefined ? iso : `${String(Number(d))} ${month} ${y}`;
+}
+
+/**
+ * A credit note is dated inside the life of the invoice it credits (audit
+ * 2026-10-03, B45): not before the invoice was issued, and not after today.
+ * Its date also decides its series' year, so a free date could put it in any
+ * year's series.
+ */
+export class CreditNoteDateOutOfRange extends InvoiceError {
+  constructor(given: string, invoiceIssuedOn: string | null, today: string) {
+    super(
+      "CREDIT_NOTE_DATE_OUT_OF_RANGE",
+      given > today
+        ? `A credit note cannot be dated ${dayInWords(given)}, which is after today (${dayInWords(today)}). ` +
+            `Date it today or earlier.`
+        : `A credit note cannot be dated ${dayInWords(given)}, which is before the invoice it credits was ` +
+            `issued${invoiceIssuedOn === null ? "" : ` (${dayInWords(invoiceIssuedOn)})`}. Date it on or after that day.`,
+    );
+  }
+}
+
+/** "INR 4,000.00": an amount as a person reads it, for a refusal. On the
+ *  STRING, never through a number; lakh grouping for INR, thousands otherwise. */
+export function moneyInWords(amount: string, currency: string): string {
+  const negative = amount.startsWith("-");
+  const [whole = "0", fraction = ""] = (negative ? amount.slice(1) : amount).split(".");
+  const cents = (fraction + "00").slice(0, 2);
+  const digits = whole.replace(/^0+(?=\d)/, "");
+  let grouped: string;
+  if (currency.toUpperCase() === "INR" && digits.length > 3) {
+    const head = digits.slice(0, -3);
+    grouped = `${head.replace(/\B(?=(\d{2})+(?!\d))/g, ",")},${digits.slice(-3)}`;
+  } else {
+    grouped = digits.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  }
+  return `${currency.toUpperCase()} ${negative ? "-" : ""}${grouped}.${cents}`;
+}
+
+/**
+ * An issued invoice with money received against it is not cancelled (audit
+ * 2026-10-03, B05). The receivables and every list drop a cancelled invoice,
+ * so the payment would be attached to nothing, and the bill behind it would
+ * re-open to be raised again. The database refuses it too.
+ */
+export class InvoiceHasPayments extends InvoiceError {
+  constructor(number: string | null, paid: string, currency: string) {
+    super(
+      "INVOICE_HAS_PAYMENTS",
+      `${number ?? "This invoice"} has ${moneyInWords(paid, currency)} of payments recorded against it, so it ` +
+        `cannot be cancelled: that money would be attached to nothing. To take money off what the client ` +
+        `owes, issue a credit note. If a payment was recorded by mistake, record a refund of the same ` +
+        `amount first, then cancel.`,
+    );
+  }
+}
+
+/**
+ * A credit hold or legal action is approved only over money still owed (audit
+ * 2026-10-03, B22). The queue showed a cancelled invoice's full total as owed,
+ * and a partner could approve a hold over a withdrawn bill. Rejecting the step
+ * is always possible: it records that the firm looked and chose not to.
+ */
+export class DunningNothingOwed extends InvoiceError {
+  constructor(number: string | null, why: "cancelled" | "settled") {
+    super(
+      "DUNNING_NOTHING_OWED",
+      `${number ?? "This invoice"} ${why === "cancelled" ? "was cancelled" : "is paid in full"}, so nothing is ` +
+        `owed on it and this step cannot be approved. Reject it instead; the rejection is kept on record.`,
+    );
+  }
+}
+
+/**
+ * A credit note on an ADVANCE invoice gives back only what later bills have
+ * not already taken from it (audit 2026-10-03, B06). The plain route capped a
+ * credit at invoiced less credited, so a client was credited the whole advance
+ * after part of it had paid for October: the advance went to -10,000.
+ */
+export class CreditExceedsUnusedAdvance extends InvoiceError {
+  constructor(number: string | null, takenByBills: string, maxCredit: string, currency: string) {
+    super(
+      "CREDIT_EXCEEDS_UNUSED_ADVANCE",
+      `${number ?? "This invoice"} is an advance, and ${moneyInWords(takenByBills, currency)} of it (with its tax) ` +
+        `has already been taken off later bills. At most ${moneyInWords(maxCredit, currency)} can be credited ` +
+        `on it now. To give back more, credit the later invoices that took it.`,
+    );
+  }
+}
+
+/**
+ * An invoice in another currency than the firm's reporting one needs the rate
+ * a person typed (audit 2026-10-03, B07). It defaulted to 1, so USD 10,000
+ * counted as INR 10,000 in what is owed, the dashboard and revenue.
+ */
+export class FxRateRequired extends InvoiceError {
+  constructor(currency: string, reportingCurrency: string) {
+    super(
+      "FX_RATE_REQUIRED",
+      `This invoice is in ${currency} and the firm reports in ${reportingCurrency}, so it needs the rate: how ` +
+        `many ${reportingCurrency} one ${currency} was worth on the invoice date. Type the rate and the date it is from.`,
+    );
+  }
+}
+
+/** An invoice in the firm's own currency is converted at exactly 1 (B07). */
+export class FxRateNotOne extends InvoiceError {
+  constructor(currency: string, given: string) {
+    super(
+      "FX_RATE_NOT_ONE",
+      `This invoice is in ${currency}, the firm's own currency, so its rate is 1, not ${given}. Leave the rate empty.`,
+    );
+  }
+}
+
+/** A due date set on a draft is today or later (audit 2026-10-03, B20/F35). */
+export class DueDateInThePast extends InvoiceError {
+  constructor(given: string, today: string) {
+    super(
+      "DUE_DATE_IN_THE_PAST",
+      `${dayInWords(given)} has already passed (today is ${dayInWords(today)}). Choose today or a later day ` +
+        `as the due date, or leave it empty.`,
+    );
+  }
+}
+
+/**
+ * An invoice is not issued with a due date before its own date (B21). A draft
+ * raised on 1 October due 8 October and issued on 20 October went out already
+ * twelve days overdue, and the next sweep fired every reminder at once.
+ */
+export class DueBeforeIssue extends InvoiceError {
+  constructor(dueOn: string, issuedOn: string) {
+    super(
+      "DUE_BEFORE_ISSUE",
+      `This invoice is due on ${dayInWords(dueOn)}, which is before today's issue date, ${dayInWords(issuedOn)}. ` +
+        `Change the due date on the draft, then issue it.`,
     );
   }
 }

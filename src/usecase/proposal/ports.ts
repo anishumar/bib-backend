@@ -294,6 +294,14 @@ export interface ProposalRecord {
    */
   readonly totalsByFrequency: readonly FrequencyTotal[];
   /**
+   * What the recurring fees come to over a YEAR (audit 2026-10-03, CA#42):
+   * monthly x 12, quarterly x 4, annually x 1, summed by the database. A
+   * one-off or custom fee is not in it (it is not a yearly figure), and an
+   * unpriced line is counted beside it in `totalsByFrequency`. Null when no
+   * priced line recurs. "What is this client worth a year?"
+   */
+  readonly annualValue: Amount | null;
+  /**
    * The firm's Depts as `tenancy.service_axis` holds them, retired ones
    * included — what `planProposal` letters the sections by, read the way the
    * PDF's render source reads them.

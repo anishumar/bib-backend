@@ -109,6 +109,9 @@ describe("the proposal read, for the builder and the preview (T6.18)", () => {
       { frequency: "monthly", net: "60000.0000", lineCount: 2, unpricedLineCount: 0 },
       { frequency: "one_time", net: "0.0000", lineCount: 1, unpricedLineCount: 1 },
     ]);
+    // What the client is worth a year (CA#42): the recurring fees over twelve
+    // months, never a one-off added in.
+    expect(view.annualValue).toBe("720000.0000");
   });
 
   it("names the issuer and where it is registered, null when the firm recorded nowhere", async () => {
