@@ -437,14 +437,15 @@ export function registerDashboardRoutes(app: OpenAPIHono<AppEnv>, deps: Dashboar
   /** The fee axis, as a gate rather than a redaction — see the file header. */
   const denyWithoutFees = (principal: Parameters<AuthzService["seesFees"]>[0] | null) => {
     if (principal === null || !deps.authz.seesFees(principal)) {
+      // In words a CA firm uses (CA#54, audit 2026-10-03), and the fee axis's
+      // one reason code, as every other money refusal has.
       return toEnvelope({
         status: 403,
         code: "FORBIDDEN",
         message:
-          "These figures are the firm's revenue and receivables, and this login does not have " +
-          "commercial visibility. That is a setting on the membership, separate from the role — " +
-          "a partner administering the firm can grant it.",
-        reason: "NO_COMMERCIAL_VISIBILITY",
+          "These are the firm's revenue figures, and your login is not set to see fees. " +
+          "Ask somebody who can see fees.",
+        reason: "FEES_NOT_VISIBLE",
       });
     }
     return null;

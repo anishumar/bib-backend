@@ -30,14 +30,18 @@ export type ClientRequestErrorCode =
   | "REQUEST_ROUTING_UNKNOWN";
 
 export class RequestNotFound extends ClientRequestError {
+  readonly requestId: string;
+
   constructor(requestId: string) {
     super(
       "REQUEST_NOT_FOUND",
-      `No request ${JSON.stringify(requestId)} you can reach. On the client portal this is ` +
-        `also the answer for a request belonging to a company you were not granted — the row ` +
-        `is filtered in the database (gate 4), so there is nothing here to tell the two ` +
-        `apart, and that is the point: a 403 would confirm it exists.`,
+      // ONE sentence for "there is none" and "it is another company's" (gate 4
+      // filters the row in the database, so nothing here can tell them apart,
+      // and a different answer would confirm the request exists). In words a
+      // reader acts on (F21, audit 2026-10-03); the id is on the log.
+      "This request could not be found, or you do not have access to it.",
     );
+    this.requestId = requestId;
   }
 }
 

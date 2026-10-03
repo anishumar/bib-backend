@@ -114,6 +114,30 @@ export const PERMISSION_DESCRIPTIONS: Readonly<Record<Permission, string>> = {
 };
 
 /**
+ * What each permission LETS SOMEBODY DO, as the end of the sentence "Your role
+ * does not let you ..." (F21, audit 2026-10-03). The refusal said `Role
+ * "associate" does not carry "ledger:read"`, which a CA firm's staff cannot
+ * read. Exhaustive, so a permission added later is worded here or the build
+ * fails.
+ */
+export const PERMISSION_ACTS: Readonly<Record<Permission, string>> = {
+  "party:read": "see the firm's clients and leads",
+  "party:write": "add or change clients, contacts and leads",
+  "ledger:read": "read the firm's audit trail",
+  "config:read": "see the service catalogue and how roles are set up",
+  "proposal:approve": "approve a discount above the firm's limit",
+  "work:write": "mark work as done",
+  "obligation:resolve": "decide what happens to a missed deadline",
+  "portal:grant": "give a client's people access to their portal",
+  "portal:respond": "answer the firm on this portal",
+  "portal:request": "ask the firm for something on this portal",
+  "acceptance:record": "record a client's acceptance given outside the app",
+  "billing:skip": "skip a bill",
+  "invoice:issue": "issue or cancel an invoice, or issue a credit note",
+  "tenant:admin": "manage the firm's people, roles and settings",
+};
+
+/**
  * The permission that can change the permissions.
  *
  * Config writes require exactly this one, and not a `config:write` of their

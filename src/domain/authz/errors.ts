@@ -9,6 +9,8 @@
 //
 // Both are 403 on the wire. Collapsing them into one error would hide a firm
 // whose staff were all locked out by a typo in a role name.
+import { PERMISSION_ACTS, isPermission } from "./model";
+
 export class AuthzError extends Error {
   constructor(
     readonly code: AuthzErrorCode,
@@ -43,11 +45,20 @@ export class FeesNotVisible extends AuthzError {
 }
 
 export class NotPermitted extends AuthzError {
+  /** The role and the permission, for a LOG: the sentence a person reads says
+   *  what they may not do, in words (F21, audit 2026-10-03). It named the role
+   *  key and the permission code, which nobody at a CA firm can act on. */
+  readonly role: string;
+  readonly permission: string;
+
   constructor(role: string, permission: string) {
     super(
       "NOT_PERMITTED",
-      `Role ${JSON.stringify(role)} does not carry ${JSON.stringify(permission)}`,
+      `Your role does not let you ${isPermission(permission) ? PERMISSION_ACTS[permission] : "do this"}. ` +
+        "Ask an administrator if you need to.",
     );
+    this.role = role;
+    this.permission = permission;
   }
 }
 
