@@ -34,6 +34,7 @@ export type Permission =
   | "portal:request"
   | "acceptance:record"
   | "billing:skip"
+  | "invoice:issue"
   | "tenant:admin";
 
 export const PERMISSIONS: readonly Permission[] = [
@@ -49,6 +50,7 @@ export const PERMISSIONS: readonly Permission[] = [
   "portal:request",
   "acceptance:record",
   "billing:skip",
+  "invoice:issue",
   "tenant:admin",
 ];
 
@@ -101,6 +103,11 @@ export const PERMISSION_DESCRIPTIONS: Readonly<Record<Permission, string>> = {
     "Skip a bill on Invoices, To raise: say, with a reason, that a period of work or a " +
     "service's final bill will not be invoiced. It gives up revenue, so it is kept apart from " +
     "raising one. The reason stays on the bill for whoever asks later.",
+  "invoice:issue":
+    "Issue and cancel invoices, and issue credit notes, including a refund of an advance. " +
+    "An issued invoice takes the next number in the company's series and goes to the client, " +
+    "so it is kept apart from raising a draft. Give it to the person who does the firm's " +
+    "accounts without making them an administrator.",
   "tenant:admin":
     "Administer the firm: who works here, what their roles are, and every setting, " +
     "including this one.",
@@ -205,6 +212,7 @@ export const DEFAULT_ROLES: Readonly<Record<string, RoleDefinition>> = {
       "portal:grant",
       "acceptance:record",
       "billing:skip",
+      "invoice:issue",
     ],
   },
   // Runs delivery for a book of clients; sees the audit trail for their work.

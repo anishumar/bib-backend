@@ -1244,6 +1244,28 @@ describe("gate 3 — role", () => {
     expect(body.permissions.map((p) => p.key)).toContain("tenant:admin");
   });
 
+  it("issuing, cancelling and crediting take invoice:issue, not the whole of tenant:admin (CA#6)", () => {
+    // An accounts person issues invoices and credit notes; making them a full
+    // administrator to do it handed them the roster and the roles too.
+    const issuing = { kind: "permission", permission: "invoice:issue" };
+    expect(decideRoute("POST", "/api/v1/invoices/00000000-0000-4000-8000-000000000001/issue")).toEqual(issuing);
+    expect(decideRoute("POST", "/api/v1/invoices/00000000-0000-4000-8000-000000000001/cancel")).toEqual(issuing);
+    expect(decideRoute("POST", "/api/v1/invoices/00000000-0000-4000-8000-000000000001/credit-notes")).toEqual(issuing);
+    // A refund is a credit note on the advance, and keeping it is the other answer to the same question.
+    expect(decideRoute("POST", "/api/v1/billing/refunds/00000000-0000-4000-8000-000000000001/credit-note")).toEqual(issuing);
+    expect(decideRoute("POST", "/api/v1/billing/refunds/00000000-0000-4000-8000-000000000001/keep")).toEqual(issuing);
+    // Raising a draft is still bookkeeping.
+    expect(decideRoute("POST", "/api/v1/invoices")).toEqual({ kind: "permission", permission: "party:write" });
+  });
+
+  it("names invoice:issue on the roles screen in plain words (CA#6)", async () => {
+    const res = await app(as("partner")).request("/api/v1/config/permissions");
+    const body = (await res.json()) as { permissions: { key: string; description: string }[] };
+    const issue = body.permissions.find((p) => p.key === "invoice:issue");
+    expect(issue?.description).toMatch(/^Issue and cancel invoices, and issue credit notes/);
+    expect(issue?.description).not.toMatch(/tenant|:/);
+  });
+
   it("the preview takes what rendering takes, though it files nothing (2026-09-28)", async () => {
     // It draws the same rows through the same renderer, fee figures and all:
     // a session that could not render and download the PDF must not be handed

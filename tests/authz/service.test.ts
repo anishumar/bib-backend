@@ -34,6 +34,14 @@ describe("the roles a firm starts with", () => {
     expect(DEFAULT_ROLES["partner"]?.permissions).toContain("ledger:read");
   });
 
+  it("gives invoice:issue to exactly the default roles that administer the firm (CA#6)", () => {
+    // Nothing changed for any firm the day it was split off tenant:admin: the
+    // roles that could issue before can issue now, and nobody else.
+    for (const [key, role] of Object.entries(DEFAULT_ROLES)) {
+      expect(role.permissions.includes("invoice:issue"), key).toBe(role.permissions.includes("tenant:admin"));
+    }
+  });
+
   it("does not give an associate the firm's whole audit trail", () => {
     // It names every client the firm has, which is more than doing the work
     // requires. The catalogue, on the other hand, is exactly what an associate
