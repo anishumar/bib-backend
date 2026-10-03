@@ -89,6 +89,7 @@ import { PostgresMembershipRepository } from "../infrastructure/postgres/members
 import { PostgresStepApprovalRepository } from "../infrastructure/postgres/step-approval-repository";
 import { PostgresStepCheckRepository } from "../infrastructure/postgres/step-check-repository";
 import { PostgresAgentRunRepository } from "../infrastructure/postgres/agent-run-repository";
+import { PostgresInvoiceFirmSettings } from "../infrastructure/postgres/invoice-settings";
 import { PostgresInvoiceRepository } from "../infrastructure/postgres/invoice-repository";
 import {
   PostgresDunningLadder,
@@ -625,6 +626,8 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     events: ledger,
     issuedCopies: invoiceIssuedCopies(fileStore, log),
     staff: memberships,
+    // Reporting currency, financial year start and payment terms (audit 2026-10-03).
+    settings: new PostgresInvoiceFirmSettings(pools.app),
   });
   const advancePolicy = new PostgresAdvancePolicy(pools.app);
   const taxDefaults = new PostgresIssuerTaxDefaults(pools.app);

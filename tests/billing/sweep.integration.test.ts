@@ -43,6 +43,7 @@ import {
 import { PostgresInvoiceRepository } from "../../src/infrastructure/postgres/invoice-repository";
 import { PostgresRenderSource } from "../../src/infrastructure/postgres/render-source";
 import { InvoiceService } from "../../src/usecase/invoice/service";
+import { PostgresInvoiceFirmSettings } from "../../src/infrastructure/postgres/invoice-settings";
 import type { Actor } from "../../src/domain/ledger/model";
 import { FakeStaffDirectory } from "../../src/testfakes/lead";
 
@@ -401,6 +402,7 @@ describe("the billing desk on a real database (0318)", () => {
     events: new RecordingEventSink(),
     issuedCopies: { file: () => Promise.resolve() },
     staff: new FakeStaffDirectory(),
+    settings: new PostgresInvoiceFirmSettings(app),
   });
   const deskAdapter = new PostgresBillingDueDesk(app);
   const desk = new BillingDeskService({

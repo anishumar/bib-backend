@@ -27,14 +27,36 @@ export interface NewInvoice {
   /** Whose revenue (0318). Absent: nobody named. */
   readonly managerUserId?: string | null | undefined;
   /**
-   * The date whose FINANCIAL YEAR decides which series this invoice belongs to.
-   *
-   * Passed in rather than read from a clock inside the adapter, because it is a
-   * business fact — "which year's books does this belong to" — and a firm
-   * raising an invoice on 2 April for March's work is deciding it, not
-   * discovering it.
+   * The financial year the draft is filed under until it is issued. PROVISIONAL
+   * since the audit of 2026-10-03 (B03): issuing re-derives it from the issue
+   * date, in the same transaction that draws the number, so a March draft
+   * issued in April is numbered in April's year.
    */
-  readonly seriesDate: string;
+  readonly financialYear: number;
+}
+
+/** What `issue` writes besides the status: the day, the year that day falls
+ *  in (and the month that year starts in, for the number's label), and the due
+ *  date to fill in when the draft has none (the firm's terms, or null). */
+export interface IssueOn {
+  readonly issuedOn: string;
+  readonly financialYear: number;
+  readonly fiscalYearStartMonth: number;
+  readonly dueOnIfUnset: string | null;
+}
+
+/**
+ * What invoicing needs to know about the firm itself (audit 2026-10-03).
+ * `fiscalYearStartMonth` is the compliance policy's (null when the firm has not
+ * said, which numbers on 1 April as before); `dueInDays` is the firm's own
+ * payment terms (null: no default, never a guessed number).
+ */
+export interface InvoiceFirmSettings {
+  invoiceSettingsFor(tenantId: string): Promise<{
+    readonly reportingCurrency: string;
+    readonly fiscalYearStartMonth: number | null;
+    readonly dueInDays: number | null;
+  }>;
 }
 
 export interface NewInvoiceLine {
@@ -169,8 +191,8 @@ export interface EngagementBilling {
 
 export interface InvoiceRepository {
   /**
-   * Create the DRAFT, in its company's series for the financial year of
-   * `seriesDate`, with NO number (0322): the number is drawn by `issue`. A
+   * Create the DRAFT, filed under a provisional financial year, with NO
+   * number (0322): the number is drawn by `issue`. A
    * draft cancelled before issue therefore spends nothing, which is what lets a
    * draft be made by the system (the advance at signing) without a cancelled
    * number ever sitting in the series.
@@ -202,7 +224,7 @@ export interface InvoiceRepository {
    * The same reasoning `AssignmentStrategy.assign` gives for choosing and
    * recording being one method, reached from money instead of from fairness.
    */
-  issue(tenantId: string, invoiceId: string, issuedOn: string): Promise<Invoice>;
+  issue(tenantId: string, invoiceId: string, on: IssueOn): Promise<Invoice>;
   cancel(tenantId: string, invoiceId: string): Promise<Invoice>;
   registerIrn(tenantId: string, invoiceId: string, irn: string, at: string): Promise<Invoice>;
   /** A DRAFT's manager (null: nobody). `status = 'draft'` in the write. */
@@ -270,8 +292,10 @@ export interface NewCreditNote {
   readonly issuedOn: string;
   readonly reason: CreditReason;
   readonly note: string | null;
-  /** Which financial year's credit-note series this belongs to. */
-  readonly seriesDate: string;
+  /** Which financial year's credit-note series this belongs to: its OWN
+   *  date's (B45), and the month that year starts in, for the label. */
+  readonly financialYear: number;
+  readonly fiscalYearStartMonth: number;
 }
 
 export interface InvoiceSeriesRecord {

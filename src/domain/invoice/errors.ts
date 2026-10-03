@@ -39,7 +39,8 @@ export type InvoiceErrorCode =
   | "ENGAGEMENT_OF_ANOTHER_ISSUER"
   | "ENGAGEMENT_IN_ANOTHER_CURRENCY"
   | "MANAGER_NOT_STAFF"
-  | "INVOICE_MANAGER_FROZEN";
+  | "INVOICE_MANAGER_FROZEN"
+  | "CREDIT_NOTE_DATE_OUT_OF_RANGE";
 
 /** `asOf` is the caller's TODAY, not a date to choose (see `isCallersToday`).
  *  A document that genuinely belongs to another day has its own field. */
@@ -49,7 +50,7 @@ export class NotCallersToday extends InvoiceError {
       "NOT_CALLERS_TODAY",
       `The day sent as asOf, ${JSON.stringify(given)}, cannot be today where you are: the firm's ` +
         `day is ${firmDay}, and anywhere in the world today is that day or the one either side. ` +
-        `To put an invoice in another year's books use seriesDate; a credit note takes issuedOn.`,
+        `An invoice is dated the day it is issued; a credit note may take its own issuedOn.`,
     );
   }
 }
@@ -379,6 +380,35 @@ export class InvoiceManagerFrozen extends InvoiceError {
       "INVOICE_MANAGER_FROZEN",
       `Invoice ${JSON.stringify(id)} is ${status}, so whose revenue it is was fixed when it was ` +
         `issued. Only a draft's manager can change.`,
+    );
+  }
+}
+
+/** "10 July 2026": a day as a person reads it, for a refusal. ISO in, words
+ *  out, no `Date` (a day is a calendar fact, not an instant). */
+export function dayInWords(iso: string): string {
+  const months = ["January", "February", "March", "April", "May", "June", "July", "August",
+    "September", "October", "November", "December"];
+  const [y, m, d] = iso.split("-");
+  const month = months[Number(m) - 1];
+  return month === undefined || d === undefined || y === undefined ? iso : `${String(Number(d))} ${month} ${y}`;
+}
+
+/**
+ * A credit note is dated inside the life of the invoice it credits (audit
+ * 2026-10-03, B45): not before the invoice was issued, and not after today.
+ * Its date also decides its series' year, so a free date could put it in any
+ * year's series.
+ */
+export class CreditNoteDateOutOfRange extends InvoiceError {
+  constructor(given: string, invoiceIssuedOn: string | null, today: string) {
+    super(
+      "CREDIT_NOTE_DATE_OUT_OF_RANGE",
+      given > today
+        ? `A credit note cannot be dated ${dayInWords(given)}, which is after today (${dayInWords(today)}). ` +
+            `Date it today or earlier.`
+        : `A credit note cannot be dated ${dayInWords(given)}, which is before the invoice it credits was ` +
+            `issued${invoiceIssuedOn === null ? "" : ` (${dayInWords(invoiceIssuedOn)})`}. Date it on or after that day.`,
     );
   }
 }

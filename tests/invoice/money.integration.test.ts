@@ -21,6 +21,7 @@ import { PostgresInvoiceRepository } from "../../src/infrastructure/postgres/inv
 import { PostgresEventStore } from "../../src/infrastructure/postgres/event-repository";
 import { LedgerService } from "../../src/usecase/ledger/service";
 import { InvoiceService } from "../../src/usecase/invoice/service";
+import { PostgresInvoiceFirmSettings } from "../../src/infrastructure/postgres/invoice-settings";
 import { PostgresFirmTimeZone } from "../../src/infrastructure/postgres/firm-timezone-repository";
 import { PostgresDocumentRepository } from "../../src/infrastructure/postgres/document-repository";
 import { PostgresPartyRepository } from "../../src/infrastructure/postgres/party-repository";
@@ -47,6 +48,7 @@ const service = new InvoiceService({
   // No document store here: these tests are about the money and the series.
   issuedCopies: new FakeIssuedCopies(),
   staff: new FakeStaffDirectory(),
+  settings: new PostgresInvoiceFirmSettings(app),
 });
 
 const stamp = Date.now().toString(36);
@@ -116,7 +118,7 @@ describe("the two series do not interleave", () => {
     // invoice number missing because a credit note took it.
     const first = await issued();
     const credit = await service.issueCreditNote(
-      { tenantId: tenant, invoiceId: first, amount: "1000", reason: "goodwill", issuedOn: "2026-07-05" },
+      { tenantId: tenant, invoiceId: first, amount: "1000", reason: "goodwill" },
       SYSTEM_ACTOR,
     );
     expect(credit.number).toBe("CN/2026-27/0001");
@@ -143,7 +145,7 @@ describe("the two series do not interleave", () => {
     await Promise.all(
       Array.from({ length: 4 }, () =>
         service.issueCreditNote(
-          { tenantId: tenant, invoiceId: invoice, amount: "1000", reason: "goodwill", issuedOn: "2026-07-05" },
+          { tenantId: tenant, invoiceId: invoice, amount: "1000", reason: "goodwill" },
           SYSTEM_ACTOR,
         ),
       ),
@@ -194,7 +196,7 @@ describe("a credit note, once issued, says what it says", () => {
   it("refuses to restate the amount or the reason", async () => {
     const invoice = await issued();
     const credit = await service.issueCreditNote(
-      { tenantId: tenant, invoiceId: invoice, amount: "1000", reason: "service_failure", issuedOn: "2026-07-05" },
+      { tenantId: tenant, invoiceId: invoice, amount: "1000", reason: "service_failure" },
       SYSTEM_ACTOR,
     );
     for (const patch of [
@@ -231,7 +233,7 @@ describe("the balance is arithmetic, done by the database", () => {
       SYSTEM_ACTOR,
     );
     await service.issueCreditNote(
-      { tenantId: tenant, invoiceId: invoice, amount: "1800", reason: "billing_error", issuedOn: "2026-07-11" },
+      { tenantId: tenant, invoiceId: invoice, amount: "1800", reason: "billing_error" },
       SYSTEM_ACTOR,
     );
     const balance = await service.balanceOf(tenant, invoice);

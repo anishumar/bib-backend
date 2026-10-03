@@ -91,13 +91,15 @@ beforeAll(async () => {
     RETURNING id
   `;
   if (!l) throw new Error("letter seed failed");
+  const letterId = l.id;
+  const versionId = version.id;
 
   async function line(position: number, frequency: string, quantity: string, unit: string, discount: string, text: string) {
     const [ln] = await owner<{ id: string }[]>`
       INSERT INTO crm.engagement_letter_line
         (tenant_id, engagement_letter_id, position, service_version_id, quantity, unit_amount,
          currency, discount_percent, billing_frequency, entity_party_id, description, billing_timing)
-      VALUES (${tenantId}, ${l.id}, ${position}, ${version.id}, ${quantity}, ${unit}, 'INR', ${discount},
+      VALUES (${tenantId}, ${letterId}, ${position}, ${versionId}, ${quantity}, ${unit}, 'INR', ${discount},
               ${frequency}, ${client}, ${text}, 'arrears')
       RETURNING id
     `;
@@ -111,14 +113,14 @@ beforeAll(async () => {
     UPDATE crm.engagement_letter
        SET status = 'signed', sent_at = now(), signed_at = now(), signed_by_name = 'A Director',
            signature_method = 'attested', signed_content_hash = ${"c".repeat(64)}
-     WHERE id = ${l.id}
+     WHERE id = ${letterId}
   `;
   async function engagement(lineId: string, firstInvoiceOn: string) {
     const [e] = await owner<{ id: string }[]>`
       INSERT INTO crm.engagement
         (tenant_id, party_id, entity_party_id, engagement_letter_id, engagement_letter_line_id,
          effective_from, status, activated_at, billing_from, first_invoice_on)
-      VALUES (${tenantId}, ${client}, ${client}, ${l.id}, ${lineId}, '2026-10-01', 'active', now(),
+      VALUES (${tenantId}, ${client}, ${client}, ${letterId}, ${lineId}, '2026-10-01', 'active', now(),
               '2026-10-01', ${firstInvoiceOn})
       RETURNING id
     `;

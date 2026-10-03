@@ -47,6 +47,7 @@ import {
 import { FinalBiller } from "../../src/usecase/billing/final";
 import { BillingDeskService } from "../../src/usecase/billing/desk";
 import { InvoiceService } from "../../src/usecase/invoice/service";
+import { PostgresInvoiceFirmSettings } from "../../src/infrastructure/postgres/invoice-settings";
 import type { Actor } from "../../src/domain/ledger/model";
 import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
 import { FakeStaffDirectory } from "../../src/testfakes/lead";
@@ -117,6 +118,7 @@ const invoicing = new InvoiceService({
   events,
   issuedCopies: { file: () => Promise.resolve() },
   staff: new FakeStaffDirectory(),
+  settings: new PostgresInvoiceFirmSettings(app),
 });
 const desk = new BillingDeskService({
   desk: deskAdapter,

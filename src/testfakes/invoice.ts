@@ -20,7 +20,6 @@ import type {
 import {
   DEFAULT_CREDIT_NOTE_PREFIX,
   DEFAULT_SERIES_PREFIX,
-  financialYearOf,
   formatInvoiceNumber,
 } from "../domain/invoice/model";
 import type {
@@ -29,7 +28,9 @@ import type {
   InvoiceRecord,
   InvoiceRepository,
   InvoiceSeriesRecord,
+  InvoiceFirmSettings,
   InvoiceSummary,
+  IssueOn,
   IssuedCopies,
   NewCreditNote,
   NewInvoice,
@@ -72,7 +73,7 @@ export class FakeInvoiceRepo implements InvoiceRepository {
   /** A draft, unnumbered (0322), in its series for the year: the series row
    *  exists from here, as the adapter's does. */
   create(i: NewInvoice): Promise<Invoice> {
-    const financialYear = financialYearOf(i.seriesDate);
+    const financialYear = i.financialYear;
     const k = keyOf({ tenantId: i.tenantId, entityPartyId: i.entityPartyId, financialYear });
     if (!this.series.has(k)) this.series.set(k, { last: 0, prefix: DEFAULT_SERIES_PREFIX });
 
@@ -176,18 +177,24 @@ export class FakeInvoiceRepo implements InvoiceRepository {
 
   /** Issue and number in one step (0322): the next in the draft's series, or
    *  the number a pre-0322 draft already holds. */
-  async issue(tenantId: string, invoiceId: string, issuedOn: string): Promise<Invoice> {
+  async issue(tenantId: string, invoiceId: string, on: IssueOn): Promise<Invoice> {
     const draft = await this.find(tenantId, invoiceId);
     if (draft === null || draft.status !== "draft") throw new Error(`could not issue invoice ${invoiceId}`);
-    if (draft.number !== null) return this.patch(tenantId, invoiceId, { status: "issued", issuedOn });
-    const k = keyOf({ tenantId, entityPartyId: draft.entityPartyId, financialYear: draft.financialYear });
+    const issuedOn = on.issuedOn;
+    const dueOn = draft.dueOn ?? on.dueOnIfUnset;
+    if (draft.number !== null) return this.patch(tenantId, invoiceId, { status: "issued", issuedOn, dueOn });
+    // The issue date's year (B03), as the adapter moves an unnumbered draft.
+    const financialYear = on.financialYear;
+    const k = keyOf({ tenantId, entityPartyId: draft.entityPartyId, financialYear });
     const existing = this.series.get(k) ?? { last: 0, prefix: DEFAULT_SERIES_PREFIX };
     const sequence = existing.last + 1;
     this.series.set(k, { ...existing, last: sequence });
     return this.patch(tenantId, invoiceId, {
       status: "issued",
       issuedOn,
-      number: formatInvoiceNumber({ prefix: existing.prefix, financialYear: draft.financialYear, sequence }),
+      dueOn,
+      financialYear,
+      number: formatInvoiceNumber({ prefix: existing.prefix, financialYear, sequence, startMonth: on.fiscalYearStartMonth }),
       sequenceNumber: sequence,
     });
   }
@@ -243,7 +250,7 @@ export class FakeInvoiceRepo implements InvoiceRepository {
   }
 
   issueCreditNote(c: NewCreditNote): Promise<CreditNote> {
-    const financialYear = financialYearOf(c.seriesDate);
+    const financialYear = c.financialYear;
     // A SEPARATE key from the invoice series — the correction 0028 made after
     // 0027 shipped without a document type. A fake that shared the counter
     // would let a test pass on interleaved numbering the database refuses.
@@ -257,7 +264,7 @@ export class FakeInvoiceRepo implements InvoiceRepository {
       tenantId: c.tenantId,
       invoiceId: c.invoiceId,
       entityPartyId: c.entityPartyId,
-      number: formatInvoiceNumber({ prefix: existing.prefix, financialYear, sequence }),
+      number: formatInvoiceNumber({ prefix: existing.prefix, financialYear, sequence, startMonth: c.fiscalYearStartMonth }),
       financialYear,
       sequenceNumber: sequence,
       amount: c.amount,
@@ -404,6 +411,26 @@ export class FakeFirmEntities {
   }
 }
 
+/** The firm's own settings for invoicing; a test sets the ones it is about.
+ *  INR, no year start said (1 April), no payment terms. */
+export class FakeInvoiceFirmSettings implements InvoiceFirmSettings {
+  reportingCurrency = "INR";
+  fiscalYearStartMonth: number | null = null;
+  dueInDays: number | null = null;
+
+  invoiceSettingsFor(): Promise<{
+    readonly reportingCurrency: string;
+    readonly fiscalYearStartMonth: number | null;
+    readonly dueInDays: number | null;
+  }> {
+    return Promise.resolve({
+      reportingCurrency: this.reportingCurrency,
+      fiscalYearStartMonth: this.fiscalYearStartMonth,
+      dueInDays: this.dueInDays,
+    });
+  }
+}
+
 /** Records every invoice whose issued copy was asked for, in order. */
 export class FakeIssuedCopies implements IssuedCopies {
   readonly filed: { tenantId: string; invoiceId: string }[] = [];
@@ -423,6 +450,7 @@ export function makeInvoiceFakes(): Deps & {
   events: RecordingEventSink;
   issuedCopies: FakeIssuedCopies;
   staff: FakeStaffDirectory;
+  settings: FakeInvoiceFirmSettings;
 } {
   return {
     invoices: new FakeInvoiceRepo(),
@@ -434,5 +462,6 @@ export function makeInvoiceFakes(): Deps & {
     events: new RecordingEventSink(),
     issuedCopies: new FakeIssuedCopies(),
     staff: new FakeStaffDirectory(),
+    settings: new FakeInvoiceFirmSettings(),
   };
 }

@@ -54,7 +54,6 @@ import type {
 import {
   DEFAULT_CREDIT_NOTE_PREFIX,
   DEFAULT_SERIES_PREFIX,
-  financialYearOf,
   formatInvoiceNumber,
   isCreditReason,
   isInvoiceStatus,
@@ -68,6 +67,7 @@ import type {
   InvoiceRepository,
   InvoiceSeriesRecord,
   InvoiceSummary,
+  IssueOn,
   NewCreditNote,
   ReceivableRecord,
   NewInvoice,
@@ -200,7 +200,7 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
    * the foreign key wants the row. Nothing is counted.
    */
   async create(i: NewInvoice): Promise<Invoice> {
-    const financialYear = financialYearOf(i.seriesDate);
+    const financialYear = i.financialYear;
     return withTenant(this.app, i.tenantId, async (db) => {
       await ensureInvoiceSeries(db, i.tenantId, i.entityPartyId, financialYear);
       const [row] = await db<InvoiceRow[]>`
@@ -470,9 +470,15 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
    * two issues of it serialise and the second finds it issued; then the
    * series' counter row under `FOR UPDATE`, then the counter moves and the
    * draft takes the number, the status and the date in one UPDATE. A draft
-   * made before 0322 already holds a number: it keeps it and counts nothing.
+   * made before 0322 already holds a number: it keeps it (and its year) and
+   * counts nothing.
+   *
+   * THE YEAR IS THE ISSUE DATE'S (B03, 0326): an unnumbered draft moves to the
+   * series of `on.financialYear` in the same write that numbers it. It was the
+   * draft's year, so a March draft issued in April took last year's series.
    */
-  async issue(tenantId: string, invoiceId: string, issuedOn: string): Promise<Invoice> {
+  async issue(tenantId: string, invoiceId: string, on: IssueOn): Promise<Invoice> {
+    const issuedOn = on.issuedOn;
     return withTenant(this.app, tenantId, async (db) => {
       const [draft] = await db<{ entity_party_id: string; financial_year: number; number: string | null }[]>`
         SELECT entity_party_id, financial_year, number FROM crm.invoice
@@ -488,8 +494,10 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
 
       let number = draft.number;
       let sequence: number | null = null;
+      let financialYear = draft.financial_year;
       if (number === null) {
-        await ensureInvoiceSeries(db, tenantId, draft.entity_party_id, draft.financial_year);
+        financialYear = on.financialYear;
+        await ensureInvoiceSeries(db, tenantId, draft.entity_party_id, financialYear);
         // THE LOCK. Everything this file exists for is this line. A second
         // writer waits here until the first transaction ends, and then reads
         // what is stored rather than a snapshot taken at its own BEGIN.
@@ -497,7 +505,7 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
           SELECT last_number, prefix FROM crm.invoice_series
           WHERE tenant_id = ${tenantId}
             AND entity_party_id = ${draft.entity_party_id}
-            AND financial_year = ${draft.financial_year}
+            AND financial_year = ${financialYear}
             AND document_type = 'invoice'
           FOR UPDATE
         `;
@@ -506,19 +514,24 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
           // would mean the tenant context is wrong — a fault worth naming
           // rather than a null to carry forward.
           throw new Error(
-            `no invoice series for entity ${draft.entity_party_id} in FY ${String(draft.financial_year)} — ` +
+            `no invoice series for entity ${draft.entity_party_id} in FY ${String(financialYear)} — ` +
               `the row was just inserted, so this means the tenant context is not this tenant.`,
           );
         }
         sequence = series.last_number + 1;
-        number = formatInvoiceNumber({ prefix: series.prefix, financialYear: draft.financial_year, sequence });
+        number = formatInvoiceNumber({
+          prefix: series.prefix,
+          financialYear,
+          sequence,
+          startMonth: on.fiscalYearStartMonth,
+        });
         // The counter moves and the invoice takes the number below, in this
         // same transaction. Either both happen or neither does.
         await db`
           UPDATE crm.invoice_series SET last_number = ${sequence}
           WHERE tenant_id = ${tenantId}
             AND entity_party_id = ${draft.entity_party_id}
-            AND financial_year = ${draft.financial_year}
+            AND financial_year = ${financialYear}
             AND document_type = 'invoice'
         `;
       }
@@ -526,7 +539,9 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
       const [row] = await db<InvoiceRow[]>`
         UPDATE crm.invoice
            SET status = 'issued', issued_on = ${issuedOn},
-               number = ${number}, sequence_number = coalesce(sequence_number, ${sequence})
+               number = ${number}, sequence_number = coalesce(sequence_number, ${sequence}),
+               financial_year = ${financialYear},
+               due_on = coalesce(due_on, ${on.dueOnIfUnset}::date)
          WHERE id = ${invoiceId} AND status = 'draft'
         RETURNING ${db.unsafe(INVOICE_COLUMNS)}
       `;
@@ -685,7 +700,7 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
    * went to a credit note is a number an auditor cannot account for.
    */
   async issueCreditNote(c: NewCreditNote): Promise<CreditNote> {
-    const financialYear = financialYearOf(c.seriesDate);
+    const financialYear = c.financialYear;
     return withTenant(this.app, c.tenantId, async (db) => {
       await db`
         INSERT INTO crm.invoice_series
@@ -711,7 +726,12 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
       }
 
       const sequence = series.last_number + 1;
-      const number = formatInvoiceNumber({ prefix: series.prefix, financialYear, sequence });
+      const number = formatInvoiceNumber({
+        prefix: series.prefix,
+        financialYear,
+        sequence,
+        startMonth: c.fiscalYearStartMonth,
+      });
 
       await db`
         UPDATE crm.invoice_series SET last_number = ${sequence}

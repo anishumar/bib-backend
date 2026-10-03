@@ -95,16 +95,18 @@ describe("raising an invoice", () => {
     expect(american.entityPartyId).not.toBe(indian.entityPartyId);
   });
 
-  it("puts a March invoice in the previous year's series", async () => {
-    // The whole reason the year is financial and not calendar. A firm raising
-    // an invoice on 2 April for March's work sets `seriesDate` deliberately,
-    // and the year chosen at the draft is the series the issue numbers it in.
+  it("numbers an invoice in the series of the year it is ISSUED in (B03)", async () => {
+    // The whole reason the year is financial and not calendar: issued on 31
+    // March it is last year's; on 1 April the new year starts its own count
+    // at 1. Since the audit of 2026-10-03 the draft's `seriesDate` no longer
+    // decides it: the number and its year are drawn together, at issue.
     const s = setup();
-    const march = await issuedOne(s, { seriesDate: "2026-03-31" });
+    s.clock.set("2026-03-31T09:00:00Z");
+    const march = await issuedOne(s, { seriesDate: "2026-04-15" });
     expect(march.number).toBe("INV/2025-26/0001");
     expect(march.financialYear).toBe(2025);
-    // …and the new year starts its own count at 1, beside it.
-    const april = await issuedOne(s, { seriesDate: "2026-04-01" });
+    s.clock.set("2026-04-01T09:00:00Z");
+    const april = await issuedOne(s, { seriesDate: "2026-03-01" });
     expect(april.number).toBe("INV/2026-27/0001");
   });
 
@@ -853,5 +855,83 @@ describe("who an invoice names (F-10-1)", () => {
       s.service.setSeriesPrefix(TENANT, OTHER_CLIENT, "LV", ACTOR),
     ).rejects.toBeInstanceOf(InvoiceIssuerNotAFirmEntity);
     expect(s.events.recorded).toHaveLength(0);
+  });
+});
+
+describe("an invoice's year is the year it is ISSUED in (B03, audit 2026-10-03)", () => {
+  // A March draft issued in April used to keep last year's series: an advance
+  // auto-drafted on 28 March and issued on 3 April went out as INV/2026-27/00NN
+  // dated in FY 2027-28, which breaks the consecutive series rule. The number
+  // and its year are drawn together, at issue, from the issue date.
+  async function lined(s: ReturnType<typeof setup>) {
+    const invoice = await s.service.raise(raise(), ACTOR);
+    await s.service.addLine({ tenantId: TENANT, invoiceId: invoice.id, description: "Advisory", quantity: "1", unitAmount: "1000" });
+    return invoice;
+  }
+
+  it("numbers a March draft issued in April in the new year's series", async () => {
+    const s = setup();
+    s.timeZones.set("Asia/Kolkata");
+    s.clock.set("2027-03-28T06:00:00.000Z");
+    const draft = await lined(s);
+    expect(draft.financialYear).toBe(2026);
+
+    s.clock.set("2027-04-03T06:00:00.000Z");
+    const issued = await s.service.issue(TENANT, draft.id, ACTOR);
+    expect(issued).toMatchObject({ issuedOn: "2027-04-03", financialYear: 2027, number: "INV/2027-28/0001" });
+    expect(s.events.recorded.at(-1)?.payload).toMatchObject({ financialYear: 2027, number: "INV/2027-28/0001" });
+  });
+
+  it("uses the firm's own financial year when the firm has set one", async () => {
+    const s = setup();
+    s.settings.fiscalYearStartMonth = 1;
+    s.clock.set("2027-02-10T06:00:00.000Z");
+    const issued = await s.service.issue(TENANT, (await lined(s)).id, ACTOR);
+    // A calendar year is one year, and it is written as one.
+    expect(issued).toMatchObject({ financialYear: 2027, number: "INV/2027/0001" });
+  });
+});
+
+describe("a credit note is dated inside the invoice's life (B45, audit 2026-10-03)", () => {
+  async function issuedOn(s: ReturnType<typeof setup>, instant: string) {
+    s.clock.set(instant);
+    const invoice = await s.service.raise(raise(), ACTOR);
+    await s.service.addLine({ tenantId: TENANT, invoiceId: invoice.id, description: "Advisory", quantity: "1", unitAmount: "1000" });
+    return s.service.issue(TENANT, invoice.id, ACTOR);
+  }
+
+  it("refuses a credit note dated before the invoice it credits", async () => {
+    const s = setup();
+    const invoice = await issuedOn(s, "2026-07-10T06:00:00.000Z");
+    s.clock.set("2026-07-20T06:00:00.000Z");
+    await expect(
+      s.service.issueCreditNote(
+        { tenantId: TENANT, invoiceId: invoice.id, amount: "100", reason: "goodwill", issuedOn: "2026-07-05" },
+        ACTOR,
+      ),
+    ).rejects.toMatchObject({ code: "CREDIT_NOTE_DATE_OUT_OF_RANGE" });
+  });
+
+  it("refuses a credit note dated in the future", async () => {
+    const s = setup();
+    const invoice = await issuedOn(s, "2026-07-10T06:00:00.000Z");
+    await expect(
+      s.service.issueCreditNote(
+        { tenantId: TENANT, invoiceId: invoice.id, amount: "100", reason: "goodwill", issuedOn: "2026-08-01" },
+        ACTOR,
+      ),
+    ).rejects.toMatchObject({ code: "CREDIT_NOTE_DATE_OUT_OF_RANGE" });
+  });
+
+  it("numbers a credit note in the series of its own date", async () => {
+    const s = setup();
+    s.timeZones.set("Asia/Kolkata");
+    const invoice = await issuedOn(s, "2027-03-20T06:00:00.000Z");
+    s.clock.set("2027-04-02T06:00:00.000Z");
+    const credit = await s.service.issueCreditNote(
+      { tenantId: TENANT, invoiceId: invoice.id, amount: "100", reason: "goodwill" },
+      ACTOR,
+    );
+    expect(credit).toMatchObject({ issuedOn: "2027-04-02", financialYear: 2027, number: "CN/2027-28/0001" });
   });
 });

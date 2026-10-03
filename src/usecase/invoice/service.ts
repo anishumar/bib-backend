@@ -35,6 +35,7 @@ import {
   CREDIT_REASONS,
   PAYMENT_METHODS,
   canTransition,
+  INDIAN_FY_START_MONTH,
   financialYearOf,
   isCreditReason,
   isPaymentMethod,
@@ -73,12 +74,14 @@ import {
   InvoicePartyArchived,
   InvoiceManagerFrozen,
   ManagerNotStaff,
+  CreditNoteDateOutOfRange,
 } from "../../domain/invoice/errors";
 import { dayInZone, isCallersToday } from "../../domain/scheduler/zone";
 import type {
   FirmEntities,
   FirmTimeZone,
   InvoiceFilters,
+  InvoiceFirmSettings,
   InvoiceRecord,
   InvoiceRepository,
   InvoiceSeriesRecord,
@@ -104,6 +107,9 @@ export interface Deps {
   readonly issuedCopies: IssuedCopies;
   /** The roster, for a manager a person names (auto-invoice T4). */
   readonly staff: StaffDirectory;
+  /** The firm's reporting currency, financial year start and payment terms
+   *  (audit 2026-10-03). */
+  readonly settings: InvoiceFirmSettings;
 }
 
 export interface RaiseInvoiceInput {
@@ -115,8 +121,8 @@ export interface RaiseInvoiceInput {
   readonly fxRateDate: string;
   readonly dueOn?: string | undefined;
   readonly notes?: string | undefined;
-  /** Which year's books this belongs to. Defaults to today, and a firm raising
-   *  an invoice on 2 April for March's work overrides it. */
+  /** The draft's PROVISIONAL year (defaults to today). Since B03 the number's
+   *  year is the ISSUE date's, whatever this says. */
   readonly seriesDate?: string | undefined;
   /** The caller's today (see `isCallersToday`); the firm's day when absent. */
   readonly asOf?: string | undefined;
@@ -149,8 +155,8 @@ export class InvoiceService {
   constructor(private readonly deps: Deps) {}
 
   /**
-   * Start an invoice: a DRAFT, with no number yet (0322). `seriesDate` chooses
-   * which financial year's series the issue will number it in.
+   * Start an invoice: a DRAFT, with no number yet (0322). Its financial year is
+   * provisional: the issue takes the year of the issue date (B03).
    *
    * The currency and the FX rate are fixed HERE, at the top of the document,
    * and the lines are held to the currency by a composite foreign key — a
@@ -172,6 +178,7 @@ export class InvoiceService {
     this.dateOrThrow("fxRateDate", input.fxRateDate);
     const seriesDate = input.seriesDate ?? (await this.today(input.tenantId, input.asOf));
     this.dateOrThrow("seriesDate", seriesDate);
+    const settings = await this.deps.settings.invoiceSettingsFor(input.tenantId);
     if (input.dueOn !== undefined) this.dateOrThrow("dueOn", input.dueOn);
 
     // WHO issues it and WHO it bills, before anything is written (F-10-1). The
@@ -202,7 +209,7 @@ export class InvoiceService {
       dueOn: input.dueOn ?? null,
       notes: input.notes ?? null,
       managerUserId: input.managerUserId ?? null,
-      seriesDate,
+      financialYear: financialYearOf(seriesDate, settings.fiscalYearStartMonth ?? INDIAN_FY_START_MONTH),
     });
 
     await this.deps.events.recordEvent({
@@ -348,8 +355,18 @@ export class InvoiceService {
     // Greenwich's, which dated an invoice issued at 02:00 in Delhi the day
     // before it was issued.
     const issuedOn = await this.today(tenantId, asOf);
+    // AND ITS YEAR IS THAT DAY'S (B03). It was the draft's, so a March draft
+    // issued in April took last year's series with an April date on it. The
+    // firm's own year when it has said when that starts, else 1 April.
+    const settings = await this.deps.settings.invoiceSettingsFor(tenantId);
+    const startMonth = settings.fiscalYearStartMonth ?? INDIAN_FY_START_MONTH;
     // THE NUMBER IS DRAWN HERE (0322), in the same transaction as the status.
-    const issued = await this.deps.invoices.issue(tenantId, invoiceId, issuedOn);
+    const issued = await this.deps.invoices.issue(tenantId, invoiceId, {
+      issuedOn,
+      financialYear: financialYearOf(issuedOn, startMonth),
+      fiscalYearStartMonth: startMonth,
+      dueOnIfUnset: null,
+    });
     await this.deps.events.recordEvent({
       tenantId,
       verb: "invoice.issued",
@@ -603,8 +620,17 @@ export class InvoiceService {
     if (!isCreditReason(input.reason)) {
       throw new InvalidCreditReason(input.reason, CREDIT_REASONS);
     }
-    const issuedOn = input.issuedOn ?? (await this.today(input.tenantId, input.asOf));
+    const today = await this.today(input.tenantId, input.asOf);
+    const issuedOn = input.issuedOn ?? today;
     this.dateOrThrow("issuedOn", issuedOn);
+    // INSIDE THE INVOICE'S LIFE (B45). A caller-chosen date could predate the
+    // invoice it credits, or land in any year's series; a credit note is dated
+    // between the invoice's issue and today.
+    if ((invoice.issuedOn !== null && issuedOn < invoice.issuedOn) || issuedOn > today) {
+      throw new CreditNoteDateOutOfRange(issuedOn, invoice.issuedOn, today);
+    }
+    const settings = await this.deps.settings.invoiceSettingsFor(input.tenantId);
+    const startMonth = settings.fiscalYearStartMonth ?? INDIAN_FY_START_MONTH;
 
     // A firm cannot credit more than it billed. Checked here rather than in a
     // CHECK constraint because the limit depends on the SUM of every OTHER
@@ -635,7 +661,9 @@ export class InvoiceService {
       issuedOn,
       reason: input.reason,
       note: input.note ?? null,
-      seriesDate: issuedOn,
+      // Its own date's series, never the invoice's (B45).
+      financialYear: financialYearOf(issuedOn, startMonth),
+      fiscalYearStartMonth: startMonth,
     });
 
     await this.deps.events.recordEvent({

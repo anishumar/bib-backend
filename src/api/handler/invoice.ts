@@ -79,7 +79,9 @@ const InvoiceSchema = z
         "one issued, and both stay readable.",
     }),
     financialYear: z.number().int().openapi({
-      description: "The financial year whose series the number is (or will be) drawn from, chosen at the draft.",
+      description:
+        "The financial year whose series the number was drawn from. On a draft it is provisional: " +
+        "issuing takes the year of the issue date, in the firm's own financial year (B03).",
     }),
     sequenceNumber: z.number().int().nullable(),
     status: z.enum(STATUS_VALUES),
@@ -217,8 +219,8 @@ const RaiseInvoiceRequest = z
     notes: z.string().max(2000).optional(),
     seriesDate: z.string().optional().openapi({
       description:
-        "Which financial year's series this belongs to. Defaults to today; a firm raising an " +
-        "invoice on 2 April for March's work sets it deliberately.",
+        "The draft's provisional financial year (defaults to today). It does not decide the " +
+        "number: an invoice is numbered in the series of the year it is ISSUED in (B03).",
     }),
     managerUserId: z.string().uuid().nullable().optional().openapi({
       description:
@@ -260,8 +262,8 @@ const raiseRoute = createRoute({
   description:
     "A DRAFT, with no number (0322). The number comes from a gapless per-entity, " +
     "per-financial-year series when the invoice is ISSUED, taken under a row lock inside the " +
-    "same transaction as the issue, so a draft cancelled before issue spends nothing. " +
-    "`seriesDate` chooses which financial year's series it will be numbered in.",
+    "same transaction as the issue, so a draft cancelled before issue spends nothing, and in the " +
+    "series of the year the issue date falls in (the firm's financial year, else 1 April).",
   request: {
     query: CallerDayQuery,
     body: { content: { "application/json": { schema: RaiseInvoiceRequest } }, required: true },
@@ -616,7 +618,9 @@ const creditNoteRoute = createRoute({
   description:
     "Its own document with its own gapless series. The reason is mandatory and closed — " +
     "without it revenue leakage is invisible, because the numbers always reconcile and why " +
-    "does not. A firm cannot credit more than it billed.",
+    "does not. A firm cannot credit more than it billed. `issuedOn` (default today) must be on " +
+    "or after the invoice's issue date and not after today (CREDIT_NOTE_DATE_OUT_OF_RANGE, 400); " +
+    "it is numbered in the series of its own date's year.",
   request: {
     params: z.object({ invoiceId: z.string().uuid() }),
     query: CallerDayQuery,

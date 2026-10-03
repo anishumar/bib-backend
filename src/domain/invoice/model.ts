@@ -123,27 +123,36 @@ export interface InvoiceTotals {
  * states — and a UTC `Date` moves 1 April by a day for anyone east or west of
  * Greenwich, which is exactly the boundary this function exists to find.
  *
- * 1 APRIL IS HARDCODED and that is a real limit: right for India, wrong for the
- * UK (6 April), the US (varies) and the UAE (calendar). It is not read from
- * `core.legal_entity.financial_year_end` because doing so makes a series' year
- * depend on a mutable column — change the entity's year end and every FUTURE
- * number changes its prefix while issued ones keep theirs. That is a decision
- * about a legal document series, and it needs a firm to take it.
+ * 1 APRIL IS THE DEFAULT, NOT THE ONLY ANSWER (audit 2026-10-03, B03). An
+ * invoice's year is decided when it is ISSUED, from its issue date, in the
+ * firm's own financial year when the firm has said when that starts (its
+ * compliance policy's `fiscalYearStartMonth`), else 1 April as before. It is
+ * read at issue, so changing the setting moves only numbers not yet drawn,
+ * never an issued one. The SQL copy keeps 1 April: nothing constrains on it.
  */
-export function financialYearOf(isoDate: string): number {
+export function financialYearOf(isoDate: string, startMonth: number = INDIAN_FY_START_MONTH): number {
   const match = /^(\d{4})-(\d{2})-\d{2}$/.exec(isoDate);
   if (match === null) {
     throw new RangeError(`expected an ISO date (YYYY-MM-DD), got ${JSON.stringify(isoDate)}`);
   }
+  if (!Number.isInteger(startMonth) || startMonth < 1 || startMonth > 12) {
+    throw new RangeError(`a financial year starts in a month from 1 to 12, got ${String(startMonth)}`);
+  }
   const year = Number(match[1]);
   const month = Number(match[2]);
-  return month >= 4 ? year : year - 1;
+  return month >= startMonth ? year : year - 1;
 }
+
+/** 1 April: India's financial year, and the year every series used before a
+ *  firm could say otherwise. */
+export const INDIAN_FY_START_MONTH = 4;
 
 /** `2026-27` — how a financial year is written on the document itself. Both
  *  halves, because "FY 2026" is ambiguous in exactly the countries this product
- *  serves. */
-export function financialYearLabel(startYear: number): string {
+ *  serves. A year that starts in January is one calendar year and is written
+ *  as one: `2026`. */
+export function financialYearLabel(startYear: number, startMonth: number = INDIAN_FY_START_MONTH): string {
+  if (startMonth === 1) return String(startYear);
   return `${String(startYear)}-${String((startYear + 1) % 100).padStart(2, "0")}`;
 }
 
@@ -163,6 +172,8 @@ export function formatInvoiceNumber(input: {
   readonly prefix: string;
   readonly financialYear: number;
   readonly sequence: number;
+  /** The month the year starts in; 1 April when absent. */
+  readonly startMonth?: number | undefined;
 }): string {
   if (!Number.isInteger(input.sequence) || input.sequence < 1) {
     throw new RangeError(
@@ -171,7 +182,7 @@ export function formatInvoiceNumber(input: {
   }
   return [
     input.prefix,
-    financialYearLabel(input.financialYear),
+    financialYearLabel(input.financialYear, input.startMonth),
     String(input.sequence).padStart(4, "0"),
   ].join("/");
 }

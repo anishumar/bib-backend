@@ -1738,7 +1738,7 @@ describe("who a letter and an invoice name, in the database (F-10-1, 0306)", () 
       fxRateDate: "2026-07-01",
       dueOn: null,
       notes: null,
-      seriesDate: "2026-07-01",
+      financialYear: 2026,
     };
     const issuedByClient = await invoices
       .create({ ...draft, id: systemIds.newId(), partyId: entityA1, entityPartyId: partyA })
@@ -1762,7 +1762,7 @@ describe("who a letter and an invoice name, in the database (F-10-1, 0306)", () 
       fxRateDate: "2026-07-01",
       dueOn: null,
       notes: null,
-      seriesDate: "2026-07-01",
+      financialYear: 2026,
       entityPartyId: firmEntityA,
     };
     const acmes = await invoices.create({ ...base, id: systemIds.newId(), partyId: partyA });

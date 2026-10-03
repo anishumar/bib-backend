@@ -29,6 +29,7 @@ import { PostgresInvoiceRepository } from "../../src/infrastructure/postgres/inv
 import { PostgresEventStore } from "../../src/infrastructure/postgres/event-repository";
 import { LedgerService } from "../../src/usecase/ledger/service";
 import { InvoiceService } from "../../src/usecase/invoice/service";
+import { PostgresInvoiceFirmSettings } from "../../src/infrastructure/postgres/invoice-settings";
 import { PostgresFirmTimeZone } from "../../src/infrastructure/postgres/firm-timezone-repository";
 import { PostgresDocumentRepository } from "../../src/infrastructure/postgres/document-repository";
 import { PostgresPartyRepository } from "../../src/infrastructure/postgres/party-repository";
@@ -59,6 +60,7 @@ const service = new InvoiceService({
   // No document store here: these tests are about the money and the series.
   issuedCopies: new FakeIssuedCopies(),
   staff: new FakeStaffDirectory(),
+  settings: new PostgresInvoiceFirmSettings(app),
 });
 
 const stamp = Date.now().toString(36);
@@ -158,9 +160,20 @@ describe("the series is consecutive", () => {
     expect(other.number).toBe("INV/2026-27/0001");
   });
 
-  it("starts a new count in a new financial year", async () => {
-    const next = await issued({ seriesDate: "2027-04-01" });
-    expect(next.number).toBe("INV/2027-28/0001");
+  it("starts a new count in a new financial year, the year the invoice is ISSUED in (B03)", async () => {
+    // A draft made on 28 March 2027 (FY 2026-27) and issued on 3 April 2027:
+    // the number and its year are drawn together, at issue, in the same write.
+    // It used to keep the draft's year and go out as INV/2026-27/… dated in
+    // FY 2027-28. The trigger admits the move only in the issuing write.
+    const d = await drafted({ seriesDate: "2027-03-28" });
+    expect(d.financialYear).toBe(2026);
+    const next = await invoices.issue(tenant, d.id, {
+      issuedOn: "2027-04-03",
+      financialYear: 2027,
+      fiscalYearStartMonth: 4,
+      dueOnIfUnset: null,
+    });
+    expect(next).toMatchObject({ financialYear: 2027, issuedOn: "2027-04-03", number: "INV/2027-28/0001" });
   });
 });
 
@@ -442,7 +455,7 @@ describe("the tenant wall", () => {
         fxRateDate: "2026-07-01",
         dueOn: null,
         notes: null,
-        seriesDate: "2026-07-01",
+        financialYear: 2026,
       })
       .catch((e: unknown) => e);
     expect((wall as { code?: string }).code).toBe("23514"); // check_violation
