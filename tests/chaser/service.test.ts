@@ -387,3 +387,55 @@ describe("setting and lifting a freeze", () => {
     expect(history.map((f) => f.reason).sort()).toEqual(["fee dispute", "scope renegotiation"]);
   });
 });
+
+describe("the sweep's today is the FIRM's (audit 2026-10-03, B41)", () => {
+  // T6.14: a sweep has no caller to say which day it is, so it is the day in
+  // the firm's zone. The chaser used the server's UTC day, and the freeze's
+  // lift defaulted to it too.
+  function kolkata(at: string) {
+    const ladders = new FakeChaserLadder();
+    ladders.publish(TENANT, LADDER);
+    const candidates = new FakeChaseCandidates();
+    const freezes = new FakeClientFreezeRepo().client(COBALT);
+    const service = new ChaserService({
+      timeZones: new FakeFirmTimeZone("Asia/Kolkata"),
+      tenants: new FakeChaserTenants([TENANT]),
+      ladders,
+      candidates,
+      chases: new FakeChaseRepo(),
+      freezes,
+      ids: new FakeIds(),
+      // 20:00 UTC on 1 September is 01:30 on the 2nd in India.
+      clock: new FakeClock(new Date(at)),
+      events: new RecordingEventSink(),
+    });
+    return { service, candidates, freezes };
+  }
+
+  it("asks for open requests on the firm's day when no day is given", async () => {
+    const { service, candidates } = kolkata("2026-09-01T20:00:00.000Z");
+    await service.sweep();
+    await service.sweepTenant(TENANT);
+    expect(candidates.askedOn).toEqual(["2026-09-02", "2026-09-02"]);
+  });
+
+  it("still takes the day a caller names", async () => {
+    const { service, candidates } = kolkata("2026-09-01T20:00:00.000Z");
+    await service.sweep("2026-08-30");
+    expect(candidates.askedOn).toEqual(["2026-08-30"]);
+  });
+
+  it("lifts a freeze on the firm's day", async () => {
+    const { service } = kolkata("2026-09-01T20:00:00.000Z");
+    const set = await service.freeze({
+      tenantId: TENANT,
+      clientPartyId: COBALT,
+      validFrom: "2026-08-20",
+      validTo: null,
+      reason: "fee dispute",
+      actor,
+    });
+    const lifted = await service.lift({ tenantId: TENANT, freezeId: set.id, actor });
+    expect(lifted.validTo).toBe("2026-09-02");
+  });
+});

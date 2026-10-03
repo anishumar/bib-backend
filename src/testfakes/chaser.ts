@@ -58,9 +58,12 @@ export class FakeChaseCandidates implements ChaseCandidateSource {
     return this;
   }
 
+  /** The day each read was asked on, so a test can see whose calendar. */
+  readonly askedOn: IsoDate[] = [];
+
   openAsks(
     _tenantId: string,
-    _asOf: IsoDate,
+    asOf: IsoDate,
     // Ignored: this fake holds candidates directly rather than deriving
     // `daysOpen` from a clock, so there is no calendar for a zone to move.
     // `tests/portallibrary/digest.integration.test.ts` is where the zone has to
@@ -73,6 +76,7 @@ export class FakeChaseCandidates implements ChaseCandidateSource {
     // The frozen list is RETURNED rather than applied, exactly as the real
     // adapter returns it — the service counts them, and a fake that filtered
     // here would make the `frozen` figure untestable.
+    this.askedOn.push(asOf);
     return Promise.resolve({ candidates: this.candidates, frozenClients: [...this.frozen] });
   }
 }
