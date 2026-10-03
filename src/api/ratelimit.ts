@@ -9,8 +9,31 @@
 //
 // Mounted by prefix like the auth guards, for the same reason: a limit each
 // route remembers to apply is a limit new routes forget.
+//
+// ── THE SIGNED-IN SURFACE IS COUNTED PER SESSION (audit 2026-10-03) ─────────
+//
+// The backstop bucket used to be the address too, for every request. A firm of
+// forty behind one office NAT gateway then shared ONE 300-a-minute bucket, and
+// the frontend read a 429 on `/auth/me` as "signed out" (F15, B28, CA#14). So:
+//
+//   · the sign-in routes (PUBLIC_PATHS)      → the tight bucket, per ADDRESS
+//   · a signed-in request on /api/v1         → the general bucket, per SESSION
+//   · everything else on the address: /internal, /health, the docs, and any
+//     /api/v1 request whose credential is missing or does not resolve
+//
+// The last line is what keeps the session key from being a way out of the
+// limit. A credential is only known to be real AFTER the session lookup, so a
+// caller who invented a fresh cookie per request would otherwise get a fresh
+// bucket per request and a free lookup each time. Instead the ADDRESS is
+// charged for every credential that failed, and an address that has spent its
+// budget is refused before the next lookup is paid for. A colleague whose
+// session is real is never charged to the office's address at all.
+//
+// The numbers are unchanged (BIB_RATELIMIT_*). Only the key moved.
+import { createHash } from "node:crypto";
 import type { MiddlewareHandler } from "hono";
 import { getConnInfo } from "@hono/node-server/conninfo";
+import type { Principal } from "../platform/callctx";
 import type { RateLimiter } from "../platform/ratelimit";
 import type { AppEnv } from "./guards";
 import { toEnvelope } from "./httpresp";
@@ -62,6 +85,10 @@ export interface RateLimitConfig {
  * A limited request gets 429 with Retry-After, and never reaches the handler —
  * which is the point on the login route, where reaching the handler means
  * spending 32 MB and ~50 ms on a scrypt hash for an unauthenticated caller.
+ *
+ * Runs BEFORE the session guard. A non-public /api/v1 request is not counted
+ * here when its credential resolves: `sessionRateLimit`, mounted after the
+ * guard, counts it against the session. See the header of this file.
  */
 export function rateLimit(
   limiter: RateLimiter,
@@ -70,7 +97,6 @@ export function rateLimit(
 ): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
     const isAuth = authPaths.has(c.req.path);
-    const rule = isAuth ? cfg.auth : cfg.general;
     const client = clientKey(c.req.raw, () => remoteAddressOf(c), cfg);
     // Published for the login handler: the per-account attempt budget is spent
     // per caller, so that ten wrong guesses cost the guesser their own budget
@@ -78,25 +104,100 @@ export function rateLimit(
     // knows how to derive an address it is safe to believe.
     c.set("clientKey", client);
 
+    if (!isAuth && c.req.path.startsWith(SESSION_SURFACE)) {
+      // Signed-in surface: refuse an address that has spent its budget on
+      // credentials that did not resolve, before paying for another lookup...
+      const addressKey = `general:${client}`;
+      const standing = await limiter.peek(addressKey, cfg.general.limit, cfg.general.windowSeconds);
+      if (!standing.allowed) return tooMany(c, standing.retryAfterSeconds);
+      await next();
+      // ...and charge it for this one if the guard found nobody behind it.
+      // `principal` is set (to a principal, or to null on a public route) by
+      // the session guard whenever it lets a request through.
+      if (!resolved(c)) {
+        await limiter.check(addressKey, cfg.general.limit, cfg.general.windowSeconds);
+      }
+      return undefined;
+    }
+
+    const rule = isAuth ? cfg.auth : cfg.general;
     const decision = await limiter.check(
       `${isAuth ? "auth" : "general"}:${client}`,
       rule.limit,
       rule.windowSeconds,
     );
-    if (!decision.allowed) {
-      c.header("Retry-After", String(decision.retryAfterSeconds));
-      return c.json(
-        toEnvelope({
-          status: 429,
-          code: "RATE_LIMITED",
-          message: `too many requests; retry in ${String(decision.retryAfterSeconds)}s`,
-        }),
-        429,
-      );
-    }
+    if (!decision.allowed) return tooMany(c, decision.retryAfterSeconds);
     await next();
     return undefined;
   };
+}
+
+/** What the session guard left on the context. The declared type says
+ *  `Principal | null`, but a request the guard REFUSED never had it set, and
+ *  that absence is exactly what the address is charged for. */
+function seenPrincipal(c: Parameters<MiddlewareHandler<AppEnv>>[0]): Principal | null | undefined {
+  const seen: Principal | null | undefined = c.get("principal");
+  return seen;
+}
+
+/** Did the session guard let this request through (as somebody, or as a
+ *  public route)? */
+function resolved(c: Parameters<MiddlewareHandler<AppEnv>>[0]): boolean {
+  return seenPrincipal(c) !== undefined;
+}
+
+/** The prefix whose requests carry a session, and so are counted per session. */
+const SESSION_SURFACE = "/api/v1/";
+
+/**
+ * The general budget, per SESSION, for a request the session guard has let
+ * through with a principal. Mounted directly after the guard.
+ *
+ * The key is a digest of the session id, so the limiter's map never holds a
+ * session identifier — a dump of it names nobody. Every tab and window of one
+ * sign-in shares the bucket, because they share the cookie; a phone moving
+ * from the office Wi-Fi to mobile data keeps its count, because the count
+ * follows the session and not the address.
+ */
+export function sessionRateLimit(
+  limiter: RateLimiter,
+  cfg: Pick<RateLimitConfig, "general">,
+): MiddlewareHandler<AppEnv> {
+  return async (c, next) => {
+    const principal = seenPrincipal(c);
+    // A public route (the guard sets null) was counted on the address already.
+    if (principal === null || principal === undefined) {
+      await next();
+      return undefined;
+    }
+    const decision = await limiter.check(
+      `session:${createHash("sha256").update(principal.sessionId).digest("hex")}`,
+      cfg.general.limit,
+      cfg.general.windowSeconds,
+    );
+    if (!decision.allowed) return tooMany(c, decision.retryAfterSeconds);
+    await next();
+    return undefined;
+  };
+}
+
+/** The refusal. Read by people (the frontend shows `message` verbatim), so it
+ *  says what to do rather than what happened inside. */
+function tooMany(
+  c: Parameters<MiddlewareHandler<AppEnv>>[0],
+  retryAfterSeconds: number,
+): Response {
+  c.header("Retry-After", String(retryAfterSeconds));
+  return c.json(
+    toEnvelope({
+      status: 429,
+      code: "RATE_LIMITED",
+      message: `Too many requests at once. Wait ${String(retryAfterSeconds)} ${
+        retryAfterSeconds === 1 ? "second" : "seconds"
+      } and try again.`,
+    }),
+    429,
+  );
 }
 
 /**

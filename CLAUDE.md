@@ -1173,6 +1173,30 @@ The store is a port with an in-process implementation — **per-process, so behi
 every limit is N times looser**. That is fine at one pod and is why the interface is async:
 Redis drops in unchanged.
 
+**The signed-in surface is counted per SESSION (audit 2026-10-03, B28 / F15 / CA#14).** Keying
+every request on the address put a whole office behind one NAT gateway in one 300-a-minute
+bucket, and the frontend read the resulting 429 on `/auth/me` as "signed out". Now:
+
+| Request | Bucket | Key |
+|---|---|---|
+| a sign-in route (`PUBLIC_PATHS`) | `auth` (10/min) | the address, as before |
+| `/api/v1/*` whose credential resolves | `general` (300/min) | `session:` + SHA-256 of the session id (`sessionRateLimit`, mounted straight after `sessionGuard`) |
+| `/api/v1/*` with no credential, or one that does not resolve | `general` | the address, charged AFTER the lookup failed; an address that has spent it is refused BEFORE the next lookup (`RateLimiter.peek`) |
+| `/internal`, `/health`, the docs | `general` | the address |
+
+The third row is what stops the session key being a way out of the limit: a credential is
+only known to be real after the lookup, so inventing a fresh cookie per request would
+otherwise buy a fresh bucket and a free lookup each time. Its cost is that an address which
+has spent its budget on bad credentials holds back everyone at it until the window clears,
+which is no worse than before. A real session's own requests never touch the address
+bucket. The numbers (`BIB_RATELIMIT_*`) did not move. Tests: `tests/api/auth-coverage.test.ts`
+"the rate limit keys a signed-in caller on the SESSION", `tests/platform/ratelimit.test.ts`
+"peeks without counting".
+
+One thing the session key does NOT bound: somebody who signs in N times holds N buckets.
+Sessions come from the sign-in routes, which stay on the address and the account budgets;
+if that ever matters, a per-USER key on the same middleware is the next step.
+
 ## The audit ledger
 
 Every state transition writes an event. Depend on the **`EventSink`** port
