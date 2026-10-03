@@ -5,21 +5,20 @@
 // the engagement module knows nothing about PDFs; they meet at
 // `RenderableDocument` and nowhere else.
 //
-// ── MONEY IS WRITTEN WITH ITS ISO CODE, NOT ITS SYMBOL ─────────────────────
+// ── MONEY: ONE FORMATTER, THE SCREENS' SHAPE (audit 2026-10-03) ─────────────
 //
-// "INR 18,000.00", never "₹18,000.00", and this is now a PRODUCT decision
-// rather than a technical one.
+// Every document drawn since 0334 writes money with `documentMoney`
+// (`domain/render/money.ts`): "₹12,50,000" in lakhs for rupees, "AED 5,000"
+// with its code for anything else, paise only when there are some, and
+// always two places on a tax invoice. It used to be "INR 1,250,000.00" on
+// letters and invoices and "INR 12,50,000" on proposals while every screen
+// said "₹12,50,000". The code stays for every currency but the rupee, which is
+// the cross-border argument this file used to make for codes everywhere: "$"
+// is ambiguous across the firm's four countries, "₹" is not.
 //
-// It began as both. The built-in PDF fonts could not draw the rupee sign at
-// all, so the ISO code was the only option — and T3.9 removed that constraint:
-// the renderer carries Noto Sans latin-ext and draws ₹ perfectly well now.
-//
-// The choice stands anyway, on the reason that was always the stronger of the
-// two. This is a CROSS-BORDER product — G1.8 exists because a letter issued by
-// the US entity must not print Indian law — and the same invoice may be read in
-// Dubai or Delaware by somebody for whom a bare symbol is ambiguous or simply
-// unfamiliar. A three-letter ISO code is unambiguous everywhere, and a firm that
-// wants the symbol can now have it by changing this one function.
+// A letter or an invoice that went out BEFORE 0334 keeps `money()` below, the
+// western "INR 1,250,000.00" it was issued in: its copy of record, and every
+// re-render of it, must read as the document its client holds.
 import { isLetterBillingTiming } from "../../domain/engagement/model";
 import { readClauseBody, readServiceBody } from "../../domain/config/model";
 import type { Db } from "../../db/pool";
@@ -48,7 +47,10 @@ import type {
 import { isDrawableImage } from "../../domain/render/model";
 import { CLIENT_DATE_ANCHOR, CLIENT_SIGN_ANCHOR } from "../../domain/render/model";
 import type { DescribedDocument, RenderSource } from "../../usecase/render/ports";
-import { isoInstant, utcDayOf, zoneDayOf } from "./instant";
+import { isoInstant, zoneDayOf } from "./instant";
+import { amountInWords, documentMoney } from "../../domain/render/money";
+import { readPostalAddress } from "../../domain/party/address";
+import type { PostalAddress } from "../../domain/party/address";
 
 /** A letter as its layout draws it; `letter` adds whether it went out. */
 type LetterDrawn = Omit<DescribedDocument, "isOut">;
@@ -99,6 +101,10 @@ interface LetterRow {
   client_name: string;
   entity_name: string;
   entity_jurisdiction: string | null;
+  /** Frozen at Send (0334); null on a draft and on a letter sent before. */
+  printed_parties: unknown;
+  /** The firm's company as a draft prints it, read live; null once sent. */
+  live_issuer: unknown;
 }
 
 interface LetterLineRow {
@@ -146,6 +152,10 @@ interface InvoiceRow {
   net: string;
   tax: string;
   total: string;
+  /** Frozen at Issue (0334); null on a draft and before 0334. */
+  printed_parties: unknown;
+  /** Read live for a draft; null once issued. */
+  live_parties: unknown;
 }
 
 interface InvoiceLineRow {
@@ -228,7 +238,7 @@ export class PostgresRenderSource implements RenderSource {
     if (input.kind === "engagement_letter") {
       return this.letter(input.tenantId, input.subjectRef, input.asIfSentOn);
     }
-    if (input.kind === "invoice") return this.invoice(input.tenantId, input.subjectRef);
+    if (input.kind === "invoice") return this.invoice(input.tenantId, input.subjectRef, input.asIfSentOn);
     if (input.kind === "proposal") {
       return this.proposal(input.tenantId, input.subjectRef, input.asIfSentOn);
     }
@@ -371,6 +381,15 @@ export class PostgresRenderSource implements RenderSource {
       const previewing = asIfSentOn !== undefined && row.status === "draft";
       const issuedOn = previewing ? asIfSentOn : (row.sent_on ?? row.created_on);
       const cover = await this.brandImage(db, tenantId, row.issuing_entity_party_id, "proposal_cover");
+      // The issuing company's letterhead at the foot of each page after the
+      // cover (CA#18), as it stands on the day the proposal is dated. A sent
+      // proposal is read from its PDF of record, never redrawn.
+      const [who] = await db<{ identity: unknown }[]>`
+        SELECT crm.print_identity(${row.issuing_entity_party_id},
+                                  (now() AT TIME ZONE t.time_zone)::date) AS identity
+          FROM tenancy.tenant t WHERE t.id = ${tenantId}
+      `;
+      const issuerOnPaper = readPrintedParty(who?.identity ?? null);
 
       const preparedBy: CoverLine[] = [];
       if (row.preparer_name !== null) preparedBy.push({ text: row.preparer_name, bold: true });
@@ -412,6 +431,7 @@ export class PostgresRenderSource implements RenderSource {
             },
           },
           running: `${row.ref}  ·  ${longDate(issuedOn)}`,
+          ...(issuerOnPaper === null ? {} : { letterhead: letterheadLines(issuerOnPaper) }),
           flow: [
             ...(row.background === null || row.background.trim() === ""
               ? []
@@ -492,10 +512,19 @@ export class PostgresRenderSource implements RenderSource {
                ${db.unsafe(isoInstant("el.signed_at", "signed_at"))},
                el.signed_by_name, el.signed_by_title, el.firm_signatory_title,
                el.firm_signature_version_id,
-               ${db.unsafe(utcDayOf("el.created_at", "created_on"))},
+               -- The FIRM's day (B42): a letter first saved at 01:00 in Delhi
+               -- was dated the UTC day before on a draft copy.
+               ${db.unsafe(zoneDayOf("el.created_at", "firm.time_zone", "created_on"))},
                client.display_name AS client_name,
                entity.display_name AS entity_name,
                le.jurisdiction     AS entity_jurisdiction,
+               -- WHO IT IS FROM (0334): frozen by Send; a draft reads its
+               -- issuing company live, as it stands today on the firm's
+               -- calendar, which is what Send will freeze.
+               el.printed_parties,
+               CASE WHEN el.status = 'draft' THEN crm.print_identity(el.issuing_entity_party_id,
+                 (now() AT TIME ZONE firm.time_zone)::date)
+               END AS live_issuer,
                -- The firm's signatory BY NAME, a read-time join like the
                -- ledger's actor: the letter snapshots the account and the
                -- capacity, and an erased account stops resolving.
@@ -861,11 +890,21 @@ export class PostgresRenderSource implements RenderSource {
       }
     }
 
+    // THE PRINT SINCE 0334 (audit 2026-10-03), for a draft and for a letter
+    // sent since: the issuing company's letterhead (address, contact,
+    // registration numbers) and money as the screens write it. A letter sent
+    // before 0334 has nothing frozen and prints exactly as it did.
+    const current = row.status === "draft" || row.printed_parties !== null;
+    const from = current
+      ? (readPrintedParties(row.printed_parties)?.issuer ?? readPrintedParty(row.live_issuer))
+      : null;
+    const fmt: Fmt = (amount, currency) => (current ? documentMoney(amount, currency) : money(amount, currency));
+
     const firm: SignatureBlock | null =
       row.firm_signatory_title === null
         ? null
         : {
-            heading: `For ${row.entity_name}`,
+            heading: `For ${from?.name ?? row.entity_name}`,
             lines: [row.firm_signatory_name ?? "", row.firm_signatory_title, row.firm_signatory_email ?? ""]
               .filter((l) => l.trim() !== ""),
             // Pinned at send, never looked up now (0081) — the classic letter's
@@ -878,11 +917,14 @@ export class PostgresRenderSource implements RenderSource {
     const document: RenderableDocument = {
       documentTitle: row.title,
       reference: row.ref,
-      issuer: {
-        name: row.entity_name,
-        lines: [row.entity_jurisdiction === null ? "" : `Registered in ${row.entity_jurisdiction}`]
-          .filter((l) => l !== ""),
-      },
+      issuer:
+        from !== null
+          ? { name: from.name, lines: letterheadLines(from) }
+          : {
+              name: row.entity_name,
+              lines: [row.entity_jurisdiction === null ? "" : `Registered in ${row.entity_jurisdiction}`]
+                .filter((l) => l !== ""),
+            },
       recipient: { name: row.client_name, lines: [] },
       recipientLabel: "To",
       meta: [],
@@ -890,8 +932,8 @@ export class PostgresRenderSource implements RenderSource {
       table: null,
       totals: [],
       footer: row.signed_by_name === null
-        ? row.entity_name
-        : `${row.entity_name}   ·   signed by ${row.signed_by_name}${row.signed_by_title === null ? "" : `, ${row.signed_by_title}`}`,
+        ? (from?.name ?? row.entity_name)
+        : `${from?.name ?? row.entity_name}   ·   signed by ${row.signed_by_name}${row.signed_by_title === null ? "" : `, ${row.signed_by_title}`}`,
       annexureLetter: {
         cover: {
           dateLine: `Dated ${longDate(row.issued_on ?? row.created_on)}`,
@@ -938,13 +980,15 @@ export class PostgresRenderSource implements RenderSource {
               ...(row.background === null || row.background.trim() === ""
                 ? []
                 : [heading(1, "Background", "letter.background"), paragraph(row.background, false, "letter.background")]),
-              ...scopeFlow(plan),
+              ...scopeFlow(plan, fmt),
               ...feesFlow(
                 plan,
                 row,
                 lines.flatMap((l) =>
                   l.advance_amount === null ? [] : [{ description: l.description, amount: l.advance_amount }],
                 ),
+                fmt,
+                current,
               ),
               ...titledBlocks("Commercials", byKind("commercial"), "commercial"),
               ...titledBlocks("Team deployment", byKind("team"), "team"),
@@ -972,21 +1016,50 @@ export class PostgresRenderSource implements RenderSource {
     return { document, partyId: row.party_id };
   }
 
-  private async invoice(tenantId: string, invoiceId: string): Promise<DescribedDocument | null> {
+  private async invoice(
+    tenantId: string,
+    invoiceId: string,
+    asIfSentOn: string | undefined,
+  ): Promise<DescribedDocument | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<InvoiceRow[]>`
         SELECT i.party_id, i.number, i.currency, i.issued_on::text, i.due_on::text,
-               ${db.unsafe(utcDayOf("i.created_at", "created_on"))}, i.irn,
+               -- The FIRM's day (B42), never the UTC day it was first saved.
+               ${db.unsafe(zoneDayOf("i.created_at", "firm.time_zone", "created_on"))}, i.irn,
                client.display_name AS client_name,
                entity.display_name AS entity_name,
-               t.gross::text, t.discount::text, t.net::text, t.tax::text, t.total::text
+               t.gross::text, t.discount::text, t.net::text, t.tax::text, t.total::text,
+               -- WHO IT IS FROM AND TO (0334): frozen by Issue, or read live
+               -- for a draft as it stands TODAY on the firm's calendar, which
+               -- is what Issue will freeze. NULL frozen on an invoice issued
+               -- before 0334, which prints as it always did.
+               i.printed_parties,
+               CASE WHEN i.issued_on IS NULL THEN jsonb_build_object(
+                 'issuer', crm.print_identity(i.entity_party_id, (now() AT TIME ZONE firm.time_zone)::date),
+                 'recipient', crm.print_identity(i.party_id, (now() AT TIME ZONE firm.time_zone)::date))
+               END AS live_parties
         FROM crm.invoice i
         JOIN core.party client ON client.id = i.party_id
         JOIN core.party entity ON entity.id = i.entity_party_id
+        JOIN tenancy.tenant firm ON firm.id = i.tenant_id
         JOIN crm.invoice_totals t ON t.invoice_id = i.id AND t.tenant_id = i.tenant_id
         WHERE i.id = ${invoiceId}
       `;
       if (!row) return null;
+      // A DRAFT is dated as Issue will date it, on the firm's day (B42): the
+      // day the preview or the draft copy is drawn. An issued invoice keeps its
+      // own date.
+      const previewing = asIfSentOn !== undefined && row.issued_on === null;
+      const dated = row.issued_on ?? (previewing ? asIfSentOn : row.created_on);
+      // THE PRINT SINCE 0334 (audit 2026-10-03), for a draft and for an
+      // invoice issued since: its parties' addresses and numbers, money as the
+      // screens write it (two places, a tax invoice's norm) and the total in
+      // words. An invoice issued before 0334 has nothing frozen and prints
+      // exactly as it did: the copy its client holds.
+      const parties = readPrintedParties(row.printed_parties ?? row.live_parties);
+      const current = row.issued_on === null || row.printed_parties !== null;
+      const fmt = (amount: string): string =>
+        current ? documentMoney(amount, row.currency, { minorUnits: "always" }) : money(amount, row.currency);
 
       const lines = await db<InvoiceLineRow[]>`
         SELECT l.description, l.quantity::text, l.unit_amount::text,
@@ -999,7 +1072,7 @@ export class PostgresRenderSource implements RenderSource {
       `;
 
       const meta = [
-        { label: "Invoice date", value: longDate(row.issued_on ?? row.created_on) },
+        { label: "Invoice date", value: longDate(dated) },
         { label: "Due", value: longDate(row.due_on) },
       ];
       // The government registry's identifier, when the firm has recorded one.
@@ -1024,8 +1097,14 @@ export class PostgresRenderSource implements RenderSource {
         documentTitle: "Tax Invoice",
         // A draft has no number until it is issued (0322); its preview says so.
         reference: row.number ?? "Draft",
-        issuer: { name: row.entity_name, lines: [] },
-        recipient: { name: row.client_name, lines: [] },
+        issuer:
+          current && parties !== null
+            ? { name: parties.issuer.name, lines: invoicePartyLines(parties.issuer, true) }
+            : { name: row.entity_name, lines: [] },
+        recipient:
+          current && parties !== null && parties.recipient !== null
+            ? { name: parties.recipient.name, lines: invoicePartyLines(parties.recipient, false) }
+            : { name: row.client_name, lines: [] },
         recipientLabel: "Billed to",
         meta,
         sections: [],
@@ -1039,27 +1118,34 @@ export class PostgresRenderSource implements RenderSource {
           rows: lines.map((l) => [
             l.description,
             String(Number(l.quantity)),
-            money(l.unit_amount, row.currency),
-            money(l.amount, row.currency),
+            fmt(l.unit_amount),
+            fmt(l.amount),
           ]),
         },
         totals: [
-          { label: "Sub-total", value: money(row.gross, row.currency), emphasis: false },
+          { label: "Sub-total", value: fmt(row.gross), emphasis: false },
           ...(Number(row.discount) > 0
-            ? [{ label: "Discount", value: money(row.discount, row.currency), emphasis: false }]
+            ? [{ label: "Discount", value: fmt(row.discount), emphasis: false }]
             : []),
           ...(Number(row.tax) > 0
-            ? [{ label: "Tax", value: money(row.tax, row.currency), emphasis: false }]
+            ? [{ label: "Tax", value: fmt(row.tax), emphasis: false }]
             : []),
-          { label: "Total", value: money(row.total, row.currency), emphasis: true },
+          { label: "Total", value: fmt(row.total), emphasis: true },
         ],
-        footer: row.entity_name,
+        ...(current ? { amountInWords: amountInWords(row.total, row.currency) } : {}),
+        footer: current && parties !== null ? parties.issuer.name : row.entity_name,
         logo: await this.logo(db, tenantId, invoiceId, "invoice"),
-        issuedOn: row.issued_on ?? row.created_on,
+        issuedOn: dated,
       };
       // Issued means dated: `issued_on` is written by Issue and by nothing
       // else, and a draft cancelled before it was issued never went out.
-      return { document, partyId: row.party_id, isOut: row.issued_on !== null };
+      return {
+        document,
+        partyId: row.party_id,
+        isOut: row.issued_on !== null,
+        ...(previewing ? { datedAsIfSent: dated } : {}),
+        ...(row.number === null ? { unnumbered: true } : {}),
+      };
     });
   }
 
@@ -1284,7 +1370,11 @@ function titledBlocks(title: string, rows: readonly BlockRow[], kind: string): F
 }
 
 /** Every section and every numbered service in it. */
-function scopeFlow(plan: AnnexurePlan): Flow[] {
+/** How a document writes an amount: the one formatter (`documentMoney`) on a
+ *  document drawn since 0334, the old one on a document already out before. */
+type Fmt = (amount: string, currency: string) => string;
+
+function scopeFlow(plan: AnnexurePlan, fmt: Fmt): Flow[] {
   const out: Flow[] = [];
   for (const s of plan.sections) {
     const group = s.group;
@@ -1299,7 +1389,7 @@ function scopeFlow(plan: AnnexurePlan): Flow[] {
       if (item.entityNames !== null) out.push(paragraph(forCompanies(item.entityNames), true));
       if (item.beginsOn !== null) out.push(paragraph(`Begins ${longDate(item.beginsOn)}.`, true));
       out.push(...termsFlow(item.terms, first));
-      if (item.oopEstimate !== null) out.push(paragraph(outOfPocket(item.oopEstimate), true));
+      if (item.oopEstimate !== null) out.push(paragraph(outOfPocket(item.oopEstimate, fmt), true));
     }
     if (group !== null && group.deliverables !== null) {
       out.push(
@@ -1318,10 +1408,10 @@ function scopeFlow(plan: AnnexurePlan): Flow[] {
 }
 
 /** The out-of-pocket range, restated: it is a term the client signs for. */
-function outOfPocket(o: OutOfPocketEstimate): string {
+function outOfPocket(o: OutOfPocketEstimate, fmt: Fmt): string {
   return (
-    `Out-of-pocket expenses: approximately ${money(o.min, o.currency)} to ` +
-    `${money(o.max, o.currency)}, reimbursed at actuals and not part of the fee.`
+    `Out-of-pocket expenses: approximately ${fmt(o.min, o.currency)} to ` +
+    `${fmt(o.max, o.currency)}, reimbursed at actuals and not part of the fee.`
   );
 }
 
@@ -1336,6 +1426,10 @@ function feesFlow(
   plan: AnnexurePlan,
   row: LetterRow,
   lineAdvances: readonly { readonly description: string; readonly amount: string }[],
+  fmt: Fmt,
+  /** Kept on one page when it fits (CA#60): only on a letter drawn since
+   *  0334, so a letter already out keeps its pages. */
+  keepTogether: boolean,
 ): Flow[] {
   const out: Flow[] = [heading(1, "Summary of Fees")];
   if (plan.fees.length === 0) {
@@ -1364,13 +1458,14 @@ function feesFlow(
           const fee =
             f.amount === null
               ? (f.pricingNote ?? "To be agreed")
-              : `${money(f.amount, row.currency)}${PER_PERIOD[f.billingFrequency ?? ""] ?? ""}` +
+              : `${fmt(f.amount, row.currency)}${PER_PERIOD[f.billingFrequency ?? ""] ?? ""}` +
                 (f.paymentTerms === null ? "" : `\n(${f.paymentTerms})`);
           return [f.code, f.description, `${frequency}${starts}${billed === "" ? "" : `; ${billed}`}`, fee];
         }),
         rowAnchors: plan.fees.map((f) =>
           f.feeGroupId !== null ? `fee:group:${f.feeGroupId}` : f.lineId !== null ? `fee:line:${f.lineId}` : null,
         ),
+        ...(keepTogether ? { keepTogether: true } : {}),
       },
     });
   }
@@ -1382,7 +1477,7 @@ function feesFlow(
       rows: [
         {
           label: "Advance, payable before work begins",
-          value: money(row.advance_amount, row.currency),
+          value: fmt(row.advance_amount, row.currency),
           emphasis: true,
         },
       ],
@@ -1396,7 +1491,7 @@ function feesFlow(
       kind: "figures",
       rows: lineAdvances.map((a) => ({
         label: `Advance for ${a.description}, payable before its work begins`,
-        value: money(a.amount, row.currency),
+        value: fmt(a.amount, row.currency),
         emphasis: true,
       })),
     });
@@ -1446,40 +1541,6 @@ interface ProposalLineRow {
   service_body: Record<string, unknown>;
 }
 
-/**
- * Money as the firm's proposal prints it: "INR 50,000" — whole amounts without
- * a fraction, which a quote in round figures always is — and "INR 50,000.50"
- * when there is one. Still the ISO code (see the file header), still never a
- * JavaScript number.
- */
-export function wholeMoney(amount: string, currency: string): string {
-  const whole = /^-?\d+(\.0+)?$/.test(amount);
-  const formatted = new Intl.NumberFormat("en-US", {
-    minimumFractionDigits: whole ? 0 : 2,
-    maximumFractionDigits: whole ? 0 : 2,
-  }).format(amount as unknown as number);
-  // RUPEES IN LAKHS (2026-09-28): "INR 12,50,000", as an Indian reader writes
-  // it and as every screen shows it — the preview now IS this PDF. Regrouped
-  // from the western string rather than asked of `en-IN`, which a Node built
-  // with small ICU silently answers as en-US: a locale the machine may lack
-  // would make the bytes depend on the machine. The PROPOSAL only: a letter or
-  // an invoice must re-render byte for byte (`tests/render/layout.test.ts`),
-  // and a sent proposal keeps its pinned PDF, so nothing already issued moves.
-  return `${currency} ${currency === "INR" ? inLakhs(formatted) : formatted}`;
-}
-
-/** "1,250,000.50" to "12,50,000.50": the last three digits, then pairs. */
-export function inLakhs(western: string): string {
-  const negative = western.startsWith("-");
-  const [integer = "", fraction] = (negative ? western.slice(1) : western).split(".");
-  const digits = integer.replace(/,/g, "");
-  const last = digits.slice(-3);
-  const rest = digits.slice(0, -3);
-  const pairs = rest.length === 0 ? [] : (rest.match(/(\d{1,2})(?=(\d{2})*$)/g) ?? []);
-  const grouped = [...pairs, last].join(",");
-  return `${negative ? "-" : ""}${grouped}${fraction === undefined ? "" : `.${fraction}`}`;
-}
-
 /** The firm's own words for how often a fee falls due, as its proposal writes
  *  them — "Yearly", where the letter says "Annually". */
 const PROPOSAL_FREQUENCY: Readonly<Record<string, string>> = {
@@ -1500,7 +1561,7 @@ function proposalFee(
   const frequency =
     item.billingFrequency === null ? "" : ` ${PROPOSAL_FREQUENCY[item.billingFrequency] ?? ""}`;
   const note = item.pricingNote === null ? "" : ` (${item.pricingNote})`;
-  return `${wholeMoney(item.net, currency)}${frequency.trimEnd()}${note}`;
+  return `${documentMoney(item.net, currency)}${frequency.trimEnd()}${note}`;
 }
 
 /** A service as the proposal names it, with its company when that says
@@ -1536,8 +1597,8 @@ function proposalSectionsFlow(plan: ProposalPlan, currency: string): Flow[] {
         const o = item.oopEstimate;
         out.push(
           paragraph(
-            `Out-of-pocket expenses: approximately ${wholeMoney(o.min, o.currency)} to ` +
-              `${wholeMoney(o.max, o.currency)}, reimbursed at actuals and not part of the fee.`,
+            `Out-of-pocket expenses: approximately ${documentMoney(o.min, o.currency)} to ` +
+              `${documentMoney(o.max, o.currency)}, reimbursed at actuals and not part of the fee.`,
             true,
           ),
         );
@@ -1564,7 +1625,7 @@ function proposalFeesFlow(plan: ProposalPlan, currency: string): Flow[] {
         ? "Not stated"
         : (PROPOSAL_FREQUENCY[i.billingFrequency] ?? i.billingFrequency),
       // The fee alone: the frequency has its own column here.
-      i.net === null ? (i.pricingNote ?? "To be agreed") : wholeMoney(i.net, currency),
+      i.net === null ? (i.pricingNote ?? "To be agreed") : documentMoney(i.net, currency),
     ]),
   );
   if (rows.length === 0) {
@@ -1587,6 +1648,10 @@ function proposalFeesFlow(plan: ProposalPlan, currency: string): Flow[] {
         ],
         rows,
         rowAnchors: plan.sections.flatMap((s) => s.items.map((i) => `fee:line:${i.lineId}`)),
+        // On one page with the Total under it, when it fits (CA#60): it was
+        // split one row on page 2 from the rest on page 3.
+        keepTogether: true,
+        keepWithNextLines: 2,
       },
     },
   ];
@@ -1606,7 +1671,7 @@ function proposalTotalsFlow(
   const unpriced = rows.reduce((n, r) => n + r.unpriced, 0);
   if (priced.length === 0) return [];
   const figures = priced.map((r) => {
-    const amount = wholeMoney(r.net ?? "0", currency);
+    const amount = documentMoney(r.net ?? "0", currency);
     return r.frequency === null
       ? `${amount} (frequency not stated)`
       : `${amount} ${PROPOSAL_FREQUENCY[r.frequency] ?? r.frequency}`;
@@ -1649,4 +1714,150 @@ function billedWhen(frequency: string | null, timing: string | null, on: string 
 
 function withComma(words: string): string {
   return words === "" ? "" : `, ${words}`;
+}
+
+// ── Who a document is from and to (audit 2026-10-03: B12 / CA#1, CA#18) ─────
+//
+// `crm.print_identity` (0334) reads a party as paper prints it: name, address,
+// country, the identifiers in force that day, website. A document that went
+// out after 0334 carries that reading frozen in `printed_parties`; a draft
+// reads it live; a document that went out BEFORE 0334 has none and prints as
+// it always did (`PRINT_BEFORE_0334` below).
+
+interface PrintedNumber {
+  readonly type: string;
+  readonly value: string;
+}
+
+/** One party as `crm.print_identity` answers. Every field but the name may be
+ *  missing: a firm prints what it has recorded and nothing it has not. */
+interface PrintedParty {
+  readonly name: string;
+  readonly address: PostalAddress | null;
+  readonly country: string | null;
+  readonly taxId: PrintedNumber | null;
+  readonly pan: string | null;
+  readonly companyNumber: PrintedNumber | null;
+  readonly phone: string | null;
+  readonly email: string | null;
+  readonly website: string | null;
+}
+
+function textOf(v: unknown): string | null {
+  return typeof v === "string" && v.trim() !== "" ? v : null;
+}
+
+function numberOf(v: unknown): PrintedNumber | null {
+  if (typeof v !== "object" || v === null) return null;
+  const type = textOf((v as Record<string, unknown>)["type"]);
+  const value = textOf((v as Record<string, unknown>)["value"]);
+  return type === null || value === null ? null : { type, value };
+}
+
+function readPrintedParty(raw: unknown): PrintedParty | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const r = raw as Record<string, unknown>;
+  const name = textOf(r["name"]);
+  if (name === null) return null;
+  return {
+    name,
+    address: readPostalAddress(r["address"]),
+    country: textOf(r["country"]),
+    taxId: numberOf(r["taxId"]),
+    pan: textOf(r["pan"]),
+    companyNumber: numberOf(r["companyNumber"]),
+    phone: textOf(r["phone"]),
+    email: textOf(r["email"]),
+    website: textOf(r["website"]),
+  };
+}
+
+/** Both halves, frozen or live, or null when neither reads. */
+function readPrintedParties(raw: unknown): { issuer: PrintedParty; recipient: PrintedParty | null } | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const issuer = readPrintedParty((raw as Record<string, unknown>)["issuer"]);
+  if (issuer === null) return null;
+  return { issuer, recipient: readPrintedParty((raw as Record<string, unknown>)["recipient"]) };
+}
+
+/**
+ * A country's English name, never its code (CA#18: "Registered in IN"). From
+ * the platform's region names, as the screens' `countryName` is, so paper and
+ * screen agree; a code the platform cannot name prints as the code.
+ */
+const REGION_NAMES = new Intl.DisplayNames(["en"], { type: "region", fallback: "code" });
+function countryName(code: string): string {
+  try {
+    return REGION_NAMES.of(code.toUpperCase()) ?? code;
+  } catch {
+    return code;
+  }
+}
+
+/** What each tax registration is called on paper: its legal name where the
+ *  country has one, "Tax registration no." otherwise. */
+const TAX_ID_LABELS: Readonly<Record<string, string>> = {
+  gstin: "GSTIN",
+  trn: "TRN",
+  ein: "EIN",
+  vat: "Tax registration no.",
+};
+const COMPANY_NUMBER_LABELS: Readonly<Record<string, string>> = {
+  cin: "CIN",
+  llpin: "LLPIN",
+  uen: "UEN",
+  crn: "Company no.",
+};
+
+/** "Maharashtra 411001, India", or as much of it as is recorded. */
+function placeLine(p: PrintedParty): string | null {
+  const local = [p.address?.region ?? null, p.address?.postalCode ?? null].filter((x): x is string => x !== null).join(" ");
+  const country = p.country === null ? null : countryName(p.country);
+  const line = [local === "" ? null : local, country].filter((x): x is string => x !== null).join(", ");
+  return line === "" ? null : line;
+}
+
+function registrations(p: PrintedParty, withCompanyNumber: boolean): string[] {
+  return [
+    p.taxId === null ? null : `${TAX_ID_LABELS[p.taxId.type] ?? "Tax registration no."} ${p.taxId.value}`,
+    p.pan === null ? null : `PAN ${p.pan}`,
+    !withCompanyNumber || p.companyNumber === null
+      ? null
+      : `${COMPANY_NUMBER_LABELS[p.companyNumber.type] ?? "Company no."} ${p.companyNumber.value}`,
+  ].filter((x): x is string => x !== null);
+}
+
+function contact(p: PrintedParty): string | null {
+  const parts = [p.phone, p.email, p.website].filter((x): x is string => x !== null);
+  return parts.length === 0 ? null : parts.join("  ·  ");
+}
+
+/**
+ * A party's block on an invoice, one fact a line, under its name: the
+ * address, the state and country, then the tax registration and PAN. The
+ * firm's own block also says how to reach it and its company number.
+ */
+function invoicePartyLines(p: PrintedParty, firm: boolean): string[] {
+  // The firm's phone, email and website one a line: the column is half the
+  // page, and run together they wrap mid-address.
+  const reach = firm ? [p.phone, p.email, p.website] : [];
+  return [
+    ...(p.address?.lines ?? []),
+    placeLine(p),
+    ...registrations(p, firm),
+    ...reach,
+  ].filter((x): x is string => x !== null);
+}
+
+/**
+ * The letterhead under the issuing company's name on a letter (CA#18): the
+ * address with its state and country on one line, how to reach it, and its
+ * registration numbers. "Registered in IN" said only the code.
+ */
+function letterheadLines(p: PrintedParty): string[] {
+  const where = [...(p.address?.lines ?? []), placeLine(p)].filter((x): x is string => x !== null).join(", ");
+  const numbers = registrations(p, true).join("  ·  ");
+  return [where === "" ? null : where, contact(p), numbers === "" ? null : numbers].filter(
+    (x): x is string => x !== null,
+  );
 }

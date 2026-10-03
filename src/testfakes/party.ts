@@ -78,7 +78,11 @@ export class FakePartyRepo implements PartyRepository {
     const i = this.parties.findIndex((p) => p.tenantId === tenantId && p.id === partyId);
     const party = this.parties[i];
     if (party === undefined) return Promise.resolve(null);
-    const next = { ...party, displayName: patch.displayName ?? party.displayName };
+    const next = {
+      ...party,
+      displayName: patch.displayName ?? party.displayName,
+      billingAddress: patch.billingAddress === undefined ? party.billingAddress : patch.billingAddress,
+    };
     this.parties[i] = next;
     const o = this.organizations.findIndex((x) => x.partyId === partyId);
     const org = this.organizations[o];
@@ -135,6 +139,7 @@ export class FakePartyRepo implements PartyRepository {
       displayName: o.displayName,
       archivedAt: null,
       isOwnCompany: false,
+      billingAddress: null,
     });
     const org: Organization = {
       partyId: o.partyId,
@@ -157,6 +162,7 @@ export class FakePartyRepo implements PartyRepository {
       displayName: p.displayName,
       archivedAt: null,
       isOwnCompany: false,
+      billingAddress: null,
     });
     const person: Person = {
       partyId: p.partyId,

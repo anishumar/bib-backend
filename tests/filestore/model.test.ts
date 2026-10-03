@@ -10,6 +10,7 @@ import {
   contentDispositionFor,
   isContentHash,
   normaliseMediaType,
+  renderedFilename,
   safeFilename,
 } from "../../src/domain/filestore/model";
 
@@ -198,5 +199,40 @@ describe("contentDispositionFor", () => {
 
   it("still names something when the whole name is non-ASCII", () => {
     expect(contentDispositionFor("चालान")).toContain('filename="');
+  });
+});
+
+describe("the name a rendered PDF is saved under (CA#56, audit 2026-10-03)", () => {
+  it("names a draft invoice by what it is and whose, never 'Draft-draft.pdf'", () => {
+    expect(
+      renderedFilename({ kind: "invoice", reference: null, clientName: "Deccan Agro Foods Private Limited", draft: true }),
+    ).toBe("Invoice draft - Deccan Agro Foods Private Limited.pdf");
+  });
+
+  it("an issued invoice keeps its number, with the slashes a file name cannot carry made dashes", () => {
+    expect(
+      renderedFilename({ kind: "invoice", reference: "INV/2026-27/0001", clientName: "Deccan Agro", draft: false }),
+    ).toBe("Invoice INV-2026-27-0001 - Deccan Agro.pdf");
+  });
+
+  it("a draft letter and a proposal say so", () => {
+    expect(
+      renderedFilename({ kind: "engagement_letter", reference: "EL-2026-0004", clientName: "Kaveri Foods", draft: true }),
+    ).toBe("Engagement letter EL-2026-0004 draft - Kaveri Foods.pdf");
+    expect(
+      renderedFilename({ kind: "proposal", reference: "PR-2026-0002", clientName: "Kaveri Foods", draft: false }),
+    ).toBe("Proposal PR-2026-0002 - Kaveri Foods.pdf");
+  });
+
+  it("drops what Windows refuses in a file name and keeps it short", () => {
+    const name = renderedFilename({
+      kind: "invoice",
+      reference: "INV/2026-27/0002",
+      clientName: `A "quoted" <client>: with/slashes\\and|pipes? ${"x".repeat(300)}`,
+      draft: false,
+    });
+    expect(name).not.toMatch(/["<>:\\/|?*]/);
+    expect(name.endsWith(".pdf")).toBe(true);
+    expect(name.length).toBeLessThanOrEqual(150);
   });
 });

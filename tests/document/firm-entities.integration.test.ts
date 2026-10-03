@@ -99,8 +99,9 @@ describe("the firm's own companies, against real Postgres (T6.18)", () => {
       entityType: "LLC",
       registeredAddress: null,
       preferenceId: crypto.randomUUID(),
+      numbers: [],
     });
-    expect(wrote).toBe(false);
+    expect(wrote).toEqual({ created: false });
     expect(await organizationsNamed("Test Gulf Rival LLC")).toBe(0);
     await expect(
       service.create({ tenantId: tenant, name: "Test Gulf Rival LLC", jurisdiction: "AE", entityType: "LLC" }, SYSTEM_ACTOR),
@@ -240,5 +241,73 @@ describe("a company stays the firm's with no country routed to it (0313)", () =>
       db<{ n: number }[]>`SELECT count(*)::int AS n FROM crm.firm_entity WHERE tenant_id = ${tenant}`,
     );
     expect(seen[0]?.n).toBe(0);
+  });
+});
+
+describe("a company's numbers and address, against real Postgres (audit 2026-10-03)", () => {
+  it("holds them as the party's identifiers, replaces by voiding, and prints them through crm.print_identity", async () => {
+    const created = await service.create(
+      {
+        tenantId: tenant,
+        name: "Test India LLP",
+        jurisdiction: "IN",
+        entityType: "LLP",
+        registeredAddress: { lines: ["12 MG Road"], region: "Maharashtra", postalCode: "411001" },
+        taxRegistration: "27ABCDE1234F1Z5",
+        pan: "ABCDE1234F",
+        phone: "+91 20 2612 3456",
+        email: "office@testindia.in",
+      },
+      SYSTEM_ACTOR,
+    );
+    expect(created).toMatchObject({
+      registeredAddress: { lines: ["12 MG Road"], region: "Maharashtra", postalCode: "411001" },
+      taxRegistration: { type: "gstin", value: "27ABCDE1234F1Z5" },
+      pan: "ABCDE1234F",
+      phone: "+912026123456",
+      email: "office@testindia.in",
+    });
+
+    const moved = await service.edit(
+      { tenantId: tenant, partyId: created.partyId, taxRegistration: "29ABCDE1234F1Z7", phone: null },
+      SYSTEM_ACTOR,
+    );
+    expect(moved.taxRegistration?.value).toBe("29ABCDE1234F1Z7");
+    expect(moved.phone).toBeNull();
+    const rows = await c.owner<{ type: string; voided: boolean }[]>`
+      SELECT type, voided_at IS NOT NULL AS voided FROM core.party_identifier
+       WHERE party_id = ${created.partyId} AND type IN ('gstin', 'phone') ORDER BY created_at
+    `;
+    expect(rows).toEqual([
+      { type: "gstin", voided: true },
+      { type: "phone", voided: true },
+      { type: "gstin", voided: false },
+    ]);
+
+    const [printed] = await withTenant(c.app, tenant, (db) =>
+      db<{ identity: Record<string, unknown> }[]>`
+        SELECT crm.print_identity(${created.partyId}, (now() AT TIME ZONE 'UTC')::date) AS identity
+      `,
+    );
+    expect(printed?.identity).toMatchObject({
+      name: "Test India LLP",
+      country: "IN",
+      address: { lines: ["12 MG Road"], region: "Maharashtra", postalCode: "411001" },
+      taxId: { type: "gstin", value: "29ABCDE1234F1Z7" },
+      pan: "ABCDE1234F",
+      email: "office@testindia.in",
+    });
+    expect(printed?.identity).not.toHaveProperty("phone");
+  });
+
+  it("refuses a number another party at the firm already holds, writing nothing", async () => {
+    const before = await organizationsNamed("Test Taken FZE");
+    await expect(
+      service.create(
+        { tenantId: tenant, name: "Test Taken FZE", jurisdiction: "NZ", entityType: "Ltd", email: "office@testindia.in" },
+        SYSTEM_ACTOR,
+      ),
+    ).rejects.toThrow(/email address is already recorded for another/);
+    expect(await organizationsNamed("Test Taken FZE")).toBe(before);
   });
 });

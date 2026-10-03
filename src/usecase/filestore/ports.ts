@@ -147,12 +147,18 @@ export interface DocumentStoreRepository {
    * with no `party_id` is the firm's own and cannot be shared with anybody, so
    * the statement refuses it rather than writing a flag that means nothing.
    * Null is "no such document at this firm", and the use case owns the sentence.
+   *
+   * `"draft"` (B10, audit 2026-10-03): SHARING a draft is refused in the same
+   * statement, and nothing is written. A draft is a copy filed as the firm's
+   * draft (`draft_copy`), or one the product drew while its proposal, letter
+   * or invoice was still a draft (the copies made before 2026-09-29 are
+   * `rendered`). Taking a document OFF the portal is never refused.
    */
   setClientVisible(input: {
     readonly tenantId: string;
     readonly documentId: string;
     readonly visible: boolean;
-  }): Promise<DocumentRecord | null>;
+  }): Promise<DocumentRecord | null | "draft">;
 
   /** Newest first. `kind` narrows; absent means every kind. */
   list(input: {

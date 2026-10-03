@@ -2,6 +2,7 @@
 // the use case that needs them, stated in our vocabulary; adapters in
 // infrastructure/ implement them. Every tenant-scoped write/read is expected to
 // run under the RLS context (withTenant) inside the adapter.
+import type { PostalAddress } from "../../domain/party/address";
 import type {
   ClientStructure,
   IdentifierType,
@@ -50,6 +51,8 @@ export interface PartyDetailsPatch {
   readonly tradeName?: string | null | undefined;
   readonly industry?: string | null | undefined;
   readonly website?: string | null | undefined;
+  /** Where the party is billed (0334); null clears it. */
+  readonly billingAddress?: PostalAddress | null | undefined;
 }
 
 export interface PartyRepository {

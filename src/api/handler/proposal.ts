@@ -33,6 +33,7 @@ import type { EmailOutcome } from "../../usecase/proposal/service";
 import type { SharedProposal } from "../../usecase/proposal/ports";
 import type { BillingFrequency } from "../../domain/document/model";
 import { SYSTEM_ACTOR } from "../../domain/ledger/model";
+import { contentDispositionFor } from "../../domain/filestore/model";
 
 export interface ProposalDeps {
   readonly service: ProposalService;
@@ -1830,7 +1831,9 @@ export function registerProposalRoutes(app: OpenAPIHono<AppEnv>, deps: ProposalD
       headers: {
         "content-type": "application/pdf",
         "content-length": String(pdf.bytes.byteLength),
-        "content-disposition": `attachment; filename="${pdf.filename.replace(/[^\w.-]/g, "_")}"`,
+        // Both forms (RFC 6266): the file's own name, client and all (CA#56),
+        // which may carry spaces and a client's name in any script.
+        "content-disposition": contentDispositionFor(pdf.filename),
         "x-content-type-options": "nosniff",
         // A capability's bytes: nothing in between keeps a copy.
         "cache-control": "private, no-store",

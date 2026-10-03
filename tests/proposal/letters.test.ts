@@ -157,4 +157,13 @@ describe("the notice to the colleague who prepared it", () => {
     expect(t.sent[0]?.text).toContain('The reason they gave: "Staying with our auditor."');
     expect(t.sent[1]?.text).toContain("They gave no reason.");
   });
+
+  it("comes from the firm by name, never another firm's (CA#12, audit 2026-10-03)", () => {
+    const t = new Captured();
+    void new SmtpMailer(t).sendDecisionNotice({ ...base, decision: "accepted", firmName: "Sharma Mehta & Co" });
+    expect(only(t).fromName).toBe("Sharma Mehta & Co");
+    const unnamed = new Captured();
+    void new SmtpMailer(unnamed).sendDecisionNotice({ ...base, decision: "accepted" });
+    expect(only(unnamed).fromName).toBeUndefined();
+  });
 });

@@ -4,6 +4,7 @@
 // one tenant context. Date columns are cast to ::text so they return as ISO
 // YYYY-MM-DD strings (postgres.js would otherwise hand back Date objects),
 // keeping effective-dating a lexicographic string compare end to end.
+import { postalAddressJson, readPostalAddress } from "../../domain/party/address";
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
 import type {
@@ -19,6 +20,7 @@ import type {
   NewOrganization,
   NewPerson,
   PartyRepository,
+  PartyDetailsPatch,
 } from "../../usecase/party/ports";
 import type { ClientDirectory } from "../../usecase/clientassignment/ports";
 import {
@@ -36,6 +38,7 @@ interface PartyRow {
   display_name: string;
   archived_at: Date | null;
   is_own_company: boolean;
+  billing_address: unknown;
 }
 interface OrgRow {
   party_id: string;
@@ -119,6 +122,7 @@ function toParty(r: PartyRow): Party {
     // offset, like every other timestamp that crosses this door.
     archivedAt: r.archived_at === null ? null : r.archived_at.toISOString(),
     isOwnCompany: r.is_own_company,
+    billingAddress: readPostalAddress(r.billing_address),
   };
 }
 
@@ -129,7 +133,8 @@ function toParty(r: PartyRow): Party {
  * reason `listParties` gives.
  */
 const PARTY_COLUMNS =
-  "id, tenant_id, kind, display_name, archived_at, crm.is_firm_entity(tenant_id, id) AS is_own_company";
+  "id, tenant_id, kind, display_name, archived_at, crm.is_firm_entity(tenant_id, id) AS is_own_company, " +
+  "billing_address";
 
 function toOrg(r: OrgRow): Organization {
   return {
@@ -228,16 +233,18 @@ export class PostgresPartyRepository implements PartyRepository, ClientDirectory
   async updateDetails(
     tenantId: string,
     partyId: string,
-    patch: {
-      readonly displayName?: string | undefined;
-      readonly tradeName?: string | null | undefined;
-      readonly industry?: string | null | undefined;
-      readonly website?: string | null | undefined;
-    },
+    patch: PartyDetailsPatch,
   ): Promise<Party | null> {
     return withTenant(this.app, tenantId, async (db) => {
       if (patch.displayName !== undefined) {
         await db`UPDATE core.party SET display_name = ${patch.displayName} WHERE id = ${partyId}`;
+      }
+      if (patch.billingAddress !== undefined) {
+        await db`
+          UPDATE core.party
+             SET billing_address = ${patch.billingAddress === null ? null : db.json(postalAddressJson(patch.billingAddress))}
+           WHERE id = ${partyId}
+        `;
       }
       if (patch.tradeName !== undefined || patch.industry !== undefined || patch.website !== undefined) {
         await db`

@@ -18,6 +18,7 @@ import {
   FakeSignatureTenants,
   FakeSignedCopyFiler,
   makeEngagementFakes,
+  writeOpening,
 } from "../../src/testfakes/engagement";
 import {
   EnvelopeAlreadySigned,
@@ -87,6 +88,7 @@ async function readyToSend(s: Setup): Promise<string> {
     discountPercent: "0",
   });
   await s.service.addClause(TENANT, letter.id, SCOPE);
+  await writeOpening(s.prose, TENANT, letter.id);
   return letter.id;
 }
 

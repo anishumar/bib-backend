@@ -148,6 +148,9 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer {
 
     return this.transport.send({
       to,
+      // FROM THE FIRM, by name (CA#12): only the display name; the address is
+      // the one the relay authenticates. No firm known, the deployment's name.
+      ...(firm === null ? {} : { fromName: firm }),
       subject,
       // Sent AS the firm (CA#40), the way a proposal is (0085): the client
       // knows the firm, not this product. The address stays the deployment's.
@@ -240,6 +243,9 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer {
 
     return this.transport.send({
       to,
+      // FROM THE FIRM, by name (CA#12): only the display name; the address is
+      // the one the relay authenticates. No firm known, the deployment's name.
+      ...(firm === null ? {} : { fromName: firm }),
       subject,
       fromName: firm ?? undefined,
       text,
@@ -321,6 +327,9 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer {
 
     return this.transport.send({
       to,
+      // FROM THE FIRM, by name (CA#12): only the display name; the address is
+      // the one the relay authenticates. No firm known, the deployment's name.
+      ...(firm === null ? {} : { fromName: firm }),
       subject,
       fromName: firm ?? undefined,
       text,
@@ -534,8 +543,12 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer {
       ...(next === null ? [] : [``, next]),
     ].join("\n");
 
+    const firm = headerSafe(notice.firmName ?? null);
     return this.transport.send({
       to: notice.to,
+      // From the firm (CA#12): a colleague at one firm must not hear about its
+      // client from another firm's name, which the deployment's one was.
+      ...(firm === null ? {} : { fromName: firm }),
       subject: `${client} ${verb} ${ref}`,
       text,
       html: page([
@@ -584,6 +597,8 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer {
 
     return this.transport.send({
       to: letter.to,
+      // From the firm (CA#12), as every letter about one firm's business is.
+      ...(firm === null ? {} : { fromName: firm }),
       subject: `${what} not paid yet${firm === null ? "" : ` · ${firm}`}`,
       text,
       html: page([

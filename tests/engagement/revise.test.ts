@@ -5,7 +5,7 @@
 // revise.integration.test.ts.
 import { describe, expect, it } from "vitest";
 import { EngagementService } from "../../src/usecase/engagement/service";
-import { makeEngagementFakes } from "../../src/testfakes/engagement";
+import { makeEngagementFakes, writeOpening } from "../../src/testfakes/engagement";
 import {
   AdvanceAmountRequired,
   EntityOutsideClient,
@@ -134,6 +134,7 @@ describe("revising a draft letter's head", () => {
     );
     await line(s, id);
     await s.service.addClause(TENANT, id, SCOPE_CLAUSE);
+    await writeOpening(s.prose, TENANT, id);
     await s.service.send(TENANT, id, ACTOR);
     await expect(
       s.service.revise({ tenantId: TENANT, letterId: id, title: "Too late" }, ACTOR),

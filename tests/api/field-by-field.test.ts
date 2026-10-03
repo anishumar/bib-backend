@@ -65,7 +65,7 @@ const PERSON = { partyId: PARTY, tenantId: TENANT, fullName: "Meera Menon", nati
 const ENTITY = { partyId: PARTY, tenantId: TENANT, jurisdiction: "IN", entityType: "private_limited", incorporatedOn: null, financialYearEnd: null, registeredAddress: null, status: "active", ...LEAK };
 const IDENTIFIER = { id: ID, tenantId: TENANT, partyId: PARTY, type: "pan", value: "AABCC1234F", jurisdiction: "IN", isPrimary: true, validFrom: "2026-01-01", validTo: null, voidedAt: null, ...LEAK };
 const RELATIONSHIP = { id: ID, tenantId: TENANT, fromPartyId: PARTY, toPartyId: OTHER, type: "director_of", validFrom: "2026-01-01", validTo: null, attributes: {}, ...LEAK };
-const PARTY_ROW = { id: PARTY, tenantId: TENANT, kind: "organization", displayName: "Cobalt Foods", archivedAt: null, isOwnCompany: false, ...LEAK };
+const PARTY_ROW = { id: PARTY, tenantId: TENANT, kind: "organization", displayName: "Cobalt Foods", archivedAt: null, isOwnCompany: false, billingAddress: null, ...LEAK };
 
 describe("party.ts answers field by field", () => {
   const service = {

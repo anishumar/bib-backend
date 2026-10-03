@@ -5,6 +5,7 @@
 
 import { isValidPhone, normalizePhone } from "./phone";
 import { isCalendarDay } from "../day";
+import type { PostalAddress } from "./address";
 
 export type PartyKind = "organization" | "person";
 
@@ -35,6 +36,12 @@ export interface Party {
    * the party module's to decide.
    */
   readonly isOwnCompany: boolean;
+  /**
+   * Where this party is billed (0334, audit 2026-10-03, CA#22): the lines an
+   * invoice's "Billed to" prints, the state, the postal code and the country.
+   * Null when none is recorded.
+   */
+  readonly billingAddress: PostalAddress | null;
 }
 
 export interface Organization {

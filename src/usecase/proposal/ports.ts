@@ -500,6 +500,9 @@ export interface DecisionNotice {
   readonly proposalUrl: string;
   /** The firm's zone, so "at 14:05" is the firm's clock (CA#50). */
   readonly timeZone?: string | null;
+  /** The firm's name, which the notice is sent under (CA#12). Absent or null:
+   *  the deployment's sender name. */
+  readonly firmName?: string | null;
 }
 
 /**

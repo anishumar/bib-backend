@@ -181,3 +181,96 @@ describe("the firm's own companies (T6.18)", () => {
     ).rejects.toBeInstanceOf(FirmEntityNotFound);
   });
 });
+
+describe("a company's identity on paper (audit 2026-10-03: B12 / CA#1, CA#18)", () => {
+  async function indian(f: ReturnType<typeof makeFirmEntityFakes>) {
+    return f.service.create(
+      { tenantId: TENANT, name: "Sharma Mehta & Co", jurisdiction: "IN", entityType: "Partnership firm" },
+      ACTOR,
+    );
+  }
+
+  it("holds the address's state and postal code, and the tax number, PAN, phone and email", async () => {
+    const f = makeFirmEntityFakes();
+    const firm = await indian(f);
+    f.events.store.rows.length = 0;
+    const saved = await f.service.edit(
+      {
+        tenantId: TENANT,
+        partyId: firm.partyId,
+        registeredAddress: { lines: ["12 MG Road, Camp, Pune"], region: " Maharashtra ", postalCode: "411001" },
+        taxRegistration: "27abcde1234f1z5",
+        pan: "abcde1234f",
+        phone: "98200 12345",
+        email: "Office@SharmaMehta.in",
+      },
+      ACTOR,
+    );
+    expect(saved).toMatchObject({
+      registeredAddress: { lines: ["12 MG Road, Camp, Pune"], region: "Maharashtra", postalCode: "411001" },
+      // An Indian company's tax registration is its GSTIN, held to its shape.
+      taxRegistration: { type: "gstin", value: "27ABCDE1234F1Z5" },
+      pan: "ABCDE1234F",
+      // Completed with the company's country code, as every phone is stored.
+      phone: "+919820012345",
+      email: "office@sharmamehta.in",
+    });
+    // Which kinds changed, never their values.
+    const added = f.events.recorded.filter((e) => e.verb === "party_identifier.added");
+    expect(added.map((e) => e.payload)).toEqual([
+      { partyId: firm.partyId, identifierType: "gstin" },
+      { partyId: firm.partyId, identifierType: "pan" },
+      { partyId: firm.partyId, identifierType: "phone" },
+      { partyId: firm.partyId, identifierType: "email" },
+    ]);
+    expect(JSON.stringify(f.events.recorded)).not.toMatch(/27ABCDE|ABCDE1234F|9820012345|sharmamehta|Maharashtra/i);
+    expect(f.events.recorded.find((e) => e.verb === "firm_entity.edited")?.payload).toEqual({
+      fields: ["registeredAddress"],
+    });
+  });
+
+  it("refuses a GSTIN or a PAN that is not one, saying what one looks like", async () => {
+    const f = makeFirmEntityFakes();
+    const firm = await indian(f);
+    await expect(
+      f.service.edit({ tenantId: TENANT, partyId: firm.partyId, taxRegistration: "27ABCDE1234" }, ACTOR),
+    ).rejects.toThrow(/GSTIN.*15 characters.*27ABCDE1234F1Z5/);
+    await expect(f.service.edit({ tenantId: TENANT, partyId: firm.partyId, pan: "ABC" }, ACTOR)).rejects.toThrow(
+      /PAN.*ABCDE1234F/,
+    );
+  });
+
+  it("calls a company's tax number by its own country's kind", async () => {
+    const f = makeFirmEntityFakes();
+    const gulf = await f.service.create(
+      { tenantId: TENANT, name: "EPB Gulf FZE", jurisdiction: "AE", entityType: "FZE", taxRegistration: "100123456700003" },
+      ACTOR,
+    );
+    expect(gulf.taxRegistration).toEqual({ type: "trn", value: "100123456700003" });
+    // A PAN is India's: refused for a company registered anywhere else.
+    await expect(f.service.edit({ tenantId: TENANT, partyId: gulf.partyId, pan: "ABCDE1234F" }, ACTOR)).rejects.toThrow(
+      /PAN.*India/,
+    );
+  });
+
+  it("replaces a number by voiding the old one, and clears it with null", async () => {
+    const f = makeFirmEntityFakes();
+    const firm = await indian(f);
+    await f.service.edit({ tenantId: TENANT, partyId: firm.partyId, taxRegistration: "27ABCDE1234F1Z5" }, ACTOR);
+    f.events.store.rows.length = 0;
+    const moved = await f.service.edit({ tenantId: TENANT, partyId: firm.partyId, taxRegistration: "29ABCDE1234F1Z7" }, ACTOR);
+    expect(moved.taxRegistration?.value).toBe("29ABCDE1234F1Z7");
+    expect(f.events.verbs()).toEqual(["party_identifier.voided", "party_identifier.added"]);
+    const cleared = await f.service.edit({ tenantId: TENANT, partyId: firm.partyId, taxRegistration: null }, ACTOR);
+    expect(cleared.taxRegistration).toBeNull();
+  });
+
+  it("refuses a number another party already holds at this firm", async () => {
+    const f = makeFirmEntityFakes();
+    const firm = await indian(f);
+    f.firmEntities.heldElsewhere.add("pan ABCDE1234F");
+    await expect(f.service.edit({ tenantId: TENANT, partyId: firm.partyId, pan: "ABCDE1234F" }, ACTOR)).rejects.toThrow(
+      /already recorded for another/,
+    );
+  });
+});

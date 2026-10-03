@@ -254,17 +254,17 @@ describe("the proposal as the firm's own document", () => {
       "#1 A. Financial Reporting & Compliance",
       "#3 Our responsibilities:",
       "#2 H3. Transfer pricing audit — Form 3CEB",
-      "[Fees] H3: INR 50,000 Yearly",
+      "[Fees] H3: ₹50,000 Yearly",
       "#1 B. Transactions & Regulatory Compliance",
       "#3 Our responsibilities:",
       "#2 C2. TDS/TCS — quarterly returns",
       "- Quarterly TDS/TCS returns (24Q, 26Q, 27EQ).\n- Form 16 and 16A.",
-      "[Fees] C2: INR 25,000 Quarterly",
+      "[Fees] C2: ₹25,000 Quarterly",
       "#1 Summary of Fees",
-      "A | H3 | Transfer pricing audit — Form 3CEB | Yearly | INR 50,000\n" +
-        "B | C2 | TDS/TCS — quarterly returns | Quarterly | INR 25,000",
+      "A | H3 | Transfer pricing audit — Form 3CEB | Yearly | ₹50,000\n" +
+        "B | C2 | TDS/TCS — quarterly returns | Quarterly | ₹25,000",
       // Per billing frequency, never one mixed net (T6.18, D8).
-      "[Total] INR 25,000 Quarterly + INR 50,000 Yearly",
+      "[Total] ₹25,000 Quarterly + ₹50,000 Yearly",
       "This proposal is valid until 31 October 2026.",
       "#1 Notes",
       "#1 Team Deployment",
@@ -430,7 +430,7 @@ describe("the columns 0084 added", () => {
     );
     const described = await source.describe({ tenantId: tenant, kind: "proposal", subjectRef: id });
     expect(texts(described?.document.proposal?.flow ?? [])).toContain(
-      "[Total] INR 50,000 Yearly, plus 1 service as mutually agreed",
+      "[Total] ₹50,000 Yearly, plus 1 service as mutually agreed",
     );
   });
 

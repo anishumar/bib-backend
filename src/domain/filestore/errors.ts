@@ -32,7 +32,8 @@ export type FileStoreErrorCode =
   | "BYTES_MISSING"
   | "BRAND_ASSET_NOT_FOUND"
   | "LINK_NOT_FOUND"
-  | "COPY_OF_RECORD_STAYS";
+  | "COPY_OF_RECORD_STAYS"
+  | "DRAFT_NOT_SHAREABLE";
 
 export class DocumentNotFound extends FileStoreError {
   constructor(id: string) {
@@ -154,6 +155,23 @@ export class CopyOfRecordStays extends FileStoreError {
       "COPY_OF_RECORD_STAYS",
       `${title} is the copy the client was given, so it stays on the record. To correct an ` +
         `issued invoice, raise a credit note and a new invoice.`,
+    );
+  }
+}
+
+/**
+ * A DRAFT is the firm's own and is never shared with the client (B10, audit
+ * 2026-10-03). The Share switch on a "Draft, firm only" copy put a draft
+ * invoice in the client's portal library, which is the bug the copy of record
+ * (2026-09-29) had closed. A draft copy stays a draft copy after the record
+ * goes out: the PDF says "Draft" on it.
+ */
+export class DraftNotShareable extends FileStoreError {
+  constructor(title: string) {
+    super(
+      "DRAFT_NOT_SHAREABLE",
+      `${title} is a draft, and a draft is never shown to the client. Issue the invoice, or send ` +
+        `the letter or proposal, and share the copy that went out.`,
     );
   }
 }
