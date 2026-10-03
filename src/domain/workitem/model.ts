@@ -25,6 +25,8 @@
 //
 // The codes exist for one thing: a seeder and an importer looking a row up.
 
+import { isCalendarDay } from "../day";
+
 /** A state a work item can be in — one row of the firm's own vocabulary. */
 export interface WorkItemState {
   readonly id: string;
@@ -389,7 +391,9 @@ export function normalizeVocabularyCode(code: string): string {
 /** A well-formed ISO date, YYYY-MM-DD. Duplicated for the arch wall's reason;
  *  see `isValidVocabularyCode`. */
 export function isIsoDate(s: string): boolean {
-  return /^\d{4}-\d{2}-\d{2}$/.test(s);
+  // A day that EXISTS, not just the shape (audit 2026-10-03, B43): 2026-13-45
+  // passed the shape and reached Postgres as an unmapped 22008, a 500.
+  return isCalendarDay(s);
 }
 
 /** Ranks are positive integers. Not unique and not contiguous — nothing
