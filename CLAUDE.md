@@ -1824,6 +1824,64 @@ The user's calls the same night (memory `bib-auto-invoice-answers-2026-10-01`, S
   (catch-up, auto-draft, AdvanceDesk on real SQL, digest claim), `sweep.integration.test.ts`,
   `tests/invoice/numbering.integration.test.ts`. Walk: `bib/demo-assets/tools/ai-adv-walk.mjs`.
 
+## Notifications: the bell, and who is told what (0323, 2026-10-03)
+
+My day is STATE (what is on my desk now; the row leaves when the work does). A notification
+is an EVENT (something happened that I should know): it arrives once, is read or not, links
+to its source, and stays as history. Design note and Ashish's open questions:
+`bib/prompts/notifications/DESIGN.md`.
+
+- **Schema `notify` (0323).** `notification` stores ids and machine facts in `payload`, never
+  a sentence: `domain/notify/model.ts` `renderNotification` writes the words AT READ TIME, for
+  that reader, so the **fee axis** applies to the reader (`seesFees`; no amount otherwise) and
+  a renamed client reads right in old rows. `dedupe_key` is unique per (firm, recipient):
+  `event:<eventId>:<category>` for the outbox, `stage:<category>:<source>:<stage>` for a
+  reminder. `resolved_at` = the work is over (shown "Done", not counted as unread).
+- **Two walls on the inbox.** RLS on the tenant, PLUS a RESTRICTIVE policy on
+  `app.notify_recipient`, set only by `withRecipient` (`db/tenant.ts`); every inbox method
+  also filters on the recipient. Unset means the worker (writes for many people). Each guard
+  was removed in turn in `tests/notify/inbox.integration.test.ts` and the other held. No route
+  takes a user id; an admin reads no inbox but their own; anybody else's id is 404.
+- **No DELETE grant (house rule kept).** Retention is `notify.prune(before)`, SECURITY DEFINER:
+  only the scoped firm's read-or-resolved rows, never newer than 30 days, nothing with no firm
+  in scope. `bib_app` UPDATE is `read_at` and `resolved_at` only.
+- **Categories are a closed registry** (`NOTIFY_CATEGORIES`, 15), like ledger verbs. The firm
+  sets defaults per category and channel (`notify.firm_default`, `tenant:admin`, ledger
+  `tenant.notification_defaults_set`); a person overrides (`notify.user_preference`, not
+  ledgered). Person > firm > product. `escalation` and `filing_missed` in-app cannot be
+  switched off by anybody (409). Nothing is seeded: absence = the product default.
+- **Who writes them: the ledger is the outbox.** `domain/notify/fanout.ts` `planFor(event)` maps
+  a verb to categories, an audience BY RELATIONSHIP (assignee, Key Manager, invoice/bill
+  manager, eligible checkers via T2.9's own `eligibleCheckers`, a permission, a grade) and what
+  it resolves. `usecase/notify/fanout.ts` `NotificationFanout` resolves people as the firm
+  stands now, keeps active staff, drops the actor (nobody hears of their own act) and anyone
+  whose bell is off. Queue `notify.fanout` every minute (`BIB_WORKER_NOTIFY_CRON`).
+  - Cursor per firm (`notify.fanout_cursor`). Each run re-reads a 10-minute window behind it
+    (late commits), refused by the dedupe key; the limit applies to NEW events only. **The
+    first cursor starts one window AHEAD of now** or the first runs replay pre-start events
+    (the integration test caught that).
+  - **Resolving is causal:** only rows caused before the resolving event (`resolve`'s
+    `causedBefore`), so a re-read of an old "task finished" never closes the next round's.
+  - A task raised BY HAND with an assignee writes `work_item.created` (`assigned: true`) and
+    no `work_item.assigned`; only `origin: manual` is read from `created` (spawned ones write
+    both). Found by the walk.
+- **Advance reminders** (`AdvanceReminders`, queue `notify.advance-reminders`, hourly): no
+  event exists when a day passes, so it reads `AdvanceDesk.list` and writes one row per stage
+  (`draft_overdue`, `unpaid_overdue`, `escalated`) per person: the chasers (SPOC, KM, partner)
+  and the admins while it waits for an admin; escalated = admins + partner. A stage left, or
+  an advance no longer pending, is resolved. Weekly summary also reaches admins' bells via
+  `tenant.advance_digest_sent`. Retention: `notify.prune` daily on the escalation cron.
+- **Routes** (`api/handler/notification.ts`, `NO_PERMISSION_REQUIRED` except PUT firm-defaults):
+  list (cursor by the millisecond the client was handed), `unread-count` (capped 100, one
+  partial index, built to be polled once a minute per visible tab), mark read, read-all up to
+  an instant, preferences, firm-defaults. Not in `PORTAL_PATHS`.
+- **Not built:** email and push channels (columns exist; email waits on Ashish's answer about
+  instant vs digest), client-portal notifications, a cap on "check to decide" when a firm's
+  policy lets everybody check. "Bill to raise" reaches the bill's manager (else KM) only, not
+  the boss-escalation or no-price SPOC paths My day has.
+- Tests: `tests/notify/*.test.ts`, `inbox.integration`, `fanout.integration`. One-firm run on
+  the shared DB: `bib/demo-assets/tools/nt-notify-tenant.mts`. Walk: `nt-walk.mjs` (32/32).
+
 ## Billing safeguards: what the end-to-end review found (0321, 2026-10-02)
 
 Three review agents (code, regressions, a live probe on two firms) found ten real defects in
@@ -4372,64 +4430,6 @@ guess.
 
 `tenant:admin` on every route, because one confirm creates parties, letters and assignments in
 one act, and the report names the roster by email.
-
-## Notifications: the bell, and who is told what (0323, 2026-10-03)
-
-My day is STATE (what is on my desk now; the row leaves when the work does). A notification
-is an EVENT (something happened that I should know): it arrives once, is read or not, links
-to its source, and stays as history. Design note and Ashish's open questions:
-`bib/prompts/notifications/DESIGN.md`.
-
-- **Schema `notify` (0323).** `notification` stores ids and machine facts in `payload`, never
-  a sentence: `domain/notify/model.ts` `renderNotification` writes the words AT READ TIME, for
-  that reader, so the **fee axis** applies to the reader (`seesFees`; no amount otherwise) and
-  a renamed client reads right in old rows. `dedupe_key` is unique per (firm, recipient):
-  `event:<eventId>:<category>` for the outbox, `stage:<category>:<source>:<stage>` for a
-  reminder. `resolved_at` = the work is over (shown "Done", not counted as unread).
-- **Two walls on the inbox.** RLS on the tenant, PLUS a RESTRICTIVE policy on
-  `app.notify_recipient`, set only by `withRecipient` (`db/tenant.ts`); every inbox method
-  also filters on the recipient. Unset means the worker (writes for many people). Each guard
-  was removed in turn in `tests/notify/inbox.integration.test.ts` and the other held. No route
-  takes a user id; an admin reads no inbox but their own; anybody else's id is 404.
-- **No DELETE grant (house rule kept).** Retention is `notify.prune(before)`, SECURITY DEFINER:
-  only the scoped firm's read-or-resolved rows, never newer than 30 days, nothing with no firm
-  in scope. `bib_app` UPDATE is `read_at` and `resolved_at` only.
-- **Categories are a closed registry** (`NOTIFY_CATEGORIES`, 15), like ledger verbs. The firm
-  sets defaults per category and channel (`notify.firm_default`, `tenant:admin`, ledger
-  `tenant.notification_defaults_set`); a person overrides (`notify.user_preference`, not
-  ledgered). Person > firm > product. `escalation` and `filing_missed` in-app cannot be
-  switched off by anybody (409). Nothing is seeded: absence = the product default.
-- **Who writes them: the ledger is the outbox.** `domain/notify/fanout.ts` `planFor(event)` maps
-  a verb to categories, an audience BY RELATIONSHIP (assignee, Key Manager, invoice/bill
-  manager, eligible checkers via T2.9's own `eligibleCheckers`, a permission, a grade) and what
-  it resolves. `usecase/notify/fanout.ts` `NotificationFanout` resolves people as the firm
-  stands now, keeps active staff, drops the actor (nobody hears of their own act) and anyone
-  whose bell is off. Queue `notify.fanout` every minute (`BIB_WORKER_NOTIFY_CRON`).
-  - Cursor per firm (`notify.fanout_cursor`). Each run re-reads a 10-minute window behind it
-    (late commits), refused by the dedupe key; the limit applies to NEW events only. **The
-    first cursor starts one window AHEAD of now** or the first runs replay pre-start events
-    (the integration test caught that).
-  - **Resolving is causal:** only rows caused before the resolving event (`resolve`'s
-    `causedBefore`), so a re-read of an old "task finished" never closes the next round's.
-  - A task raised BY HAND with an assignee writes `work_item.created` (`assigned: true`) and
-    no `work_item.assigned`; only `origin: manual` is read from `created` (spawned ones write
-    both). Found by the walk.
-- **Advance reminders** (`AdvanceReminders`, queue `notify.advance-reminders`, hourly): no
-  event exists when a day passes, so it reads `AdvanceDesk.list` and writes one row per stage
-  (`draft_overdue`, `unpaid_overdue`, `escalated`) per person: the chasers (SPOC, KM, partner)
-  and the admins while it waits for an admin; escalated = admins + partner. A stage left, or
-  an advance no longer pending, is resolved. Weekly summary also reaches admins' bells via
-  `tenant.advance_digest_sent`. Retention: `notify.prune` daily on the escalation cron.
-- **Routes** (`api/handler/notification.ts`, `NO_PERMISSION_REQUIRED` except PUT firm-defaults):
-  list (cursor by the millisecond the client was handed), `unread-count` (capped 100, one
-  partial index, built to be polled once a minute per visible tab), mark read, read-all up to
-  an instant, preferences, firm-defaults. Not in `PORTAL_PATHS`.
-- **Not built:** email and push channels (columns exist; email waits on Ashish's answer about
-  instant vs digest), client-portal notifications, a cap on "check to decide" when a firm's
-  policy lets everybody check. "Bill to raise" reaches the bill's manager (else KM) only, not
-  the boss-escalation or no-price SPOC paths My day has.
-- Tests: `tests/notify/*.test.ts`, `inbox.integration`, `fanout.integration`. One-firm run on
-  the shared DB: `bib/demo-assets/tools/nt-notify-tenant.mts`. Walk: `nt-walk.mjs` (32/32).
 
 ## First module
 
