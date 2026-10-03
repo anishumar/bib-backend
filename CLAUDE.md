@@ -2920,6 +2920,64 @@ runs AHEAD of constraint validation, so `enforce_work_item_state_facts` catches 
 state BEFORE the composite foreign key does, and answers with a sentence naming the state and
 the firm. Both defences are real; the trigger is the outer one.
 
+### The review loop, the checklist, notes and the filing a task files (audit 2026-10-03, work cluster, 0330)
+
+The roleplay walked a task from an article's desk to a manager's approval and found the loop
+open at both ends. What changed, and where:
+
+- **Approving FINISHES the task (CA#28).** `decideReview` → `followDecision` moves an approved
+  task to `completedState` (active, terminal AND `isSuccess`, first by the firm's order), through
+  the same `move` a hand move takes, so `completedAt`, `work_item.completed` and the compliance
+  calendar's `reconcileFiling` all follow. A send-back moves a task sitting in the firm's "with a
+  checker" state to `reworkState` (active, not initial, terminal, blocked or under review: the
+  seed's In Progress). A finished or cancelled task is never moved by a decision, and a firm with
+  no such state keeps the old behaviour. `work_item.state_changed` carries `byReviewDecision`.
+  This supersedes the old screen comment that approval must not pick a terminal state:
+  `isSuccess` (0054) is exactly what tells Completed from Cancelled.
+- **The checklist is a gate (CA#30), the way a step's sub-steps hold Done.** `requestReview`, a
+  move INTO a successful terminal state, and Approve refuse `CHECKLIST_OPEN` (409) naming the open
+  lines (`openChecklistLines`). Cancelling is not held; Send back never is. A line that does not
+  apply is removed (an unticked line can be).
+- **A task is checked under the FIRM's rule (CA#27).** A task names no rule (no template step), and
+  absent used to mean maker != checker alone, so an Analyst approved another Analyst's GSTR-3B at a
+  firm whose rule was "Manager review". Now absent means: the firm's ONE published rule
+  (`ReviewPolicySource.publishedPolicies`), pinned as before; several is `REVIEW_RULE_NEEDED`
+  (400) naming them, and the sender picks; none is maker != checker alone. `GET
+  /api/v1/review-rules` (`party:read`) lists them by label. WAITS FOR SID: with two rules (manager
+  review and EQCR), should ad-hoc work default to one of them?
+- **A task sent for review is no longer "Not Started" (F28).** With no "with a checker" state
+  flagged (0073's shipped default), a task still in its STARTING state moves to `reworkState`.
+  0073's promise not to read "Under Review" as a mechanism is untouched.
+- **Notes (0330).** `delivery.work_item_note`: one person's sentence at one moment, APPEND-ONLY
+  (`bib_app` holds SELECT and INSERT; UPDATE and DELETE revoked), RLS, composite key to the task,
+  not blank by 0308's definition, at most 2,000 characters. `POST /work-items/{id}/notes`
+  (`work:write`); the detail read carries `notes` oldest first with the author's name.
+  `work_item_approval.request_note` is what the maker says when sending (`requestReview` takes
+  `note`). The ledger gets `work_item.note_added` with the note's id ONLY: note text never enters
+  the log. Notes live on the items repository (`addNote` / `listNotes`), beside the checklist.
+- **Sent back shows on the maker's desk (CA#29).** A board row carries `sentBack` (`{ notes,
+  decidedAt, decidedByName }`): the latest DECIDED review was a send-back, none is open, the task is
+  not finished; a lateral on `RECORD_SELECT`. `/my-steps` rows carry the same for a step
+  (`StepApprovalRepository.sentBackFor`, one `DISTINCT ON` read per desk).
+- **A task raised by hand can file a filing (CA#36).** The join already existed:
+  `obligation_instance.work_item_id`, the column the calendar's raised task uses. `PUT
+  /work-items/{id}/filing { obligationId }` writes a hand-raised task there
+  (`ObligationService.linkWorkItem`, refused in words for another company's filing, one filed,
+  withdrawn, decided or with its own task, and for a task already filing another); completing it
+  files the filing through `reconcileFiling`, a task already done files it at once, and the raise
+  pass raises no second task. `DELETE` unlinks while unfiled; `GET` lists the linked filing and
+  the company's open ones (entity, else the task's client). `obligation.work_linked` /
+  `obligation.work_unlinked` carry the task id and the statutory date. The `ObligationFiling` port
+  is built once for both processes in `setup/filing-link.ts`. **A process JOB finishing still files
+  nothing by itself**: a filing is filed by its own task (raised, or linked by hand). Whether
+  finishing the GST job should file its GSTR-1 and GSTR-3B is a design question with Sid, not built.
+- `WorkItemCheckRow` carries `entityPartyId` / `entityName` (F32), so a check row names the company
+  the work is for.
+
+`tests/workitem/service.test.ts`, `model.test.ts`, `notes.integration.test.ts`,
+`review-rules.integration.test.ts`, `my-day-reads.integration.test.ts`,
+`tests/obligation/service.test.ts`, `task-link.integration.test.ts`, `tests/verification/queue.test.ts`.
+
 ## Work always has an owner — the owner rule (Shrestha, 2026-09-27, 0311)
 
 **The rule is the FIRM's, given 2026-09-27**: work the ENGINE creates (an engagement's task, a
