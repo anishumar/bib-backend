@@ -299,8 +299,11 @@ const WorkItemNoteSchema = z
   })
   .openapi("WorkItemNote");
 
-const LinkableFilingSchema = z
-  .object({
+// A FACTORY, for `viewerVerdict`'s reason: `.nullable()` on a schema that has
+// been `.openapi(name)`d mutates the registered component, and `linked` is
+// nullable where `open`'s rows are not.
+const linkableFiling = () =>
+  z.object({
     obligationId: z.string().uuid(),
     name: z.string().openapi({ description: "The filing, e.g. GSTR-3B." }),
     periodLabel: z.string(),
@@ -308,12 +311,12 @@ const LinkableFilingSchema = z
     entityName: z.string().nullable(),
     stateName: z.string().openapi({ description: "The firm's own word for where the filing stands." }),
     filedOn: IsoDate.nullable(),
-  })
-  .openapi("LinkableFiling");
+  });
+const LinkableFilingSchema = linkableFiling().openapi("LinkableFiling");
 
 const TaskFilingResponse = z
   .object({
-    linked: LinkableFilingSchema.nullable().openapi({
+    linked: linkableFiling().nullable().openapi({
       description:
         "The filing this task files (CA#36): completing the task marks it filed, as completing " +
         "the calendar's own task does. Null when it files none.",
