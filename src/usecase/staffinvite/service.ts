@@ -111,6 +111,8 @@ export class StaffInviteService {
       membership.userId,
       names.get(input.tenantId) ?? null,
       timeZone,
+      // The colleague doing the adding, so the letter names them (CA#50).
+      actor.type === "human" ? actor.id : null,
     );
 
     return {

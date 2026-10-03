@@ -540,10 +540,11 @@ describe("the welcome link — pushed, not pulled (0072)", () => {
     expect(await h.service.resolveSession(result.token)).not.toBeNull();
   });
 
-  it("points at the SIGN-IN page, not at a password form", async () => {
-    // Staff have no password to set — no product route sets one — so a link to
-    // `/portal/accept-invite` would land a colleague on a page whose only
-    // action is impossible for them.
+  it("points a colleague who HAS a password at the SIGN-IN page, never the portal's form", async () => {
+    // A link to `/portal/accept-invite` would land a colleague on a page whose
+    // only action is impossible for them. One with no password goes to
+    // `/auth/welcome` instead, where the first one is chosen (CA#38, see
+    // password.test.ts); this seeded colleague has one.
     const userId = await seedUser(h);
     await h.service.welcomeStaff(userId, "10x Global");
     expect(h.mailer.welcomes[0]?.url).toContain("/auth/magic-link?token=");

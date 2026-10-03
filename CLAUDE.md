@@ -1138,6 +1138,24 @@ long as the link is left alone. It names no firm, unlike the three unasked-for l
 it was asked for seconds ago and the account is GLOBAL (ADR-02) — naming one firm would say
 something false about which password is being reset.
 
+**A colleague's FIRST password is chosen on the welcome link (audit 2026-10-03, CA#38).** The
+welcome used to sign a new colleague in and stop; their only way to a password was "Email me a
+link to set one", which arrived as "Reset your BiB password" for a password they never had.
+Now `welcomeStaff` asks whether the account has a credential: with none, the letter's button is
+"Choose your password" and the link goes to `/auth/welcome`, whose form calls
+`POST /auth/magic-link/redeem` WITH a `password` (`redeemWelcome`: welcome purpose only, account
+with no password only, checked for length before the link is spent, then set + signed in in one
+call). "Skip" on that page is the same route without a password, so sign-in links stay the way
+in for anybody who skips. An account that already has a password (identity is global; a second
+firm's welcome) is sent to `/auth/magic-link` as before, and a password sent for it is refused
+`PASSWORD_ALREADY_SET` (409) WITHOUT spending the link. No new public route: the redeem route
+already proved the mailbox. The letter also names the colleague who added them (CA#50) and goes
+out under the firm's name, as the portal invite and welcome now do (CA#40, `fromName`).
+
+A wrong CURRENT password on `POST /auth/password` is `CURRENT_PASSWORD_INCORRECT` (400, "That is
+not your current password.") rather than the sign-in page's 401 "Email or password is
+incorrect" (F26): the form has no email box, and a 401 is what a screen reads as signed out.
+
 **`/auth/me` carries `hasPassword`** so the account screen offers the form that will work. It
 is the same rule the permissions list follows: most colleagues have never had a password, and
 showing all of them a change form whose only outcome is a 409 is the product discovering its

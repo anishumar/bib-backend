@@ -22,7 +22,7 @@
 //
 // `usecase/identity/ports.ts` says the same thing from the other side, which is
 // why `sendPortalInvite` takes `firmName` at all.
-import type { Mailer } from "../../usecase/identity/ports";
+import type { Mailer, StaffWelcomeExtras } from "../../usecase/identity/ports";
 import type {
   DecisionNotice,
   ProposalLetter,
@@ -149,6 +149,9 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer {
     return this.transport.send({
       to,
       subject,
+      // Sent AS the firm (CA#40), the way a proposal is (0085): the client
+      // knows the firm, not this product. The address stays the deployment's.
+      fromName: firm ?? undefined,
       text,
       html: page([
         paragraph(
@@ -195,25 +198,40 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer {
     expiresAt: string,
     firmName: string | null,
     timeZone?: string | null,
+    extra?: StaffWelcomeExtras,
   ): Promise<void> {
     const firm = headerSafe(firmName);
     const who = firm ?? "The firm you work at";
     const subject =
       firm === null ? `You have been given access to ${PRODUCT}` : `${firm} has added you to ${PRODUCT}`;
     const when = readableInstant(expiresAt, timeZone);
+    // WHO added them (CA#50): "somebody there" read as a form letter from
+    // nobody. The name is the colleague's own, so it is data like the firm's.
+    const adder = headerSafe(extra?.addedBy ?? null);
+    const opening =
+      adder === null
+        ? { text: `${who} runs its practice on ${PRODUCT}, and has given you access with this`, html: `<strong>${esc(who)}</strong> runs its practice on ${esc(PRODUCT)}, and has given you access with this email address.` }
+        : { text: `${adder} at ${firm ?? "your firm"} has given you access to ${PRODUCT} with this`, html: `<strong>${esc(adder)}</strong> at <strong>${esc(firm ?? "your firm")}</strong> has given you access to ${esc(PRODUCT)} with this email address.` };
+    // THE FIRST PASSWORD IS CHOSEN ON THIS LINK (CA#38). It used to sign the
+    // colleague in and stop, and the only way to a password was a second email
+    // titled "Reset your password" for a password they never had.
+    const choose = extra?.choosePassword === true;
+    const action = choose
+      ? { line: `Open this link to choose your password and sign in:`, button: "Choose your password" }
+      : { line: `Open this link to sign in:`, button: "Sign in" };
 
     const text = [
-      `${who} runs its practice on ${PRODUCT}, and somebody there has given you`,
-      `access with this email address.`,
+      opening.text,
+      `email address.`,
       ``,
-      `Open this link to sign in:`,
+      action.line,
       url,
       ``,
       `Inside you will find the work that is yours, what is due and when, and the`,
       `clients you look after.`,
       ``,
       `The link works ONCE and stops working at ${when}. If it has expired by the`,
-      `time you read this, nothing is lost — go to the sign-in page and ask for a`,
+      `time you read this, nothing is lost: go to the sign-in page and ask for a`,
       `new link with this same address.`,
       ``,
       `If you were not expecting this, please check with your contact at`,
@@ -223,20 +241,18 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer {
     return this.transport.send({
       to,
       subject,
+      fromName: firm ?? undefined,
       text,
       html: page([
-        paragraph(
-          `<strong>${esc(who)}</strong> runs its practice on ${esc(PRODUCT)}, and somebody ` +
-            `there has given you access with this email address.`,
-        ),
-        button(url, "Sign in"),
+        paragraph(opening.html),
+        button(url, action.button),
         paragraph(
           `Inside you will find the work that is yours, what is due and when, and the clients ` +
             `you look after.`,
         ),
         paragraph(
           `The link works <strong>once</strong> and stops working at ${esc(when)}. If it has ` +
-            `expired by the time you read this, nothing is lost — go to the sign-in page and ` +
+            `expired by the time you read this, nothing is lost: go to the sign-in page and ` +
             `ask for a new link with this same address.`,
         ),
         paragraph(
@@ -306,6 +322,7 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer {
     return this.transport.send({
       to,
       subject,
+      fromName: firm ?? undefined,
       text,
       html: page([
         paragraph(

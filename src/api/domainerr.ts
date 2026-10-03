@@ -1214,6 +1214,14 @@ export function mapError(err: unknown): MappedError {
       // different flow, which the message names.
       case "NO_PASSWORD_SET":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // 400, not the sign-in page's 401: the session is fine, and a 401 is
+      // what a screen reads as "signed out". The value in the field is wrong.
+      case "CURRENT_PASSWORD_INCORRECT":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      // 409: the account is in the wrong state for this act (it already has a
+      // password), and the link that was presented still works for signing in.
+      case "PASSWORD_ALREADY_SET":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       // 404, and it only ever reaches a provisioning caller — see the error's
       // own note for why naming it is safe there. It answered 500 before, from
       // an unmapped foreign-key violation two layers down.

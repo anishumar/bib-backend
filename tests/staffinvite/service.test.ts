@@ -40,7 +40,12 @@ function membership(audience: Audience): Membership {
 /** Records what it was asked to do, and can be told to refuse. */
 class Recorder {
   readonly invited: AddMemberInput[] = [];
-  readonly welcomed: { userId: string; firmName: string | null; timeZone?: string | null }[] = [];
+  readonly welcomed: {
+    userId: string;
+    firmName: string | null;
+    timeZone?: string | null;
+    addedByUserId?: string | null;
+  }[] = [];
   /** Set to make the relay refuse — the mail-is-down case. */
   relayDown = false;
   /** Set to make the tenant row not resolve. */
@@ -58,8 +63,14 @@ class Recorder {
     userId: string,
     firmName: string | null,
     timeZone?: string | null,
+    addedByUserId?: string | null,
   ): Promise<{ expiresAt: string | null; sent: boolean }> {
-    this.welcomed.push({ userId, firmName, ...(timeZone === undefined || timeZone === null ? {} : { timeZone }) });
+    this.welcomed.push({
+      userId,
+      firmName,
+      ...(timeZone === undefined || timeZone === null ? {} : { timeZone }),
+      ...(addedByUserId === undefined ? {} : { addedByUserId }),
+    });
     return Promise.resolve(
       this.relayDown
         ? { expiresAt: "2026-09-06T09:00:00.000Z", sent: false }
@@ -111,9 +122,16 @@ describe("a STAFF membership is written to", () => {
     const r = new Recorder();
     const added = await subject(r).add(input("STAFF"), ACTOR);
 
-    expect(r.welcomed).toEqual([{ userId: USER, firmName: "10x Global" }]);
+    // The ACTOR goes too, so the letter can say who added them (CA#50).
+    expect(r.welcomed).toEqual([{ userId: USER, firmName: "10x Global", addedByUserId: USER }]);
     expect(added.invitationSent).toBe(true);
     expect(added.invitationExpiresAt).toBe("2026-09-06T09:00:00.000Z");
+  });
+
+  it("names nobody when the system adds them", async () => {
+    const r = new Recorder();
+    await subject(r).add(input("STAFF"), { type: "system", id: null });
+    expect(r.welcomed[0]?.addedByUserId).toBeNull();
   });
 
   it("writes to the person the membership resolved to, not to the typed address", async () => {
@@ -132,7 +150,7 @@ describe("a STAFF membership is written to", () => {
     r.firmKnown = false;
     const added = await subject(r).add(input("STAFF"), ACTOR);
 
-    expect(r.welcomed).toEqual([{ userId: USER, firmName: null }]);
+    expect(r.welcomed).toEqual([{ userId: USER, firmName: null, addedByUserId: USER }]);
     expect(added.invitationSent).toBe(true);
   });
 });

@@ -20,6 +20,7 @@ import type {
   NewSession,
   PasswordHasher,
   SessionRepository,
+  StaffWelcomeExtras,
   TokenFactory,
 } from "../usecase/identity/ports";
 
@@ -222,7 +223,14 @@ export class FakeMailer implements Mailer {
   readonly invites: { to: string; url: string; expiresAt: string; firmName: string | null }[] = [];
   /** And a third, for the same reason: a test asserting a colleague was
    *  WELCOMED must not pass on a portal invite that happens to have gone out. */
-  readonly welcomes: { to: string; url: string; expiresAt: string; firmName: string | null }[] = [];
+  readonly welcomes: {
+    to: string;
+    url: string;
+    expiresAt: string;
+    firmName: string | null;
+    addedBy: string | null;
+    choosePassword: boolean;
+  }[] = [];
   /** And a fourth. This one is the whole assertion for the invite downgrade: a
    *  contact who already has a password must be sent a SIGN-IN link, and a test
    *  that could not tell it apart from an invitation would pass on the bug. */
@@ -253,8 +261,17 @@ export class FakeMailer implements Mailer {
     url: string,
     expiresAt: string,
     firmName: string | null,
+    _timeZone?: string | null,
+    extra?: StaffWelcomeExtras,
   ): Promise<void> {
-    this.welcomes.push({ to, url, expiresAt, firmName });
+    this.welcomes.push({
+      to,
+      url,
+      expiresAt,
+      firmName,
+      addedBy: extra?.addedBy ?? null,
+      choosePassword: extra?.choosePassword === true,
+    });
     return Promise.resolve();
   }
 
