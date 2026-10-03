@@ -651,11 +651,13 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
       `;
       if (rows.some((r) => !r.free)) return null;
       // THE CLAIM'S OWN INSTANT IS ITS TOKEN (B35): `now()` is this
-      // transaction's, held to the microsecond as text, and a later claim of
-      // the same bill can only come after this one lapsed, so it differs.
+      // transaction's, held to the microsecond, and a later claim of the same
+      // bill can only come after this one lapsed, so it differs.
       // An id that is no bill here still gets a token: the caller's read says
       // "not found", not "busy".
-      const [stamp] = await db<{ at: string }[]>`SELECT now()::text AS at`;
+      // In whole microseconds since the epoch, as text: exact, and never a
+      // timestamp on the wire (postgres.js would round one to milliseconds).
+      const [stamp] = await db<{ at: string }[]>`SELECT (extract(epoch FROM now()) * 1000000)::bigint::text AS at`;
       await db`UPDATE crm.billing_due SET claimed_at = now() WHERE id = ANY(${db.array(ids)}::uuid[])`;
       if (!stamp) throw new Error("now() returned no row");
       return stamp.at;
@@ -666,12 +668,12 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
     if (dueIds.length === 0) return;
     await withTenant(this.app, tenantId, async (db) => {
       // Only this request's claim: a newer one on the same bills stays.
-      // Compared as TEXT: a parameter typed timestamptz goes through a JS Date
-      // in postgres.js and loses its microseconds, so it never matched.
+      // Compared in microseconds: a parameter typed timestamptz goes through
+      // a JS Date in postgres.js and loses them, so it never matched.
       await db`
         UPDATE crm.billing_due SET claimed_at = NULL
          WHERE id = ANY(${db.array([...dueIds])}::uuid[])
-           AND claimed_at::text = ${token}::text
+           AND (extract(epoch FROM claimed_at) * 1000000)::bigint = ${token}::bigint
       `;
     });
   }
