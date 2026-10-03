@@ -91,7 +91,12 @@ export function postalAddressProblem(a: PostalAddress): string | null {
 }
 
 /** The jsonb written for an address: only the keys that hold something. */
-export function postalAddressJson(a: PostalAddress): Record<string, unknown> {
+export function postalAddressJson(a: PostalAddress): {
+  lines: string[];
+  region?: string;
+  postalCode?: string;
+  country?: string;
+} {
   return {
     lines: [...a.lines],
     ...(a.region === null ? {} : { region: a.region }),

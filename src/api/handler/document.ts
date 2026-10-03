@@ -117,14 +117,42 @@ const setRoute = createRoute({
 
 // ── The firm's own companies (T6.18) ────────────────────────────────────────
 
-/** A registered address as the firm writes it: the lines it prints, in order. */
+/** A registered address as the firm writes it: the lines it prints, in order,
+ *  and (audit 2026-10-03) the state and postal code a tax invoice names. */
 const RegisteredAddressSchema = z
   .object({
     lines: z
       .array(z.string().max(REGISTERED_ADDRESS_LINE_MAX))
       .max(REGISTERED_ADDRESS_MAX_LINES),
+    region: z.string().max(100).nullable().optional().openapi({
+      description: "The state, province, emirate or region: Maharashtra. Printed on invoices and letters.",
+    }),
+    postalCode: z.string().max(20).nullable().optional().openapi({ description: "411001" }),
   })
   .openapi("RegisteredAddress");
+
+/** One of a company's numbers: which kind, and the value. */
+const FirmEntityNumberSchema = z
+  .object({
+    type: z.string().openapi({ description: "gstin (India), trn (UAE), ein (US), vat (anywhere else)" }),
+    value: z.string(),
+  })
+  .openapi("FirmEntityNumber");
+
+/** The numbers a company's form sets (audit 2026-10-03). Absent keeps the
+ *  current one; null or "" clears it. */
+const firmEntityNumbers = {
+  taxRegistration: z.string().max(40).nullable().optional().openapi({
+    description:
+      "Its tax registration: a GSTIN for a company registered in India (held to the GSTIN's " +
+      "shape), a TRN in the UAE, an EIN in the US, a VAT number anywhere else.",
+  }),
+  pan: z.string().max(20).nullable().optional().openapi({ description: "Its PAN; India only." }),
+  phone: z.string().max(40).nullable().optional().openapi({
+    description: "Stored in E.164; a number without a country code takes the company's.",
+  }),
+  email: z.string().max(254).nullable().optional(),
+};
 
 const FirmEntitySchema = z
   .object({
@@ -142,6 +170,12 @@ const FirmEntitySchema = z
     routedCountries: z.array(z.string()),
     /** Whether it answers for every country the firm has no company in (`*`). */
     isFallback: z.boolean(),
+    /** What prints under its name on invoices, letters and proposals (audit
+     *  2026-10-03): each in force today, or null. */
+    taxRegistration: FirmEntityNumberSchema.nullable(),
+    pan: z.string().nullable(),
+    phone: z.string().nullable(),
+    email: z.string().nullable(),
     /** The currency a document it issues starts in (D1): IN INR, AE AED, SG SGD,
      *  US USD, anything else the firm's reporting currency. The one copy of
      *  that table — a screen reads it here rather than keeping its own. */
@@ -167,6 +201,7 @@ const CreateFirmEntityRequest = z
     /** "Private Limited", "FZE", "Pte. Ltd.", "Inc." — the firm's words. */
     entityType: z.string().min(1).max(100),
     registeredAddress: RegisteredAddressSchema.optional(),
+    ...firmEntityNumbers,
   })
   .openapi("CreateFirmEntityRequest");
 
@@ -179,6 +214,7 @@ const EditFirmEntityRequest = z
     /** Only for a company with no country recorded yet (send entityType with
      *  it). A company that has one does not move: JURISDICTION_FIXED. */
     jurisdiction: z.string().length(2).optional(),
+    ...firmEntityNumbers,
   })
   .openapi("EditFirmEntityRequest");
 
@@ -229,7 +265,9 @@ const editEntityRoute = createRoute({
   tags: ["firm-entities"],
   summary: "Change one of the firm's own companies",
   description:
-    "Its name, entity type and registered address — and, for a company with no country " +
+    "Its name, entity type, registered address (with its state and postal code) and the numbers " +
+    "that print under its name: tax registration, PAN, phone, email (audit 2026-10-03). And, for a " +
+    "company with no country " +
     "recorded yet, where it is registered.",
   request: {
     params: z.object({ entityPartyId: z.string().uuid() }),
@@ -251,10 +289,22 @@ function toFirmEntityBody(e: FirmEntityView): z.infer<typeof FirmEntitySchema> {
     name: e.name,
     jurisdiction: e.jurisdiction,
     entityType: e.entityType,
-    registeredAddress: e.registeredAddress === null ? null : { lines: [...e.registeredAddress.lines] },
+    registeredAddress:
+      e.registeredAddress === null
+        ? null
+        : {
+            lines: [...e.registeredAddress.lines],
+            region: e.registeredAddress.region ?? null,
+            postalCode: e.registeredAddress.postalCode ?? null,
+          },
     isFirmSelf: e.isFirmSelf,
     routedCountries: [...e.routedCountries],
     isFallback: e.isFallback,
+    taxRegistration:
+      e.taxRegistration === null ? null : { type: e.taxRegistration.type, value: e.taxRegistration.value },
+    pan: e.pan,
+    phone: e.phone,
+    email: e.email,
     defaultCurrency: e.defaultCurrency,
   };
 }
@@ -518,6 +568,10 @@ export function registerDocumentRoutes(app: OpenAPIHono<AppEnv>, deps: DocumentD
         jurisdiction: body.jurisdiction,
         entityType: body.entityType,
         registeredAddress: body.registeredAddress,
+        taxRegistration: body.taxRegistration,
+        pan: body.pan,
+        phone: body.phone,
+        email: body.email,
       },
       s.actor,
     );
@@ -536,6 +590,10 @@ export function registerDocumentRoutes(app: OpenAPIHono<AppEnv>, deps: DocumentD
         entityType: body.entityType,
         registeredAddress: body.registeredAddress,
         jurisdiction: body.jurisdiction,
+        taxRegistration: body.taxRegistration,
+        pan: body.pan,
+        phone: body.phone,
+        email: body.email,
       },
       s.actor,
     );

@@ -8,6 +8,7 @@
 // a transaction boundary, and a fake asserting it would be asserting its own
 // behaviour. tests/document/reference.integration.test.ts proves it against
 // real Postgres, along with `UNIQUE (tenant_id, ref)`.
+import { randomUUID } from "node:crypto";
 import type {
   DocumentBlock,
   DocumentType,
@@ -32,6 +33,8 @@ import type {
 import type { Deps } from "../usecase/document/service";
 import type {
   FirmEntityChange,
+  FirmEntityNumberWrite,
+  FirmEntityNumbersWritten,
   FirmEntityRecord,
   FirmEntityRepository,
   NewFirmEntity,
@@ -359,8 +362,15 @@ export class FakeFirmEntityRepo implements FirmEntityRepository {
       isFirmSelf: true,
       routedCountries: [],
       isFallback: true,
+      taxRegistration: null,
+      pan: null,
+      phone: null,
+      email: null,
     },
   ];
+  /** "type value" pairs another party at the firm holds, so a test can make
+   *  a number already taken (the real adapter asks the identifier table). */
+  readonly heldElsewhere = new Set<string>();
   /** Parties of the firm that are NOT its companies — a client, say. */
   readonly otherParties = new Map<string, string>();
   reportingCurrencyCode = "INR";
@@ -392,12 +402,20 @@ export class FakeFirmEntityRepo implements FirmEntityRepository {
     return Promise.resolve(e === undefined ? null : { partyId: e.partyId, name: e.name });
   }
 
-  create(e: NewFirmEntity): Promise<boolean> {
+  create(
+    e: NewFirmEntity,
+  ): Promise<
+    | { readonly created: true; readonly numbers: FirmEntityNumbersWritten }
+    | { readonly created: false }
+    | { readonly taken: string }
+  > {
     if (this.loseNextRace) {
       this.loseNextRace = false;
-      return Promise.resolve(false);
+      return Promise.resolve({ created: false });
     }
-    this.entities.push({
+    const taken = this.takenIn(e.numbers);
+    if (taken !== null) return Promise.resolve({ taken });
+    const record: FirmEntityRecord = {
       partyId: e.partyId,
       name: e.name,
       jurisdiction: e.jurisdiction,
@@ -406,24 +424,74 @@ export class FakeFirmEntityRepo implements FirmEntityRepository {
       isFirmSelf: false,
       routedCountries: [e.jurisdiction],
       isFallback: false,
-    });
-    return Promise.resolve(true);
+      taxRegistration: null,
+      pan: null,
+      phone: null,
+      email: null,
+    };
+    const { next, written } = this.applyNumbers(record, e.numbers);
+    this.entities.push(next);
+    return Promise.resolve({ created: true, numbers: written });
   }
 
-  edit(_tenantId: string, partyId: string, change: FirmEntityChange): Promise<void> {
+  edit(
+    _tenantId: string,
+    partyId: string,
+    change: FirmEntityChange,
+  ): Promise<{ readonly numbers: FirmEntityNumbersWritten } | { readonly taken: string }> {
     const at = this.entities.findIndex((e) => e.partyId === partyId);
     const current = this.entities[at];
     if (current === undefined) throw new Error(`fake: no firm entity ${partyId}`);
-    this.entities[at] = {
-      ...current,
-      ...(change.name === undefined ? {} : { name: change.name }),
-      ...(change.register === undefined
-        ? {}
-        : { jurisdiction: change.register.jurisdiction, entityType: change.register.entityType }),
-      ...(change.entityType === undefined ? {} : { entityType: change.entityType }),
-      ...(change.registeredAddress === undefined ? {} : { registeredAddress: change.registeredAddress }),
-    };
-    return Promise.resolve();
+    const taken = this.takenIn(change.numbers ?? []);
+    if (taken !== null) return Promise.resolve({ taken });
+    const { next, written } = this.applyNumbers(
+      {
+        ...current,
+        ...(change.name === undefined ? {} : { name: change.name }),
+        ...(change.register === undefined
+          ? {}
+          : { jurisdiction: change.register.jurisdiction, entityType: change.register.entityType }),
+        ...(change.entityType === undefined ? {} : { entityType: change.entityType }),
+        ...(change.registeredAddress === undefined ? {} : { registeredAddress: change.registeredAddress }),
+      },
+      change.numbers ?? [],
+    );
+    this.entities[at] = next;
+    return Promise.resolve({ numbers: written });
+  }
+
+  private takenIn(numbers: readonly FirmEntityNumberWrite[]): string | null {
+    const hit = numbers.find((n) => n.set !== null && this.heldElsewhere.has(`${n.set.type} ${n.set.value}`));
+    return hit?.set?.type ?? null;
+  }
+
+  /** The numbers a write leaves on a company, and what it voided and added. */
+  private applyNumbers(
+    record: FirmEntityRecord,
+    numbers: readonly FirmEntityNumberWrite[],
+  ): { next: FirmEntityRecord; written: FirmEntityNumbersWritten } {
+    let next = record;
+    const added: { id: string; type: string }[] = [];
+    const voided: { id: string; type: string }[] = [];
+    for (const n of numbers) {
+      const slot = n.types.includes("pan")
+        ? "pan"
+        : n.types.includes("phone")
+          ? "phone"
+          : n.types.includes("email")
+            ? "email"
+            : "taxRegistration";
+      const held =
+        slot === "taxRegistration" ? next.taxRegistration?.type ?? null : next[slot] === null ? null : slot;
+      if (held !== null) voided.push({ id: randomUUID(), type: held });
+      const value = n.set;
+      next =
+        slot === "taxRegistration"
+          ? { ...next, taxRegistration: value === null ? null : { type: value.type, value: value.value } }
+          : { ...next, [slot]: value === null ? null : value.value };
+      if (value !== null) added.push({ id: value.id, type: value.type });
+    }
+    return { next, written: { added, voided } };
   }
 }
 
