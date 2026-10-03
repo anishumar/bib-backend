@@ -1069,7 +1069,8 @@ const requestReviewRoute = createRoute({
     "The MAKER is not a parameter and cannot be: the database derives it from the item's " +
     "assignee and freezes it, because a maker the caller could choose is not a maker-checker " +
     "control. The item moves into the firm's 'with a checker' state when the firm has " +
-    "flagged one (0073). Refused while a checklist line is unticked (CHECKLIST_OPEN): " +
+    "flagged one (0073); without one, a task still in its starting state moves to the firm's " +
+    "working state (F28). Refused while a checklist line is unticked (CHECKLIST_OPEN): " +
     "sending work to be checked says it is done, as a process step's Done waits for its " +
     "sub-steps.",
   request: {

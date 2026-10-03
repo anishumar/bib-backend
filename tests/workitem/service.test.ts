@@ -776,16 +776,35 @@ describe("review — and the rule no firm may configure away", () => {
     expect(after.record.item.stateId).toBe(reviewStateId);
   });
 
-  it("leaves the state ALONE when the firm has named none — the shipped answer", async () => {
+  it("leaves a STARTED task's state alone when the firm has named none — the shipped answer", async () => {
     // Null is supported, not a gap. There is deliberately no fallback to a
     // state NAMED "Under Review": the firm owns the words, and a product that
     // reads a name breaks the morning somebody renames it.
     const { h, item } = await readyForReview();
+    const working = await stateNamed(h, "in_progress");
+    await h.service.moveToState({ tenantId: FIRM, workItemId: item.id, stateId: working.id }, ACTOR);
     const before = (await h.service.detail(FIRM, item.id)).record.item.stateId;
 
     await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
 
     expect((await h.service.detail(FIRM, item.id)).record.item.stateId).toBe(before);
+  });
+
+  it("takes a task still NOT STARTED to the working state when the firm names no 'with a checker' state (F28)", async () => {
+    // The work board read "In review" beside State "Not Started": sending work
+    // to be checked says it was done, so it was at least started. The working
+    // state is read by its flags (`reworkState`), never its name.
+    const { h, item } = await readyForReview();
+    const working = await stateNamed(h, "in_progress");
+
+    await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+
+    const after = (await h.service.detail(FIRM, item.id)).record.item;
+    expect(after.stateId).toBe(working.id);
+    expect(after.startedAt).toBe(NOW);
+    expect(h.recorded().find((e) => e.verb === "work_item.review_requested")?.payload).toMatchObject({
+      movedToStateId: working.id,
+    });
   });
 
   it("records the move, and says it was the REVIEW that moved it", async () => {
@@ -806,6 +825,8 @@ describe("review — and the rule no firm may configure away", () => {
 
   it("says on the event when NOTHING moved, because that is a firm's decision", async () => {
     const { h, item } = await readyForReview();
+    const working = await stateNamed(h, "in_progress");
+    await h.service.moveToState({ tenantId: FIRM, workItemId: item.id, stateId: working.id }, ACTOR);
     const before = h.recorded().length;
 
     await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
@@ -1199,7 +1220,7 @@ describe("review — and the rule no firm may configure away", () => {
     // and "what did we finish" counts it.
     expect(h.verbs()).toContain("work_item.completed");
     expect(h.filings.calls.at(-1)).toMatchObject({ workItemId: item.id, discharged: true });
-    const moved = h.recorded().find((e) => e.verb === "work_item.state_changed");
+    const moved = h.recorded().filter((e) => e.verb === "work_item.state_changed").at(-1);
     expect(moved?.payload).toMatchObject({ toStateId: after.state.id, byReviewDecision: "approved" });
   });
 
@@ -1223,8 +1244,8 @@ describe("review — and the rule no firm may configure away", () => {
     const done = states.find((st) => st.isTerminal && st.isSuccess);
     if (!done) throw new Error("the seed no longer ships a successful terminal state");
     await h.vocab.updateState({ tenantId: FIRM, stateId: done.id, isSuccess: false }, ACTOR);
-    const before = (await h.service.detail(FIRM, item.id)).record.item.stateId;
     const approval = await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+    const before = (await h.service.detail(FIRM, item.id)).record.item.stateId;
 
     const decided = await h.service.decideReview(
       { tenantId: FIRM, approvalId: approval.id, decision: "approved", decidedBy: ANAND },
@@ -1261,8 +1282,8 @@ describe("review — and the rule no firm may configure away", () => {
 
   it("leaves sent-back work alone when it never moved into a 'with a checker' state", async () => {
     const { h, item } = await readyForReview();
-    const before = (await h.service.detail(FIRM, item.id)).record.item.stateId;
     const approval = await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+    const before = (await h.service.detail(FIRM, item.id)).record.item.stateId;
 
     await h.service.decideReview(
       { tenantId: FIRM, approvalId: approval.id, decision: "rejected", notes: "redo", decidedBy: ANAND },

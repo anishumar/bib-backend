@@ -2017,11 +2017,16 @@ export class WorkItemService {
     item: WorkItem,
     actor: Actor,
   ): Promise<string | null> {
-    const to = underReviewState(await this.deps.vocabulary.listStates(tenantId));
-    if (!to || to.id === item.stateId) return null;
-
+    const states = await this.deps.vocabulary.listStates(tenantId);
     const from = await this.requireStateRow(tenantId, item.stateId);
     if (from.isTerminal) return null;
+    // The firm's "with a checker" state; failing that, a task still in its
+    // STARTING state goes to the working state (audit 2026-10-03, F28): the
+    // board read "In review" beside "Not Started", and sending work to be
+    // checked says it was done, so it was at least started. Both read by
+    // flags, never by a state's name.
+    const to = underReviewState(states) ?? (from.isInitial ? reworkState(states) : null);
+    if (!to || to.id === item.stateId) return null;
 
     const now = this.deps.clock.now().toISOString();
     await this.deps.items.setState(tenantId, item.id, {
