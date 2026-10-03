@@ -45,7 +45,9 @@ export type InvoiceErrorCode =
   | "DUNNING_NOTHING_OWED"
   | "CREDIT_EXCEEDS_UNUSED_ADVANCE"
   | "FX_RATE_REQUIRED"
-  | "FX_RATE_NOT_ONE";
+  | "FX_RATE_NOT_ONE"
+  | "DUE_DATE_IN_THE_PAST"
+  | "DUE_BEFORE_ISSUE";
 
 /** `asOf` is the caller's TODAY, not a date to choose (see `isCallersToday`).
  *  A document that genuinely belongs to another day has its own field. */
@@ -507,6 +509,32 @@ export class FxRateNotOne extends InvoiceError {
     super(
       "FX_RATE_NOT_ONE",
       `This invoice is in ${currency}, the firm's own currency, so its rate is 1, not ${given}. Leave the rate empty.`,
+    );
+  }
+}
+
+/** A due date set on a draft is today or later (audit 2026-10-03, B20/F35). */
+export class DueDateInThePast extends InvoiceError {
+  constructor(given: string, today: string) {
+    super(
+      "DUE_DATE_IN_THE_PAST",
+      `${dayInWords(given)} has already passed (today is ${dayInWords(today)}). Choose today or a later day ` +
+        `as the due date, or leave it empty.`,
+    );
+  }
+}
+
+/**
+ * An invoice is not issued with a due date before its own date (B21). A draft
+ * raised on 1 October due 8 October and issued on 20 October went out already
+ * twelve days overdue, and the next sweep fired every reminder at once.
+ */
+export class DueBeforeIssue extends InvoiceError {
+  constructor(dueOn: string, issuedOn: string) {
+    super(
+      "DUE_BEFORE_ISSUE",
+      `This invoice is due on ${dayInWords(dueOn)}, which is before today's issue date, ${dayInWords(issuedOn)}. ` +
+        `Change the due date on the draft, then issue it.`,
     );
   }
 }

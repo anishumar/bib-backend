@@ -981,6 +981,7 @@ export function mapError(err: unknown): MappedError {
       case "CREDIT_NOTE_DATE_OUT_OF_RANGE":
       case "FX_RATE_REQUIRED":
       case "FX_RATE_NOT_ONE":
+      case "DUE_DATE_IN_THE_PAST":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       case "INVOICE_NOT_FOUND":
       case "INVOICE_LINE_NOT_FOUND":
@@ -1015,6 +1016,7 @@ export function mapError(err: unknown): MappedError {
       case "INVOICE_MANAGER_FROZEN":
       case "INVOICE_HAS_PAYMENTS":
       case "DUNNING_NOTHING_OWED":
+      case "DUE_BEFORE_ISSUE":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

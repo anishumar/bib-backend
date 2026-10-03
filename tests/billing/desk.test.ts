@@ -559,3 +559,21 @@ describe("the schedule an engagement starts with, from its letter", () => {
     expect(w.events.verbs()).toHaveLength(2);
   });
 });
+
+describe("the firm's own payment terms (B20, audit 2026-10-03)", () => {
+  it("has none until the firm sets one, and never a guessed number", async () => {
+    const w = world();
+    expect((await w.service.settings(FIRM)).invoiceDueDays).toBeNull();
+    await w.service.setInvoiceDueDays(FIRM, 15, ME);
+    expect((await w.service.settings(FIRM)).invoiceDueDays).toBe(15);
+    expect(w.events.recorded.at(-1)).toMatchObject({ verb: "tenant.invoice_due_days_set", payload: { from: null, to: 15 } });
+    await w.service.setInvoiceDueDays(FIRM, null, ME);
+    expect((await w.service.settings(FIRM)).invoiceDueDays).toBeNull();
+  });
+
+  it("refuses a number of days outside 0 to 365", async () => {
+    const w = world();
+    await expect(w.service.setInvoiceDueDays(FIRM, 400, ME)).rejects.toMatchObject({ code: "INVALID_BILLING_INPUT" });
+    await expect(w.service.setInvoiceDueDays(FIRM, -1, ME)).rejects.toMatchObject({ code: "INVALID_BILLING_INPUT" });
+  });
+});

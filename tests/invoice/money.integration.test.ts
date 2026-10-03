@@ -96,7 +96,6 @@ async function issued(amount = "10000", tax = "0"): Promise<string> {
       fxRate: "1",
       fxRateDate: "2026-07-01",
       seriesDate: "2026-07-01",
-      dueOn: "2026-07-31",
     },
     SYSTEM_ACTOR,
   );
@@ -430,5 +429,31 @@ describe("a cancelled invoice owes nothing, in the view itself (B22, 0326)", () 
     );
     await service.addLine({ tenantId: tenant, invoiceId: draft.id, description: "Not sent", quantity: "1", unitAmount: "500" });
     expect((await service.balanceOf(tenant, draft.id)).outstanding).toBe("0");
+  });
+});
+
+describe("the due date on a real database (B20, B21, 0327)", () => {
+  it("sets a draft's due date, and an invoice issued with none takes the firm's terms", async () => {
+    const draft = await service.raise(
+      { tenantId: tenant, partyId: client, entityPartyId: entity, currency: "INR" },
+      SYSTEM_ACTOR,
+    );
+    await service.addLine({ tenantId: tenant, invoiceId: draft.id, description: "Advisory", quantity: "1", unitAmount: "100" });
+    const far = "2099-01-31";
+    expect((await service.setDueDate(tenant, draft.id, far, SYSTEM_ACTOR)).dueOn).toBe(far);
+    expect((await service.setDueDate(tenant, draft.id, null, SYSTEM_ACTOR)).dueOn).toBeNull();
+
+    // The firm says 15 days; nothing was typed on the draft.
+    await owner`UPDATE tenancy.tenant SET invoice_due_days = 15 WHERE id = ${tenant}`;
+    try {
+      const issuedOne = await service.issue(tenant, draft.id, SYSTEM_ACTOR);
+      const [row] = await owner<{ gap: number }[]>`
+        SELECT (due_on - issued_on)::int AS gap FROM crm.invoice WHERE id = ${draft.id}
+      `;
+      expect(row?.gap).toBe(15);
+      expect(issuedOne.dueOn).not.toBeNull();
+    } finally {
+      await owner`UPDATE tenancy.tenant SET invoice_due_days = NULL WHERE id = ${tenant}`;
+    }
   });
 });

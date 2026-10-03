@@ -215,6 +215,10 @@ export class FakeInvoiceRepo implements InvoiceRepository {
     return this.patch(tenantId, invoiceId, { irn, irnRegisteredAt: at });
   }
 
+  setDueOn(tenantId: string, invoiceId: string, dueOn: string | null): Promise<Invoice> {
+    return this.patch(tenantId, invoiceId, { dueOn });
+  }
+
   setManager(tenantId: string, invoiceId: string, managerUserId: string | null): Promise<Invoice> {
     return this.patch(tenantId, invoiceId, { managerUserId });
   }

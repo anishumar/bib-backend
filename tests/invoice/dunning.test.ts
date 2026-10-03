@@ -49,6 +49,7 @@ function setup(): {
   invoices: FakeInvoiceRepo;
   billing: InvoiceService;
   events: RecordingEventSink;
+  clock: FakeClock;
 } {
   const dunning = new FakeDunningRepo();
   const ladders = new FakeDunningLadder();
@@ -77,11 +78,15 @@ function setup(): {
     clock,
     events,
   });
-  return { service, dunning, ladders, invoices, billing, events };
+  return { service, dunning, ladders, invoices, billing, events, clock };
 }
 
-/** An issued invoice for 10,000 that fell due on `dueOn`. */
+/** An issued invoice for 10,000 that fell due on `dueOn`: issued ON its due
+ *  day (an invoice is not issued already overdue, B21), then the clock is
+ *  back at today. */
 async function overdueInvoice(s: ReturnType<typeof setup>, dueOn: string): Promise<string> {
+  const today = s.clock.now();
+  s.clock.set(`${dueOn}T06:00:00Z`);
   const invoice = await s.billing.raise(
     {
       tenantId: TENANT,
@@ -102,6 +107,7 @@ async function overdueInvoice(s: ReturnType<typeof setup>, dueOn: string): Promi
     unitAmount: "10000",
   });
   await s.billing.issue(TENANT, invoice.id, SYSTEM_ACTOR);
+  s.clock.set(today);
   return invoice.id;
 }
 

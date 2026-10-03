@@ -78,7 +78,10 @@ import {
   CreditExceedsUnusedAdvance,
   FxRateNotOne,
   FxRateRequired,
+  DueBeforeIssue,
+  DueDateInThePast,
 } from "../../domain/invoice/errors";
+import { addDays } from "../../domain/scheduler/model";
 import { dayInZone, isCallersToday } from "../../domain/scheduler/zone";
 import type {
   FirmEntities,
@@ -279,6 +282,37 @@ export class InvoiceService {
     return saved;
   }
 
+  /**
+   * Set or clear a DRAFT's due date (B20). Bills drafted by the billing desk
+   * carried none and nothing could give them one, so client reminders never
+   * chased them. Today or later; an issued invoice's due date is what was
+   * sent, and does not change.
+   */
+  async setDueDate(
+    tenantId: string,
+    invoiceId: string,
+    dueOn: string | null,
+    actor: Actor,
+    asOf?: string,
+  ): Promise<Invoice> {
+    const invoice = await this.editableOrThrow(tenantId, invoiceId);
+    if (dueOn !== null) {
+      this.dateOrThrow("dueOn", dueOn);
+      const today = await this.today(tenantId, asOf);
+      if (dueOn < today) throw new DueDateInThePast(dueOn, today);
+    }
+    if (invoice.dueOn === dueOn) return invoice;
+    const saved = await this.deps.invoices.setDueOn(tenantId, invoiceId, dueOn);
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "invoice.due_date_set",
+      objectId: saved.id,
+      actor,
+      payload: { dueOn: saved.dueOn, previousDueOn: invoice.dueOn },
+    });
+    return saved;
+  }
+
   async addLine(input: AddInvoiceLineInput): Promise<InvoiceLine> {
     const invoice = await this.editableOrThrow(input.tenantId, input.invoiceId);
     if (!isAmount(input.quantity) || Number(input.quantity) <= 0) {
@@ -377,12 +411,19 @@ export class InvoiceService {
     // firm's own year when it has said when that starts, else 1 April.
     const settings = await this.deps.settings.invoiceSettingsFor(tenantId);
     const startMonth = settings.fiscalYearStartMonth ?? INDIAN_FY_START_MONTH;
+    // NOT ALREADY OVERDUE (B21): a draft that lingered past its due date would
+    // go out late, and the next sweep fire every reminder at once. The person
+    // changes the date on the draft; nothing guesses a new one.
+    if (invoice.dueOn !== null && invoice.dueOn < issuedOn) throw new DueBeforeIssue(invoice.dueOn, issuedOn);
+    // THE FIRM'S OWN TERMS (B20, 0327): an invoice issued with no due date is
+    // due N days after its date when the firm has said N; never a guessed N.
+    const dueOnIfUnset = settings.dueInDays === null ? null : addDays(issuedOn, settings.dueInDays);
     // THE NUMBER IS DRAWN HERE (0322), in the same transaction as the status.
     const issued = await this.deps.invoices.issue(tenantId, invoiceId, {
       issuedOn,
       financialYear: financialYearOf(issuedOn, startMonth),
       fiscalYearStartMonth: startMonth,
-      dueOnIfUnset: null,
+      dueOnIfUnset,
     });
     await this.deps.events.recordEvent({
       tenantId,
@@ -399,6 +440,7 @@ export class InvoiceService {
         partyId: issued.partyId,
         entityPartyId: issued.entityPartyId,
         issuedOn: issued.issuedOn,
+        dueOn: issued.dueOn,
         lineCount: lines.length,
       },
     });

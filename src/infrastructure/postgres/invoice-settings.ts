@@ -20,8 +20,8 @@ export class PostgresInvoiceFirmSettings implements InvoiceFirmSettings {
     readonly dueInDays: number | null;
   }> {
     return withTenant(this.app, tenantId, async (db) => {
-      const [firm] = await db<{ reporting_currency: string }[]>`
-        SELECT reporting_currency FROM tenancy.tenant WHERE id = ${tenantId}
+      const [firm] = await db<{ reporting_currency: string; invoice_due_days: number | null }[]>`
+        SELECT reporting_currency, invoice_due_days FROM tenancy.tenant WHERE id = ${tenantId}
       `;
       if (!firm) throw new Error(`no tenant ${tenantId} to read invoice settings for`);
       const [policy] = await db<{ body: Record<string, unknown> }[]>`
@@ -33,7 +33,7 @@ export class PostgresInvoiceFirmSettings implements InvoiceFirmSettings {
       return {
         reportingCurrency: firm.reporting_currency,
         fiscalYearStartMonth: policy ? readFiscalYearStartMonth(policy.body) : null,
-        dueInDays: null,
+        dueInDays: firm.invoice_due_days,
       };
     });
   }

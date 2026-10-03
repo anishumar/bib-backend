@@ -247,6 +247,8 @@ export interface InvoiceRepository {
    */
   cancel(tenantId: string, invoiceId: string): Promise<CancelOutcome>;
   registerIrn(tenantId: string, invoiceId: string, irn: string, at: string): Promise<Invoice>;
+  /** A DRAFT's due date (null: none). `status = 'draft'` in the write (B20). */
+  setDueOn(tenantId: string, invoiceId: string, dueOn: string | null): Promise<Invoice>;
   /** A DRAFT's manager (null: nobody). `status = 'draft'` in the write. */
   setManager(tenantId: string, invoiceId: string, managerUserId: string | null): Promise<Invoice>;
 

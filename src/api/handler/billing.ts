@@ -625,6 +625,11 @@ const SettingsSchema = z
     taxDefaults: z.array(TaxDefaultSchema).openapi({
       description: "Each company's default tax rate. A company with none gets no automatic advance draft.",
     }),
+    invoiceDueDays: z.number().int().nullable().openapi({
+      description:
+        "The firm's own payment terms (0327): an invoice issued with no due date is due this many " +
+        "days after its date. Null (the default) means none: no due date unless a person types one.",
+    }),
   })
   .openapi("BillingSettings");
 
@@ -658,6 +663,9 @@ const putSettingsRoute = createRoute({
               autoBilling: z.boolean().optional(),
               advancePolicy: AdvancePolicySchema.optional(),
               taxDefaults: z.array(TaxDefaultSchema).max(50).optional(),
+              invoiceDueDays: z.number().int().min(0).max(365).nullable().optional().openapi({
+                description: "Payment terms in days (0 = due on receipt); null clears them.",
+              }),
             })
             .openapi("SetBillingSettings"),
         },
@@ -785,6 +793,7 @@ function settingsBody(s: BillingSettings) {
       digestHour: s.advancePolicy.digestHour,
     },
     taxDefaults: s.taxDefaults.map((t) => ({ entityPartyId: t.entityPartyId, taxPercent: t.taxPercent })),
+    invoiceDueDays: s.invoiceDueDays,
   };
 }
 
@@ -1012,6 +1021,9 @@ export function registerBillingRoutes(app: OpenAPIHono<AppEnv>, deps: BillingDep
     const body = c.req.valid("json");
     if (body.autoBilling !== undefined) await deps.service.setAutoBilling(s.tenantId, body.autoBilling, s.actor);
     if (body.advancePolicy !== undefined) await deps.service.setAdvancePolicy(s.tenantId, body.advancePolicy, s.actor);
+    if (body.invoiceDueDays !== undefined) {
+      await deps.service.setInvoiceDueDays(s.tenantId, body.invoiceDueDays, s.actor);
+    }
     for (const t of body.taxDefaults ?? []) {
       await deps.service.setTaxDefault(
         { tenantId: s.tenantId, entityPartyId: t.entityPartyId, taxPercent: t.taxPercent },

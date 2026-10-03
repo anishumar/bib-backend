@@ -968,3 +968,66 @@ describe("the rate to the firm's currency (B07, audit 2026-10-03)", () => {
     await expect(s.service.raise(raise({ fxRate: "83" }), ACTOR)).rejects.toMatchObject({ code: "FX_RATE_NOT_ONE" });
   });
 });
+
+describe("the due date (B20, B21, audit 2026-10-03)", () => {
+  async function lined(s: ReturnType<typeof setup>, over: Partial<Parameters<InvoiceService["raise"]>[0]> = {}) {
+    const invoice = await s.service.raise(raise(over), ACTOR);
+    await s.service.addLine({ tenantId: TENANT, invoiceId: invoice.id, description: "Advisory", quantity: "1", unitAmount: "1000" });
+    return invoice;
+  }
+
+  it("sets and changes a draft's due date, and records it", async () => {
+    // Auto-drafted bills came with no due date and nothing could give them
+    // one, so client reminders never chased them.
+    const s = setup();
+    const draft = await lined(s);
+    const saved = await s.service.setDueDate(TENANT, draft.id, "2026-07-31", ACTOR);
+    expect(saved.dueOn).toBe("2026-07-31");
+    expect(s.events.recorded.at(-1)).toMatchObject({
+      verb: "invoice.due_date_set",
+      payload: { dueOn: "2026-07-31", previousDueOn: null },
+    });
+    expect((await s.service.setDueDate(TENANT, draft.id, null, ACTOR)).dueOn).toBeNull();
+  });
+
+  it("refuses to change a due date to a day already past", async () => {
+    const s = setup();
+    const draft = await lined(s);
+    await expect(s.service.setDueDate(TENANT, draft.id, "2026-06-30", ACTOR)).rejects.toMatchObject({
+      code: "DUE_DATE_IN_THE_PAST",
+    });
+  });
+
+  it("does not change an issued invoice's due date", async () => {
+    const s = setup();
+    const draft = await lined(s);
+    await s.service.issue(TENANT, draft.id, ACTOR);
+    await expect(s.service.setDueDate(TENANT, draft.id, "2026-08-31", ACTOR)).rejects.toMatchObject({
+      code: "INVOICE_NOT_EDITABLE",
+    });
+  });
+
+  it("refuses to issue a draft whose due date has already passed, and says what to do", async () => {
+    // Raised 1 October due 8 October, issued 20 October: the next sweep fired
+    // every reminder at once.
+    const s = setup();
+    s.clock.set("2026-10-01T06:00:00Z");
+    const draft = await lined(s, { dueOn: "2026-10-08" });
+    s.clock.set("2026-10-20T06:00:00Z");
+    const refused = await s.service.issue(TENANT, draft.id, ACTOR).catch((e: unknown) => e);
+    expect(refused).toMatchObject({ code: "DUE_BEFORE_ISSUE" });
+    expect((refused as Error).message).toContain("8 October 2026");
+    expect((await s.invoices.find(TENANT, draft.id))?.status).toBe("draft");
+  });
+
+  it("gives an invoice issued with no due date the firm's own terms, and none when the firm has none", async () => {
+    const s = setup();
+    s.clock.set("2026-10-20T06:00:00Z");
+    expect((await s.service.issue(TENANT, (await lined(s)).id, ACTOR)).dueOn).toBeNull();
+    s.settings.dueInDays = 15;
+    const issued = await s.service.issue(TENANT, (await lined(s)).id, ACTOR);
+    expect(issued.dueOn).toBe("2026-11-04");
+    // A date somebody typed is kept.
+    expect((await s.service.issue(TENANT, (await lined(s, { dueOn: "2026-10-25" })).id, ACTOR)).dueOn).toBe("2026-10-25");
+  });
+});

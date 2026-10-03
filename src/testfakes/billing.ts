@@ -694,4 +694,17 @@ export class FakeAutoBillingSetting implements AutoBillingSetting {
     if (on && since !== undefined) this.since.set(tenantId, since);
     return Promise.resolve();
   }
+
+  /** Each firm's payment terms (0327); none until a test sets them. */
+  readonly dueDays = new Map<string, number>();
+
+  dueInDays(tenantId: string): Promise<number | null> {
+    return Promise.resolve(this.dueDays.get(tenantId) ?? null);
+  }
+
+  setDueInDays(tenantId: string, days: number | null): Promise<void> {
+    if (days === null) this.dueDays.delete(tenantId);
+    else this.dueDays.set(tenantId, days);
+    return Promise.resolve();
+  }
 }

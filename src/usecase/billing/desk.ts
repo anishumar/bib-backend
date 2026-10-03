@@ -91,6 +91,8 @@ export interface BillingSettings {
   readonly autoBilling: boolean;
   readonly advancePolicy: AdvancePolicy;
   readonly taxDefaults: readonly { readonly entityPartyId: string; readonly taxPercent: string }[];
+  /** The firm's own payment terms in days (0327); null: none, never a guess. */
+  readonly invoiceDueDays: number | null;
 }
 
 /** A week: an untouched bill then shows to the manager's own manager too
@@ -744,12 +746,35 @@ export class BillingDeskService {
   }
 
   async settings(tenantId: string): Promise<BillingSettings> {
-    const [autoBilling, advancePolicy, taxDefaults] = await Promise.all([
+    const [autoBilling, advancePolicy, taxDefaults, invoiceDueDays] = await Promise.all([
       this.deps.setting.isOn(tenantId),
       this.deps.policy.policyFor(tenantId),
       this.deps.taxDefaults.list(tenantId),
+      this.deps.setting.dueInDays(tenantId),
     ]);
-    return { autoBilling, advancePolicy, taxDefaults };
+    return { autoBilling, advancePolicy, taxDefaults, invoiceDueDays };
+  }
+
+  /**
+   * The firm's own payment terms (B20, 0327): an invoice issued with no due
+   * date is due this many days after its date. Null clears it. No default:
+   * 7, 15 or 30 days is the firm's commercial fact, not ours.
+   */
+  async setInvoiceDueDays(tenantId: string, days: number | null, actor: Actor): Promise<number | null> {
+    if (days !== null && (!Number.isInteger(days) || days < 0 || days > 365)) {
+      throw new InvalidBillingInput("Payment terms are a whole number of days from 0 (due on receipt) to 365.");
+    }
+    const from = await this.deps.setting.dueInDays(tenantId);
+    if (from === days) return days;
+    await this.deps.setting.setDueInDays(tenantId, days);
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "tenant.invoice_due_days_set",
+      objectId: tenantId,
+      actor,
+      payload: { from, to: days },
+    });
+    return days;
   }
 
   /** How the firm's advances are chased (0322): its own numbers, checked. */

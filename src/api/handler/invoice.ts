@@ -366,7 +366,9 @@ const issueRoute = createRoute({
   description:
     "Refuses an invoice with no lines: it would ask the client for nothing. The date on it is " +
     "the caller's `asOf`, or the firm's day. This is when the number is drawn (0322): the next " +
-    "in the draft's series, in the same transaction as the issue.",
+    "in the draft's series, in the same transaction as the issue. A draft whose due date is before " +
+    "the issue date is refused (DUE_BEFORE_ISSUE, 409: change it with PUT /due-date); one with no " +
+    "due date takes the firm's payment terms when it has set them (0327), else stays without one.",
   request: { params: z.object({ invoiceId: z.string().uuid() }), query: CallerDayQuery },
   responses: {
     200: { description: "Issued", content: { "application/json": { schema: InvoiceSchema } } },
@@ -374,7 +376,7 @@ const issueRoute = createRoute({
     403: errorResponse("No org selected, or the role does not permit it"),
     404: errorResponse("No such invoice at this firm"),
     400: errorResponse("asOf is not today anywhere"),
-    409: errorResponse("Not a draft, or it has no lines"),
+    409: errorResponse("Not a draft, it has no lines, or its due date is before today's issue date"),
   },
 });
 
@@ -427,6 +429,40 @@ const setManagerRoute = createRoute({
     403: errorResponse("No org selected, or the role does not permit it"),
     404: errorResponse("No such invoice at this firm"),
     409: errorResponse("The invoice is no longer a draft, or the person is not active staff here"),
+  },
+});
+
+const setDueDateRoute = createRoute({
+  method: "put",
+  path: "/api/v1/invoices/{invoiceId}/due-date",
+  tags: ["invoices"],
+  summary: "Set, change or clear a draft's due date",
+  description:
+    "Drafts only (INVOICE_NOT_EDITABLE, 409, once issued: the due date is what was sent). Today or " +
+    "later (DUE_DATE_IN_THE_PAST, 400); null clears it. A draft whose due date has passed by the " +
+    "time it is issued is refused at issue (DUE_BEFORE_ISSUE), so this is how it is fixed. Writes " +
+    "`invoice.due_date_set` when it changes (audit 2026-10-03, B20/B21).",
+  request: {
+    params: z.object({ invoiceId: z.string().uuid() }),
+    query: CallerDayQuery,
+    body: {
+      content: {
+        "application/json": {
+          schema: z
+            .object({ dueOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable() })
+            .openapi("SetInvoiceDueDateRequest"),
+        },
+      },
+      required: true,
+    },
+  },
+  responses: {
+    200: { description: "Saved", content: { "application/json": { schema: InvoiceSchema } } },
+    400: errorResponse("Not a day, or a day already past"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such invoice at this firm"),
+    409: errorResponse("The invoice is no longer a draft"),
   },
 });
 
@@ -924,6 +960,19 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
       c.req.valid("param").invoiceId,
       c.req.valid("json").managerUserId,
       s.actor,
+    );
+    return c.json(toInvoiceBody(saved, seesFees(c.get("principal"))), 200);
+  });
+
+  app.openapi(setDueDateRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const saved = await deps.service.setDueDate(
+      s.tenantId,
+      c.req.valid("param").invoiceId,
+      c.req.valid("json").dueOn,
+      s.actor,
+      c.req.valid("query").asOf,
     );
     return c.json(toInvoiceBody(saved, seesFees(c.get("principal"))), 200);
   });

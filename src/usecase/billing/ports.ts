@@ -597,4 +597,8 @@ export interface AutoBillingSetting {
   /** Switching on also records the firm's day it went on (0321), `since`:
    *  final bills are written only for work finished from then. */
   set(tenantId: string, on: boolean, since: string): Promise<void>;
+  /** The firm's own payment terms (0327): days from an invoice's date to its
+   *  due date when none was typed. Null: none. */
+  dueInDays(tenantId: string): Promise<number | null>;
+  setDueInDays(tenantId: string, days: number | null): Promise<void>;
 }
