@@ -8,7 +8,7 @@
 import type { Principal } from "../../platform/callctx";
 import type { Permission } from "../../domain/authz/model";
 import { grants, redactCommercials, roleServes, seesCommercials } from "../../domain/authz/model";
-import { NotPermitted, UnknownRole } from "../../domain/authz/errors";
+import { FeesNotVisible, NotPermitted, UnknownRole } from "../../domain/authz/errors";
 import type { PermissionSource } from "./ports";
 
 export interface Deps {
@@ -108,6 +108,17 @@ export class AuthzService {
    */
   seesFees(principal: Principal): boolean {
     return seesCommercials(principal.commercialVisibility ?? false);
+  }
+
+  /**
+   * Throw unless the principal may see fees: for an act that WRITES money or
+   * hands out a document that prints it (audit 2026-10-03). `what` is the act
+   * in plain words, for the refusal.
+   *
+   * Throwing, like `require`, so the check cannot be asked and ignored.
+   */
+  requireFees(principal: Principal, what: string): void {
+    if (!this.seesFees(principal)) throw new FeesNotVisible(what);
   }
 
   /**

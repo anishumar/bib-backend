@@ -19,7 +19,28 @@ export class AuthzError extends Error {
   }
 }
 
-export type AuthzErrorCode = "NOT_PERMITTED" | "UNKNOWN_ROLE";
+export type AuthzErrorCode = "NOT_PERMITTED" | "UNKNOWN_ROLE" | "FEES_NOT_VISIBLE";
+
+/**
+ * A money act asked for by a login that may not see money (audit 2026-10-03).
+ *
+ * The fee axis was a REDACTION only: a login without fees read "Hidden" and
+ * could still add an invoice line at any price, record a payment, or open the
+ * PDF that printed every figure. Seeing and writing the same figures are one
+ * question, so a login that may not see a fee may not set one either.
+ *
+ * `what` is the act in the caller's words ("record a payment"), so the sentence
+ * says what was refused. No code, no "visibility": the reader is a person at a
+ * CA firm, and the box on People reads "Can see fees".
+ */
+export class FeesNotVisible extends AuthzError {
+  constructor(what: string) {
+    super(
+      "FEES_NOT_VISIBLE",
+      `Your login is not set to see fees, so it cannot ${what}. Ask somebody who can see fees.`,
+    );
+  }
+}
 
 export class NotPermitted extends AuthzError {
   constructor(role: string, permission: string) {

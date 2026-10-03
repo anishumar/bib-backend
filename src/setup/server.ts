@@ -1380,7 +1380,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         },
         invoice: { service: invoices, dunning, authz },
         billing: { service: billing, authz, advances: advanceDesk, finals: finalBills },
-        filestore: { service: fileStore },
+        filestore: { service: fileStore, authz },
         dashboard: { service: dashboards, authz },
         readiness: { service: readiness },
       },

@@ -9,7 +9,7 @@ import { describe, expect, it } from "vitest";
 import { AuthzService } from "../../src/usecase/authz/service";
 import { withDefaultRoles } from "../../src/testfakes/config";
 import { FakeConfigRepo } from "../../src/testfakes/config";
-import { NotPermitted, UnknownRole } from "../../src/domain/authz/errors";
+import { FeesNotVisible, NotPermitted, UnknownRole } from "../../src/domain/authz/errors";
 import { DEFAULT_ROLES, redactCommercials } from "../../src/domain/authz/model";
 import type { Principal } from "../../src/platform/callctx";
 
@@ -178,6 +178,38 @@ describe("the fee axis is orthogonal to the role", () => {
 
   it("defaults closed when the flag is absent", () => {
     expect(authz.seesFees(principal({ commercialVisibility: null }))).toBe(false);
+  });
+});
+
+describe("refusing a money act to somebody who cannot see fees (audit 2026-10-03)", () => {
+  it("lets a login that sees fees through", () => {
+    expect(() => {
+      authz.requireFees(principal(), "record a payment");
+    }).not.toThrow();
+  });
+
+  it("refuses a login that does not see fees, whatever its role, in plain words", () => {
+    const blind = principal({ role: "partner", commercialVisibility: false });
+    let caught: unknown;
+    try {
+      authz.requireFees(blind, "record a payment");
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(FeesNotVisible);
+    const refusal = caught as FeesNotVisible;
+    expect(refusal.code).toBe("FEES_NOT_VISIBLE");
+    expect(refusal.message).toBe(
+      "Your login is not set to see fees, so it cannot record a payment. Ask somebody who can see fees.",
+    );
+    // The words a CA firm would not use, and no code.
+    expect(refusal.message).not.toMatch(/commercial|visibility|membership|tenant|[:_]/i);
+  });
+
+  it("refuses when the flag is absent", () => {
+    expect(() => {
+      authz.requireFees(principal({ commercialVisibility: null }), "add a line");
+    }).toThrow(FeesNotVisible);
   });
 });
 

@@ -565,6 +565,7 @@ function deps(): RouterDeps {
         timeZones: new FakeFirmTimeZone(),
         clock: new FakeClock(),
       }),
+      authz: new AuthzService({ permissions }),
     },
     billing: {
       authz: new AuthzService({ permissions }),
