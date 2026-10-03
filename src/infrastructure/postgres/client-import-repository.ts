@@ -255,13 +255,13 @@ export class PostgresClientImportDirectory implements ImportDirectory {
 
   async activeStaff(tenantId: string): Promise<readonly StaffMember[]> {
     return withTenant(this.app, tenantId, async (db) => {
-      const rows = await db<{ email: string; user_id: string }[]>`
-        SELECT u.email::text AS email, m.user_id
+      const rows = await db<{ email: string; user_id: string; display_name: string | null }[]>`
+        SELECT u.email::text AS email, m.user_id, u.display_name
         FROM tenancy.membership m
         JOIN tenancy.user_account u ON u.id = m.user_id
         WHERE m.audience = 'STAFF' AND m.is_active AND u.status = 'active'
       `;
-      return rows.map((r) => ({ email: r.email, userId: r.user_id }));
+      return rows.map((r) => ({ email: r.email, userId: r.user_id, name: r.display_name }));
     });
   }
 
