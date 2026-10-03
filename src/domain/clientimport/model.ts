@@ -31,7 +31,7 @@ import {
   normalizeIdentifier,
   type IdentifierType,
 } from "../party/model";
-import { countryCodeProblem, isCountryCode } from "../country";
+import { countryCodeProblem, countryWords, entityKindWords, isCountryCode, withArticle } from "../country";
 
 // ── The column contract ──────────────────────────────────────────────────────
 //
@@ -1032,7 +1032,7 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
         parentName !== null
           ? `a company under "${parentName}"`
           : c.registered
-            ? `a ${c.row.entityType ?? ""} in ${(c.row.jurisdiction ?? "").toUpperCase()}`
+            ? `${withArticle(entityKindWords(c.row.entityType ?? ""))} in ${countryWords(c.row.jurisdiction ?? "")}`
             : "a group, with companies under it",
     });
   }

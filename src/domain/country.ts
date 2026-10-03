@@ -90,3 +90,48 @@ export function countryCodeProblem(raw: string): string {
     `or use its two-letter code, such as IN, AE or GB.`
   );
 }
+
+const REGION_NAMES = new Intl.DisplayNames(["en"], { type: "region", fallback: "none" });
+
+/** A country's English name for a sentence ("India"), or the code when the
+ *  runtime has none. */
+export function countryWords(code: string): string {
+  const upper = code.trim().toUpperCase();
+  return (isCountryCode(upper) ? REGION_NAMES.of(upper) : undefined) ?? upper;
+}
+
+/**
+ * What KIND of company a code names, in words for a sentence (CA#39). The same
+ * list the screens offer when registering a client (`lib/entity-kind.ts` in
+ * the frontend). A firm's own word that is not on the list is read as words:
+ * "family_office" is "family office".
+ */
+const ENTITY_KIND_WORDS: Readonly<Record<string, string>> = {
+  private_limited: "private limited company",
+  public_limited: "public limited company",
+  opc: "one person company",
+  section_8: "section 8 company",
+  llp: "limited liability partnership (LLP)",
+  partnership: "partnership firm",
+  proprietorship: "sole proprietorship",
+  individual: "individual",
+  huf: "Hindu undivided family (HUF)",
+  trust: "trust",
+  society: "society",
+  aop: "association of persons",
+  pte_ltd: "private limited company (Singapore)",
+  fzco: "free zone company (FZCO)",
+  fze: "free zone establishment (FZE)",
+  llc: "LLC",
+  c_corp: "C corporation",
+};
+
+export function entityKindWords(code: string): string {
+  const key = code.trim();
+  return ENTITY_KIND_WORDS[key] ?? key.replace(/[_-]+/g, " ").trim().toLowerCase();
+}
+
+/** "a" or "an" before a word, by its first sound as far as letters tell. */
+export function withArticle(words: string): string {
+  return /^[aeiou]/i.test(words) ? `an ${words}` : `a ${words}`;
+}
