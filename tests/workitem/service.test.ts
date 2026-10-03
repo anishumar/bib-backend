@@ -1104,6 +1104,154 @@ describe("review — and the rule no firm may configure away", () => {
     ).rejects.toThrow(/already/i);
   });
 
+  // ── the decision closes the loop (audit 2026-10-03, CA#28) ────────────────
+  //
+  // The roleplay's manager pressed Approve and the task stayed "In Progress"
+  // with Send for review offered again: nobody ever marked it Completed, so
+  // finished work read as open on every board and report.
+
+  it("COMPLETES the task when the review is approved", async () => {
+    const { h, item } = await readyForReview();
+    const approval = await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+
+    await h.service.decideReview(
+      { tenantId: FIRM, approvalId: approval.id, decision: "approved", decidedBy: ANAND },
+      ACTOR,
+    );
+
+    const after = (await h.service.detail(FIRM, item.id)).record;
+    expect(after.state.isTerminal && after.state.isSuccess).toBe(true);
+    expect(after.item.completedAt).toBe(NOW);
+    // The same facts a hand move to Completed records: the calendar is told,
+    // and "what did we finish" counts it.
+    expect(h.verbs()).toContain("work_item.completed");
+    expect(h.filings.calls.at(-1)).toMatchObject({ workItemId: item.id, discharged: true });
+    const moved = h.recorded().find((e) => e.verb === "work_item.state_changed");
+    expect(moved?.payload).toMatchObject({ toStateId: after.state.id, byReviewDecision: "approved" });
+  });
+
+  it("completes it from the firm's 'with a checker' state too", async () => {
+    const { h, item } = await readyForReview();
+    await nameAReviewState(h);
+    const approval = await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+
+    await h.service.decideReview(
+      { tenantId: FIRM, approvalId: approval.id, decision: "approved", decidedBy: ANAND },
+      ACTOR,
+    );
+
+    const after = (await h.service.detail(FIRM, item.id)).record;
+    expect(after.state.isTerminal && after.state.isSuccess).toBe(true);
+  });
+
+  it("leaves the task where it is when the firm has no successful finished state", async () => {
+    const { h, item } = await readyForReview();
+    const states = await h.vocab.listStates(FIRM);
+    const done = states.find((st) => st.isTerminal && st.isSuccess);
+    if (!done) throw new Error("the seed no longer ships a successful terminal state");
+    await h.vocab.updateState({ tenantId: FIRM, stateId: done.id, isSuccess: false }, ACTOR);
+    const before = (await h.service.detail(FIRM, item.id)).record.item.stateId;
+    const approval = await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+
+    const decided = await h.service.decideReview(
+      { tenantId: FIRM, approvalId: approval.id, decision: "approved", decidedBy: ANAND },
+      ACTOR,
+    );
+
+    expect(decided.decision).toBe("approved");
+    expect((await h.service.detail(FIRM, item.id)).record.item.stateId).toBe(before);
+  });
+
+  it("puts sent-back work back to the firm's working state, out of 'with a checker'", async () => {
+    const { h, item } = await readyForReview();
+    const reviewStateId = await nameAReviewState(h);
+    const approval = await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+    expect((await h.service.detail(FIRM, item.id)).record.item.stateId).toBe(reviewStateId);
+
+    await h.service.decideReview(
+      {
+        tenantId: FIRM,
+        approvalId: approval.id,
+        decision: "rejected",
+        notes: "Two invoices missing from the ITC working",
+        decidedBy: ANAND,
+      },
+      ACTOR,
+    );
+
+    const after = (await h.service.detail(FIRM, item.id)).record;
+    expect(after.state.code).toBe("in_progress");
+    expect(after.item.completedAt).toBeNull();
+    const moved = h.recorded().filter((e) => e.verb === "work_item.state_changed").at(-1);
+    expect(moved?.payload).toMatchObject({ toStateId: after.state.id, byReviewDecision: "rejected" });
+  });
+
+  it("leaves sent-back work alone when it never moved into a 'with a checker' state", async () => {
+    const { h, item } = await readyForReview();
+    const before = (await h.service.detail(FIRM, item.id)).record.item.stateId;
+    const approval = await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+
+    await h.service.decideReview(
+      { tenantId: FIRM, approvalId: approval.id, decision: "rejected", notes: "redo", decidedBy: ANAND },
+      ACTOR,
+    );
+
+    expect((await h.service.detail(FIRM, item.id)).record.item.stateId).toBe(before);
+  });
+
+  // ── the checklist is a gate, the way a step's sub-steps are (CA#30) ───────
+
+  it("refuses Send for review while a checklist line is open, and names it", async () => {
+    // Sent with 2 of 3 ticked in the roleplay. A process step will not take
+    // Done with a sub-step open (T6.15); a task's checklist now says the same.
+    const { h, item } = await readyForReview();
+    const a = await h.service.addChecklistItem(FIRM, item.id, "Get sales and purchase data");
+    const b = await h.service.addChecklistItem(FIRM, item.id, "Reconcile ITC with GSTR-2B");
+    await h.service.addChecklistItem(FIRM, item.id, "Compute liability and share challan");
+    await h.service.setChecklistDone(FIRM, a.id, true, PRIYA);
+    await h.service.setChecklistDone(FIRM, b.id, true, PRIYA);
+
+    const refused = h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+    await expect(refused).rejects.toMatchObject({ code: "CHECKLIST_OPEN" });
+    await expect(refused).rejects.toThrow(/Compute liability and share challan/);
+    expect(await h.service.pendingChecks(FIRM, ANAND)).toEqual([]);
+  });
+
+  it("refuses moving to the finished-and-done state by hand while a line is open, and still lets it be cancelled", async () => {
+    const { h, item } = await readyForReview();
+    await h.service.addChecklistItem(FIRM, item.id, "File the return");
+    const states = await h.vocab.listStates(FIRM);
+    const done = states.find((st) => st.isTerminal && st.isSuccess);
+    const cancelled = states.find((st) => st.isTerminal && !st.isSuccess);
+    if (!done || !cancelled) throw new Error("the seed no longer ships both terminal states");
+
+    await expect(
+      h.service.moveToState({ tenantId: FIRM, workItemId: item.id, stateId: done.id }, ACTOR),
+    ).rejects.toMatchObject({ code: "CHECKLIST_OPEN" });
+    // Cancelling is not saying the work was done.
+    await h.service.moveToState({ tenantId: FIRM, workItemId: item.id, stateId: cancelled.id }, ACTOR);
+  });
+
+  it("refuses Approve when a line was unticked after it was sent, and still lets the checker send it back", async () => {
+    const { h, item } = await readyForReview();
+    const a = await h.service.addChecklistItem(FIRM, item.id, "File the return");
+    await h.service.setChecklistDone(FIRM, a.id, true, PRIYA);
+    const approval = await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+    await h.service.setChecklistDone(FIRM, a.id, false, PRIYA);
+
+    await expect(
+      h.service.decideReview(
+        { tenantId: FIRM, approvalId: approval.id, decision: "approved", decidedBy: ANAND },
+        ACTOR,
+      ),
+    ).rejects.toMatchObject({ code: "CHECKLIST_OPEN" });
+    const back = await h.service.decideReview(
+      { tenantId: FIRM, approvalId: approval.id, decision: "rejected", notes: "tick it", decidedBy: ANAND },
+      ACTOR,
+    );
+    expect(back.decision).toBe("rejected");
+  });
+
   it("still opens a review on UNASSIGNED work, with no maker to compare against", async () => {
     // A real state, not an error: somebody did the work off the record. Maker
     // != checker is then vacuous rather than blocking, and the screen says so.

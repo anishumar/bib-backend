@@ -645,6 +645,7 @@ export function mapError(err: unknown): MappedError {
       case "DEPENDENCY_EXISTS":
       case "REVIEW_ALREADY_OPEN":
       case "REVIEW_ALREADY_DECIDED":
+      case "CHECKLIST_OPEN": // a line on the task's own list is open (CA#30)
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

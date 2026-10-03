@@ -742,8 +742,8 @@ const moveStateRoute = createRoute({
     403: errorResponse("The session has not selected an org, or the role may not write work"),
     404: errorResponse("No such work item, or no such state at this firm"),
     409: errorResponse(
-      "It is already in that state, the state has been retired, or it is still waiting on " +
-        "unfinished work",
+      "It is already in that state, the state has been retired, it is still waiting on " +
+        "unfinished work, or (into a finished-and-done state) a checklist line is unticked",
     ),
   },
 });
@@ -868,9 +868,10 @@ const requestReviewRoute = createRoute({
   description:
     "The MAKER is not a parameter and cannot be: the database derives it from the item's " +
     "assignee and freezes it, because a maker the caller could choose is not a maker-checker " +
-    "control. The state is deliberately not moved to 'Under Review' — there is no flag " +
-    "saying which of the firm's states means that, and comparing the name is the one thing " +
-    "this module never does.",
+    "control. The item moves into the firm's 'with a checker' state when the firm has " +
+    "flagged one (0073). Refused while a checklist line is unticked (CHECKLIST_OPEN): " +
+    "sending work to be checked says it is done, as a process step's Done waits for its " +
+    "sub-steps.",
   request: {
     params: WorkItemParam,
     body: { content: { "application/json": { schema: RequestReviewRequest } }, required: true },
@@ -883,7 +884,7 @@ const requestReviewRoute = createRoute({
     401: errorResponse("No authenticated session"),
     403: errorResponse("The session has not selected an org, or the role may not write work"),
     404: errorResponse("No such work item at this firm"),
-    409: errorResponse("A review is already open on it"),
+    409: errorResponse("A review is already open on it, or a checklist line is unticked"),
   },
 });
 
@@ -913,6 +914,12 @@ const decideReviewRoute = createRoute({
   path: "/api/v1/work-item-checks/{approvalId}/decide",
   tags: ["work"],
   summary: "Approve a work item, or send it back",
+  description:
+    "Approving FINISHES the task: it moves to the firm's finished-and-done state (terminal " +
+    "and a success), which stamps the completion and tells the compliance calendar, exactly " +
+    "as moving it there by hand does. Sending it back puts a task that is in the firm's " +
+    "'with a checker' state back into its working state. A task already finished or " +
+    "cancelled is left where it is. Approve is refused while a checklist line is unticked.",
   request: {
     params: ReviewParam,
     body: { content: { "application/json": { schema: DecideReviewRequest } }, required: true },
@@ -928,7 +935,7 @@ const decideReviewRoute = createRoute({
       "You did the work, or the firm's published rule says somebody else checks this",
     ),
     404: errorResponse("No such review at this firm"),
-    409: errorResponse("Somebody else already decided it"),
+    409: errorResponse("Somebody else already decided it, or (Approve) a checklist line is unticked"),
   },
 });
 

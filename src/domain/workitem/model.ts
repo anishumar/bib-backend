@@ -440,6 +440,55 @@ export function underReviewState(states: readonly WorkItemState[]): WorkItemStat
 }
 
 /**
+ * Where APPROVED work goes (audit 2026-10-03, CA#28): the firm's own state that
+ * is TERMINAL and a SUCCESS, active, first in the firm's order. The mirror of
+ * `cancelledState`, and read by the same two flags 0054 added for exactly this
+ * question ("was the work DONE, or abandoned"). Null when the firm has none:
+ * the approval still stands and the task stays where it is.
+ *
+ * Before this an approval moved nothing, on the ground that picking one of a
+ * firm's terminal states would be deciding what approval means. `isSuccess`
+ * already answers that: Completed and Cancelled are told apart by it, and an
+ * approval is not a cancellation. The roleplay's manager approved a GSTR-3B
+ * and the task went on reading "In Progress" with Send for review offered
+ * again.
+ */
+export function completedState(states: readonly WorkItemState[]): WorkItemState | null {
+  return (
+    [...states]
+      .filter((s) => s.isActive && s.isTerminal && s.isSuccess)
+      .sort((a, b) => a.sortOrder - b.sortOrder)[0] ?? null
+  );
+}
+
+/**
+ * Where SENT-BACK work goes, when it is sitting in the firm's "with a checker"
+ * state (CA#28): the first active state in the firm's order that is none of
+ * the special ones. Not the starting state (somebody has started it), not a
+ * blocked one (a send-back is not a block and has no block reason to give),
+ * not terminal, not "with a checker". The product seeds "In Progress" there.
+ * Null when the firm has no such state, and the task then stays where it is.
+ */
+export function reworkState(states: readonly WorkItemState[]): WorkItemState | null {
+  return (
+    [...states]
+      .filter(
+        (s) => s.isActive && !s.isInitial && !s.isTerminal && !s.isBlocked && !s.isUnderReview,
+      )
+      .sort((a, b) => a.sortOrder - b.sortOrder)[0] ?? null
+  );
+}
+
+/** The labels of a task's checklist lines nobody has ticked, in the list's
+ *  own order: what holds Send for review and completion shut (CA#30). */
+export function openChecklistLines(lines: readonly ChecklistItem[]): readonly string[] {
+  return [...lines]
+    .filter((l) => l.doneAt === null)
+    .sort((a, b) => a.sortOrder - b.sortOrder)
+    .map((l) => l.label);
+}
+
+/**
  * The priority this work gets by default.
  *
  * The whole of *"statutory due dates should anyway be high priority"*, and the

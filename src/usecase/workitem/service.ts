@@ -43,6 +43,9 @@ import {
   dueOnFrom,
   initialState,
   cancelledState,
+  completedState,
+  openChecklistLines,
+  reworkState,
   underReviewState,
   isIsoDate,
   isValidRank,
@@ -59,6 +62,7 @@ import {
   AssigneeNotStaff,
   BlockReasonRequired,
   ChecklistItemDone,
+  ChecklistOpen,
   ChecklistItemNotFound,
   ConflictingStateFlags,
   DependencyCycle,
@@ -1326,6 +1330,20 @@ export class WorkItemService {
    * item.
    */
   async moveToState(input: MoveStateInput, actor: Actor): Promise<WorkItem> {
+    return this.move(input, actor, null);
+  }
+
+  /**
+   * `moveToState`, with the one fact a review decision adds (CA#28): WHICH
+   * decision moved it. A person choosing Completed from the dropdown and a
+   * checker's Approve are the same write and not the same fact, the argument
+   * `byReviewRequest` already makes for the move INTO review.
+   */
+  private async move(
+    input: MoveStateInput,
+    actor: Actor,
+    byReviewDecision: "approved" | "rejected" | null,
+  ): Promise<WorkItem> {
     const item = await this.requireItem(input.tenantId, input.workItemId);
     const from = await this.requireStateRow(input.tenantId, item.stateId);
     const to = await this.requireStateRow(input.tenantId, input.stateId);
@@ -1341,6 +1359,15 @@ export class WorkItemService {
       if (blockers.length > 0) {
         throw new WorkItemBlockedByDependency(blockers.map((b) => b.title));
       }
+    }
+
+    // SAYING THE WORK IS DONE WAITS FOR THE CHECKLIST (CA#30), as a process
+    // step's Done waits for its sub-steps. Only the move INTO a successful
+    // finished state: cancelling is not saying the work was done, and a task
+    // already finished moving between two finished states says nothing new.
+    if (to.isTerminal && to.isSuccess && !(from.isTerminal && from.isSuccess)) {
+      const open = openChecklistLines(await this.deps.items.listChecklist(input.tenantId, item.id));
+      if (open.length > 0) throw new ChecklistOpen(open, "doer");
     }
 
     const now = this.deps.clock.now().toISOString();
@@ -1372,6 +1399,8 @@ export class WorkItemService {
         // cannot. Carried here so the log answers "what did we abandon" as well
         // as "what did we finish", without a verb of its own.
         isSuccess: to.isSuccess,
+        // A checker's decision moved it, not a person at the dropdown (CA#28).
+        ...(byReviewDecision === null ? {} : { byReviewDecision }),
       },
     });
 
@@ -1797,6 +1826,12 @@ export class WorkItemService {
   async requestReview(input: RequestReviewInput, actor: Actor): Promise<WorkItemApproval> {
     const item = await this.requireItem(input.tenantId, input.workItemId);
 
+    // SENT FOR REVIEW SAYS THE WORK IS DONE, so the checklist is finished first
+    // (CA#30): the roleplay's article sent a GSTR-3B with 2 of 3 lines ticked.
+    // A process step's sub-steps hold its Done shut the same way (T6.15).
+    const open = openChecklistLines(await this.deps.items.listChecklist(input.tenantId, item.id));
+    if (open.length > 0) throw new ChecklistOpen(open, "doer");
+
     let policyVersionId: string | null = null;
     let policyKey: string | null = null;
     if (input.policyKey !== undefined && input.policyKey !== null && input.policyKey.length > 0) {
@@ -1976,6 +2011,18 @@ export class WorkItemService {
       );
     }
 
+    // APPROVE IS HELD BY THE CHECKLIST TOO (CA#30), a wall under the one on
+    // Send for review: a line unticked after it was sent would otherwise be
+    // completed by the approval below. Send back is never held: it is how the
+    // lines get back to the person who ticks them. After eligibility, so
+    // somebody who may not check this at all is told that first.
+    if (input.decision === "approved") {
+      const open = openChecklistLines(
+        await this.deps.items.listChecklist(input.tenantId, approval.workItemId),
+      );
+      if (open.length > 0) throw new ChecklistOpen(open, "checker");
+    }
+
     const decided = await this.deps.approvals.decide(input.tenantId, input.approvalId, {
       decision: input.decision,
       notes: notes.length > 0 ? notes : null,
@@ -2000,7 +2047,48 @@ export class WorkItemService {
         hasMaker: decided.submittedBy !== null,
       },
     });
+
+    // AND THE TASK FOLLOWS THE DECISION (CA#28), after it is recorded, for
+    // `requestReview`'s reason: the decision is the act and the state is how
+    // the board renders it. A failed move leaves a decided review on a task in
+    // its old state, visible and recoverable; the reverse would show a task
+    // finished that nobody approved.
+    await this.followDecision(input.tenantId, decided, actor);
     return decided;
+  }
+
+  /**
+   * Approved: the task is DONE, so it moves to the firm's finished-and-done
+   * state (`completedState`) through the same path a hand move takes, which
+   * stamps `completedAt`, writes `work_item.completed` and tells the compliance
+   * calendar. Sent back: if it is sitting in the firm's "with a checker" state
+   * it goes back to the firm's working state (`reworkState`), because the work
+   * is the maker's again. Anything else is left where it is: a task already
+   * finished or cancelled is not reopened by a decision, and a firm with no
+   * such state keeps exactly the old behaviour.
+   */
+  private async followDecision(
+    tenantId: string,
+    decided: WorkItemApproval,
+    actor: Actor,
+  ): Promise<void> {
+    const item = await this.requireItem(tenantId, decided.workItemId);
+    const states = await this.deps.vocabulary.listStates(tenantId);
+    const current = states.find((s) => s.id === item.stateId);
+    if (current === undefined || current.isTerminal) return;
+
+    const target =
+      decided.decision === "approved"
+        ? completedState(states)
+        : current.isUnderReview
+          ? reworkState(states)
+          : null;
+    if (target === null || target.id === current.id) return;
+    await this.move(
+      { tenantId, workItemId: item.id, stateId: target.id },
+      actor,
+      decided.decision === "approved" ? "approved" : "rejected",
+    );
   }
 
   // ── internals ────────────────────────────────────────────────────────────
