@@ -48,7 +48,7 @@ import type {
 import { isDrawableImage } from "../../domain/render/model";
 import { CLIENT_DATE_ANCHOR, CLIENT_SIGN_ANCHOR } from "../../domain/render/model";
 import type { DescribedDocument, RenderSource } from "../../usecase/render/ports";
-import { isoInstant, utcDayOf, zoneDayOf } from "./instant";
+import { isoInstant, zoneDayOf } from "./instant";
 
 /** A letter as its layout draws it; `letter` adds whether it went out. */
 type LetterDrawn = Omit<DescribedDocument, "isOut">;
@@ -228,7 +228,7 @@ export class PostgresRenderSource implements RenderSource {
     if (input.kind === "engagement_letter") {
       return this.letter(input.tenantId, input.subjectRef, input.asIfSentOn);
     }
-    if (input.kind === "invoice") return this.invoice(input.tenantId, input.subjectRef);
+    if (input.kind === "invoice") return this.invoice(input.tenantId, input.subjectRef, input.asIfSentOn);
     if (input.kind === "proposal") {
       return this.proposal(input.tenantId, input.subjectRef, input.asIfSentOn);
     }
@@ -492,7 +492,9 @@ export class PostgresRenderSource implements RenderSource {
                ${db.unsafe(isoInstant("el.signed_at", "signed_at"))},
                el.signed_by_name, el.signed_by_title, el.firm_signatory_title,
                el.firm_signature_version_id,
-               ${db.unsafe(utcDayOf("el.created_at", "created_on"))},
+               -- The FIRM's day (B42): a letter first saved at 01:00 in Delhi
+               -- was dated the UTC day before on a draft copy.
+               ${db.unsafe(zoneDayOf("el.created_at", "firm.time_zone", "created_on"))},
                client.display_name AS client_name,
                entity.display_name AS entity_name,
                le.jurisdiction     AS entity_jurisdiction,
@@ -972,21 +974,32 @@ export class PostgresRenderSource implements RenderSource {
     return { document, partyId: row.party_id };
   }
 
-  private async invoice(tenantId: string, invoiceId: string): Promise<DescribedDocument | null> {
+  private async invoice(
+    tenantId: string,
+    invoiceId: string,
+    asIfSentOn: string | undefined,
+  ): Promise<DescribedDocument | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<InvoiceRow[]>`
         SELECT i.party_id, i.number, i.currency, i.issued_on::text, i.due_on::text,
-               ${db.unsafe(utcDayOf("i.created_at", "created_on"))}, i.irn,
+               -- The FIRM's day (B42), never the UTC day it was first saved.
+               ${db.unsafe(zoneDayOf("i.created_at", "firm.time_zone", "created_on"))}, i.irn,
                client.display_name AS client_name,
                entity.display_name AS entity_name,
                t.gross::text, t.discount::text, t.net::text, t.tax::text, t.total::text
         FROM crm.invoice i
         JOIN core.party client ON client.id = i.party_id
         JOIN core.party entity ON entity.id = i.entity_party_id
+        JOIN tenancy.tenant firm ON firm.id = i.tenant_id
         JOIN crm.invoice_totals t ON t.invoice_id = i.id AND t.tenant_id = i.tenant_id
         WHERE i.id = ${invoiceId}
       `;
       if (!row) return null;
+      // A DRAFT is dated as Issue will date it, on the firm's day (B42): the
+      // day the preview or the draft copy is drawn. An issued invoice keeps its
+      // own date.
+      const previewing = asIfSentOn !== undefined && row.issued_on === null;
+      const dated = row.issued_on ?? (previewing ? asIfSentOn : row.created_on);
 
       const lines = await db<InvoiceLineRow[]>`
         SELECT l.description, l.quantity::text, l.unit_amount::text,
@@ -999,7 +1012,7 @@ export class PostgresRenderSource implements RenderSource {
       `;
 
       const meta = [
-        { label: "Invoice date", value: longDate(row.issued_on ?? row.created_on) },
+        { label: "Invoice date", value: longDate(dated) },
         { label: "Due", value: longDate(row.due_on) },
       ];
       // The government registry's identifier, when the firm has recorded one.
@@ -1055,11 +1068,17 @@ export class PostgresRenderSource implements RenderSource {
         ],
         footer: row.entity_name,
         logo: await this.logo(db, tenantId, invoiceId, "invoice"),
-        issuedOn: row.issued_on ?? row.created_on,
+        issuedOn: dated,
       };
       // Issued means dated: `issued_on` is written by Issue and by nothing
       // else, and a draft cancelled before it was issued never went out.
-      return { document, partyId: row.party_id, isOut: row.issued_on !== null };
+      return {
+        document,
+        partyId: row.party_id,
+        isOut: row.issued_on !== null,
+        ...(previewing ? { datedAsIfSent: dated } : {}),
+        ...(row.number === null ? { unnumbered: true } : {}),
+      };
     });
   }
 
