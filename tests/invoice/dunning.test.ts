@@ -336,3 +336,40 @@ describe("the terminal rung needs a partner — the acceptance", () => {
     ).rejects.toBeInstanceOf(DunningAlreadyDecided);
   });
 });
+
+describe("a credit hold over nothing owed (B22, audit 2026-10-03)", () => {
+  // The queue read a CANCELLED invoice's full total as outstanding, and a
+  // partner could approve a credit hold over a withdrawn bill.
+  async function pendingHold(s: ReturnType<typeof setup>) {
+    s.ladders.ladders.set(TENANT, LADDER);
+    const id = await overdueInvoice(s, "2026-06-30");
+    await s.service.sweep();
+    const [pending] = await s.service.pending(TENANT);
+    if (pending === undefined) throw new Error("nothing pending");
+    return { id, pending };
+  }
+
+  it("refuses to approve a hold once the invoice was cancelled, and still lets it be rejected", async () => {
+    const s = setup();
+    const { id, pending } = await pendingHold(s);
+    await s.billing.cancel(TENANT, id, PARTNER);
+
+    await expect(
+      s.service.decide({ tenantId: TENANT, actionId: pending.action.id, approve: true }, PARTNER),
+    ).rejects.toMatchObject({ code: "DUNNING_NOTHING_OWED" });
+    const rejected = await s.service.decide({ tenantId: TENANT, actionId: pending.action.id, approve: false }, PARTNER);
+    expect(rejected.state).toBe("rejected");
+  });
+
+  it("refuses to approve a hold once the invoice is paid in full", async () => {
+    const s = setup();
+    const { id, pending } = await pendingHold(s);
+    await s.billing.recordPayment(
+      { tenantId: TENANT, invoiceId: id, amount: "10000", receivedOn: "2026-07-19", method: "upi" },
+      PARTNER,
+    );
+    await expect(
+      s.service.decide({ tenantId: TENANT, actionId: pending.action.id, approve: true }, PARTNER),
+    ).rejects.toMatchObject({ code: "DUNNING_NOTHING_OWED" });
+  });
+});

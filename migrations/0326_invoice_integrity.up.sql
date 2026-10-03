@@ -21,6 +21,18 @@
 --      what an import or a psql session meets. A payment's own trigger now reads
 --      the invoice FOR SHARE, so a payment and a cancellation at the same moment
 --      serialise instead of both passing. Existing cancelled rows are untouched.
+--   4. ONLY AN ISSUED INVOICE OWES ANYTHING, IN THE VIEW ITSELF (B22).
+--      `crm.invoice_balance` computed `outstanding` whatever the status, so the
+--      balance route and the dunning approval queue reported a CANCELLED
+--      invoice's full total as owed (110 locally), and a partner could approve a
+--      credit hold over it. The screens filtered it one by one; the view now says
+--      it once: outstanding is invoiced - paid - credited for an issued invoice
+--      and 0 for a draft (nobody was asked) or a cancelled one (withdrawn).
+--      `invoiced`, `paid` and `credited` still say what they say.
+--   5. THE CLIENT SEES ONLY WHAT WAS ISSUED TO THEM (F06). 0066's policy let a
+--      cancelled invoice through, including a draft cancelled before it was ever
+--      sent ("Cancelled · Not issued" on the client's page). It now asks whether
+--      the invoice was ever issued (`issued_on`, kept on a cancelled one, 0029).
 
 SET ROLE bib_owner;
 
@@ -113,5 +125,38 @@ BEGIN
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
+
+-- ── 4. Outstanding means issued ────────────────────────────────────────────
+CREATE OR REPLACE VIEW crm.invoice_balance WITH (security_invoker = true) AS
+SELECT i.id            AS invoice_id,
+       i.tenant_id,
+       i.party_id,
+       i.status,
+       i.currency,
+       i.due_on,
+       COALESCE(t.total, 0)   AS invoiced,
+       COALESCE(p.paid, 0)    AS paid,
+       COALESCE(c.credited, 0) AS credited,
+       CASE WHEN i.status = 'issued'
+            THEN COALESCE(t.total, 0) - COALESCE(p.paid, 0) - COALESCE(c.credited, 0)
+            ELSE 0
+       END AS outstanding
+FROM crm.invoice i
+LEFT JOIN crm.invoice_totals t ON t.invoice_id = i.id
+LEFT JOIN (
+  SELECT invoice_id, sum(amount) AS paid FROM crm.payment GROUP BY invoice_id
+) p ON p.invoice_id = i.id
+LEFT JOIN (
+  SELECT invoice_id, sum(amount) AS credited FROM crm.credit_note GROUP BY invoice_id
+) c ON c.invoice_id = i.id;
+
+COMMENT ON VIEW crm.invoice_balance IS
+  'What each invoice still owes: invoiced - paid - credited, in numeric, for an ISSUED invoice; 0 for a draft or a cancelled one (0326). Derived rather than stored, because a paid flag and an amount_paid column are caches of this addition and drift the first time a payment is corrected.';
+
+-- ── 5. The client sees what was issued to them ─────────────────────────────
+DROP POLICY invoice_portal_issued ON crm.invoice;
+CREATE POLICY invoice_portal_issued ON crm.invoice AS RESTRICTIVE
+  USING      (NOT crm.is_portal_session() OR issued_on IS NOT NULL)
+  WITH CHECK (NOT crm.is_portal_session() OR issued_on IS NOT NULL);
 
 RESET ROLE;

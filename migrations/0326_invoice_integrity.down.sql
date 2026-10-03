@@ -14,6 +14,36 @@ BEGIN
 END;
 $$;
 
+-- ── 5. 0066's portal policy ───────────────────────────────────────────────
+DROP POLICY invoice_portal_issued ON crm.invoice;
+CREATE POLICY invoice_portal_issued ON crm.invoice AS RESTRICTIVE
+  USING      (NOT crm.is_portal_session() OR status IN ('issued', 'cancelled'))
+  WITH CHECK (NOT crm.is_portal_session() OR status IN ('issued', 'cancelled'));
+
+-- ── 4. 0028's balance ──────────────────────────────────────────────────────
+CREATE OR REPLACE VIEW crm.invoice_balance WITH (security_invoker = true) AS
+SELECT i.id            AS invoice_id,
+       i.tenant_id,
+       i.party_id,
+       i.status,
+       i.currency,
+       i.due_on,
+       COALESCE(t.total, 0)   AS invoiced,
+       COALESCE(p.paid, 0)    AS paid,
+       COALESCE(c.credited, 0) AS credited,
+       COALESCE(t.total, 0) - COALESCE(p.paid, 0) - COALESCE(c.credited, 0) AS outstanding
+FROM crm.invoice i
+LEFT JOIN crm.invoice_totals t ON t.invoice_id = i.id
+LEFT JOIN (
+  SELECT invoice_id, sum(amount) AS paid FROM crm.payment GROUP BY invoice_id
+) p ON p.invoice_id = i.id
+LEFT JOIN (
+  SELECT invoice_id, sum(amount) AS credited FROM crm.credit_note GROUP BY invoice_id
+) c ON c.invoice_id = i.id;
+
+COMMENT ON VIEW crm.invoice_balance IS
+  'What each invoice still owes: invoiced - paid - credited, in numeric. Derived rather than stored, because a paid flag and an amount_paid column are caches of this addition and drift the first time a payment is corrected.';
+
 -- ── 3. Cancelling a paid invoice, and 0028's payment guard ─────────────────
 DROP TRIGGER trg_invoice_cancel_unpaid ON crm.invoice;
 DROP FUNCTION crm.refuse_cancelling_a_paid_invoice();

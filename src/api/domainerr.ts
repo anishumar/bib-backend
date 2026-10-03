@@ -1011,6 +1011,7 @@ export function mapError(err: unknown): MappedError {
       case "MANAGER_NOT_STAFF":
       case "INVOICE_MANAGER_FROZEN":
       case "INVOICE_HAS_PAYMENTS":
+      case "DUNNING_NOTHING_OWED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

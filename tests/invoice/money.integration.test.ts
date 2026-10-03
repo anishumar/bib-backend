@@ -414,3 +414,21 @@ describe("an issued invoice with money on it is not cancelled (B05, 0326)", () =
     expect((await service.cancel(tenant, invoice, SYSTEM_ACTOR)).status).toBe("cancelled");
   });
 });
+
+describe("a cancelled invoice owes nothing, in the view itself (B22, 0326)", () => {
+  it("reads outstanding 0 on the balance once cancelled, and on a draft", async () => {
+    const invoice = await issued("7080");
+    expect((await service.balanceOf(tenant, invoice)).outstanding).toBe("7080.0000");
+    await service.cancel(tenant, invoice, SYSTEM_ACTOR);
+    const after = await service.balanceOf(tenant, invoice);
+    expect(after.invoiced).toBe("7080.0000");
+    expect(after.outstanding).toBe("0");
+
+    const draft = await service.raise(
+      { tenantId: tenant, partyId: client, entityPartyId: entity, currency: "INR", fxRate: "1", fxRateDate: "2026-07-01" },
+      SYSTEM_ACTOR,
+    );
+    await service.addLine({ tenantId: tenant, invoiceId: draft.id, description: "Not sent", quantity: "1", unitAmount: "500" });
+    expect((await service.balanceOf(tenant, draft.id)).outstanding).toBe("0");
+  });
+});

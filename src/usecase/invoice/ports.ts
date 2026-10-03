@@ -343,6 +343,9 @@ export interface PendingDunningRecord {
   readonly outstanding: string;
   readonly currency: string;
   readonly dueOn: string | null;
+  /** The invoice as it stands now: a step on an invoice cancelled since is one
+   *  to reject (B22), and the screen says why. */
+  readonly invoiceStatus: InvoiceStatus;
 }
 
 export interface NewDunningAction {

@@ -325,7 +325,8 @@ export class FakeInvoiceRepo implements InvoiceRepository {
       invoiced: totals.total,
       paid: unscaled(paid),
       credited: unscaled(credited),
-      outstanding: unscaled(scaled(totals.total) - paid - credited),
+      // Only an ISSUED invoice owes anything, as the view says since 0326 (B22).
+      outstanding: invoice.status === "issued" ? unscaled(scaled(totals.total) - paid - credited) : "0.0000",
     };
   }
 

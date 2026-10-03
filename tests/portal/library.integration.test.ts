@@ -56,6 +56,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import postgres from "postgres";
 import { load } from "../../src/config/config";
 import { withPortal, withTenant } from "../../src/db/tenant";
+import { PostgresPortalLibraryRepository } from "../../src/infrastructure/postgres/portal-library-repository";
 
 const cfg = load();
 const app = postgres(cfg.db.appUrl, { max: 2 });
@@ -432,5 +433,44 @@ describe("the three tables that hang off an invoice", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]?.invoice_id).toBe(myInvoice);
     expect(Number(rows[0]?.outstanding)).toBeCloseTo(5800, 4);
+  });
+});
+
+describe("only an invoice that was ISSUED reaches the client (F06, 0326)", () => {
+  // The audit: the client saw INV/2026-27/0002, "Cancelled · Not issued", a
+  // draft the firm withdrew before ever sending it. The policy let every
+  // cancelled row through; it now asks whether the invoice was ever issued.
+  async function unissued(status: "draft" | "cancelled"): Promise<string> {
+    const [row] = await owner<{ id: string }[]>`
+      INSERT INTO crm.invoice
+        (tenant_id, party_id, entity_party_id, number, financial_year, sequence_number,
+         status, currency, fx_rate, fx_rate_date, issued_on, due_on)
+      VALUES (${tenantId}, ${mine}, ${firmEntity}, NULL, 2026, NULL,
+              'draft', 'INR', 1.0, '2026-03-01', NULL, '2026-03-31')
+      RETURNING id
+    `;
+    if (!row) throw new Error("could not create the draft");
+    if (status === "cancelled") await owner`UPDATE crm.invoice SET status = 'cancelled' WHERE id = ${row.id}`;
+    return row.id;
+  }
+
+  it("never shows a draft cancelled before it was issued, by id or in the list", async () => {
+    const withdrawn = await unissued("cancelled");
+    const byId = await withPortal(app, tenantId, [mine], async (db) => {
+      return db<{ id: string }[]>`SELECT id FROM crm.invoice WHERE id = ${withdrawn}`;
+    });
+    expect(byId).toHaveLength(0);
+    const listed = await new PostgresPortalLibraryRepository(app).invoices(tenantId, [mine]);
+    expect(listed.map((i) => i.invoiceId)).not.toContain(withdrawn);
+  });
+
+  it("still shows one cancelled AFTER it was issued, which the client did receive", async () => {
+    const sent = await unissued("draft");
+    await owner`UPDATE crm.invoice SET status = 'issued', issued_on = '2026-03-02', number = ${`INV/2026-27/9${stamp.slice(-3)}`}, sequence_number = ${900 + Number(stamp.slice(-2))} WHERE id = ${sent}`;
+    await owner`UPDATE crm.invoice SET status = 'cancelled' WHERE id = ${sent}`;
+    const listed = await new PostgresPortalLibraryRepository(app).invoices(tenantId, [mine]);
+    const row = listed.find((i) => i.invoiceId === sent);
+    expect(row?.status).toBe("cancelled");
+    expect(row?.outstanding).toMatch(/^0(\.0+)?$/);
   });
 });

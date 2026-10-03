@@ -545,7 +545,8 @@ const BalanceSchema = z
     invoiced: Decimal.nullable(),
     paid: Decimal.nullable(),
     credited: Decimal.nullable(),
-    /** invoiced − paid − credited, computed by Postgres. Never a stored column:
+    /** invoiced − paid − credited, computed by Postgres, for an ISSUED invoice;
+     *  0 for a draft or a cancelled one (0326, B22). Never a stored column:
      *  a `paid` flag drifts the first time a payment is corrected. */
     outstanding: Decimal.nullable(),
   })
@@ -726,6 +727,11 @@ const PendingDunningSchema = z
     outstanding: Decimal.nullable(),
     currency: z.string().length(3),
     dueOn: z.string().nullable(),
+    invoiceStatus: z.enum(STATUS_VALUES).openapi({
+      description:
+        "The invoice as it stands now. A step on an invoice cancelled since (outstanding 0) can " +
+        "only be rejected (DUNNING_NOTHING_OWED, 409, on approve).",
+    }),
   })
   .openapi("PendingDunningAction");
 
@@ -793,7 +799,10 @@ const decideDunningRoute = createRoute({
     401: errorResponse("Not signed in"),
     403: errorResponse("No org selected, or the role does not permit it"),
     404: errorResponse("No such dunning action at this firm"),
-    409: errorResponse("Not awaiting approval, or already decided"),
+    409: errorResponse(
+      "Not awaiting approval, already decided, or (approving) the invoice was cancelled or is paid " +
+        "in full since the step fired (DUNNING_NOTHING_OWED): reject it instead",
+    ),
   },
 });
 
@@ -1035,6 +1044,7 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
           outstanding: fees ? a.outstanding : null,
           currency: a.currency,
           dueOn: a.dueOn,
+          invoiceStatus: a.invoiceStatus,
         })),
       },
       200,

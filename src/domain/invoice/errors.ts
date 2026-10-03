@@ -41,7 +41,8 @@ export type InvoiceErrorCode =
   | "MANAGER_NOT_STAFF"
   | "INVOICE_MANAGER_FROZEN"
   | "CREDIT_NOTE_DATE_OUT_OF_RANGE"
-  | "INVOICE_HAS_PAYMENTS";
+  | "INVOICE_HAS_PAYMENTS"
+  | "DUNNING_NOTHING_OWED";
 
 /** `asOf` is the caller's TODAY, not a date to choose (see `isCallersToday`).
  *  A document that genuinely belongs to another day has its own field. */
@@ -445,6 +446,22 @@ export class InvoiceHasPayments extends InvoiceError {
         `cannot be cancelled: that money would be attached to nothing. To take money off what the client ` +
         `owes, issue a credit note. If a payment was recorded by mistake, record a refund of the same ` +
         `amount first, then cancel.`,
+    );
+  }
+}
+
+/**
+ * A credit hold or legal action is approved only over money still owed (audit
+ * 2026-10-03, B22). The queue showed a cancelled invoice's full total as owed,
+ * and a partner could approve a hold over a withdrawn bill. Rejecting the step
+ * is always possible: it records that the firm looked and chose not to.
+ */
+export class DunningNothingOwed extends InvoiceError {
+  constructor(number: string | null, why: "cancelled" | "settled") {
+    super(
+      "DUNNING_NOTHING_OWED",
+      `${number ?? "This invoice"} ${why === "cancelled" ? "was cancelled" : "is paid in full"}, so nothing is ` +
+        `owed on it and this step cannot be approved. Reject it instead; the rejection is kept on record.`,
     );
   }
 }
