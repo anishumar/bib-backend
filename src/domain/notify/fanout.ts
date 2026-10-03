@@ -84,6 +84,7 @@ const JOB_STEP_OPEN: readonly NotifyCategory[] = ["step_assigned", "check_reques
 
 /** The verbs the outbox reads. Anything else is never fetched. */
 export const FANOUT_VERBS = [
+  "work_item.created",
   "work_item.assigned",
   "work_item.review_requested",
   "work_item.review_approved",
@@ -134,6 +135,26 @@ export function planFor(e: LedgerFact): Plan {
   const p = e.payload;
   switch (e.verb) {
     // ── work ──────────────────────────────────────────────────────────────
+    // A task raised BY HAND with somebody named writes `created` and no
+    // `assigned` (the walk found it). One the engine spawns or the calendar
+    // raises writes both, so only the hand-raised one is read here: telling
+    // the same person twice would be the bell's first lie.
+    case "work_item.created":
+      return p["origin"] === "manual" && p["assigned"] === true
+        ? {
+            resolve: [],
+            announce: [
+              {
+                category: "task_assigned",
+                sourceType: "work_item",
+                sourceId: e.objectId,
+                payload: {},
+                to: [{ kind: "work_item_assignee", workItemId: e.objectId }],
+              },
+            ],
+          }
+        : NOTHING;
+
     case "work_item.assigned": {
       const userId = str(p, "userId");
       return {

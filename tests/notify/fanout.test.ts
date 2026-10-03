@@ -41,6 +41,14 @@ describe("the map", () => {
     expect(planFor(fact("work_item.assigned", { userId: null })).announce).toEqual([]);
   });
 
+  it("reads a hand-raised task's creation, and leaves a spawned one to its own assigned event", () => {
+    expect(planFor(fact("work_item.created", { origin: "manual", assigned: true })).announce[0]?.to).toEqual([
+      { kind: "work_item_assignee", workItemId: OBJ },
+    ]);
+    expect(planFor(fact("work_item.created", { origin: "engagement", assigned: true })).announce).toEqual([]);
+    expect(planFor(fact("work_item.created", { origin: "manual", assigned: false })).announce).toEqual([]);
+  });
+
   it("leaves an advance to its own reminders, and bills to the bill's manager", () => {
     expect(planFor(fact("billing_due.created", { kind: "advance" })).announce).toEqual([]);
     expect(planFor(fact("billing_due.created", { kind: "period" })).announce[0]?.to).toEqual([
