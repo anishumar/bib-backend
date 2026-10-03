@@ -305,7 +305,7 @@ version is exactly what gets asked about afterwards.
 | `invoice.manager_set` | invoice | A DRAFT invoice was put in another manager's revenue, or in nobody's (auto-invoice T4). Issued invoices cannot change hands. Payload: `number`, `managerUserId`, `previousManagerUserId` (either may be null). |
 | `invoice.due_date_set` | invoice | A DRAFT invoice's due date was set, changed or cleared (audit 2026-10-03, B20). An issued invoice's due date is what was sent and does not change. Payload: `dueOn`, `previousDueOn` (either may be null). |
 | `invoice.cancelled` | invoice | Cancelled; an issued invoice's number is never reused. A draft cancelled before issue has no number (0322), and `number` is null. |
-| `payment.recorded` | payment | A payment was received and applied. |
+| `payment.recorded` | payment | A payment was received and applied. Payload: `invoiceId`, `invoiceNumber`, `amount`, `currency`, `receivedOn`, `method`, `hasReference`. The free-text reference itself stays on the payment row and out of this log since the audit of 2026-10-03 (B26): a UPI reference is often a phone number. Earlier events carry `reference`. |
 | `credit_note.issued` | credit_note | Issued against an invoice. |
 | `invoice.registered` | invoice | The government e-invoice registry's identifier (IRN) was recorded against an invoice. Its honest limit: nothing in this product talks to the IRP, so this records an answer obtained elsewhere — the same shape as the advance-fee attestation. The real connector is T7.1. |
 | `invoice_series.set` | invoice_series | The firm named what one of its entities' invoice numbers READ as. It changes future numbers only — every issued invoice keeps the number it was issued with, because the freeze trigger refuses to move one. |

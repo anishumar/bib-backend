@@ -143,19 +143,21 @@ describe("payments", () => {
     ).rejects.toBeInstanceOf(InvalidPaymentMethod);
   });
 
-  it("record the bank's reference and not the free-text note", async () => {
-    // The reference is the counterparty's own machine identifier and is what a
-    // reconciliation dispute turns on. The note is prose a person wrote, and
-    // this log cannot be erased.
+  it("keep the free-text reference and note out of the ledger (B26, audit 2026-10-03)", async () => {
+    // A UPI reference is very often a phone number ("98…@ybl"), and this log
+    // cannot be erased. The reference stays on the payment row, where it can
+    // be; the event says only whether there was one.
     const s = setup();
     const id = await issuedInvoice(s);
-    await s.service.recordPayment(
-      { tenantId: TENANT, invoiceId: id, amount: "1000", receivedOn: "2026-07-10", method: "bank_transfer", reference: "UTR-99881", note: "Priya rang to confirm" },
+    const payment = await s.service.recordPayment(
+      { tenantId: TENANT, invoiceId: id, amount: "1000", receivedOn: "2026-07-10", method: "upi", reference: "9876543210@ybl", note: "Priya rang to confirm" },
       ACTOR,
     );
     const event = s.events.recorded.find((e) => e.verb === "payment.recorded");
-    expect(event?.payload).toMatchObject({ reference: "UTR-99881", method: "bank_transfer" });
+    expect(event?.payload).toMatchObject({ method: "upi", hasReference: true });
+    expect(JSON.stringify(event?.payload)).not.toContain("9876543210");
     expect(JSON.stringify(event?.payload)).not.toContain("Priya");
+    expect(payment.reference).toBe("9876543210@ybl");
   });
 });
 

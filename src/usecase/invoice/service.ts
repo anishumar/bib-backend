@@ -665,9 +665,11 @@ export class InvoiceService {
       verb: "payment.recorded",
       objectId: payment.id,
       actor,
-      // Ids and machine facts. The bank REFERENCE is in, because it is the
-      // counterparty's own machine identifier and is what a reconciliation
-      // dispute turns on; the free-text note is not.
+      // Ids and machine facts. NOT the reference (B26, audit 2026-10-03):
+      // it is free text up to 200 characters, and a UPI reference is very
+      // often a phone number ("98…@ybl"); the PII guard checks key names, not
+      // values, and this log cannot be erased. It stays on the payment row,
+      // which can be; the event says only whether there was one. Nor the note.
       payload: {
         invoiceId: payment.invoiceId,
         invoiceNumber: invoice.number,
@@ -675,7 +677,7 @@ export class InvoiceService {
         currency: payment.currency,
         receivedOn: payment.receivedOn,
         method: payment.method,
-        reference: payment.reference,
+        hasReference: payment.reference !== null && payment.reference.trim() !== "",
       },
     });
     return payment;
