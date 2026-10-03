@@ -4474,6 +4474,17 @@ somebody to find.
   app.
 - **The ledger keeps all of it**, including the reverted rule edits, and that is correct: they
   happened.
+- **Audit of 2026-10-03, the UI sweep (10x Global).** The sweep wrote these records and they were
+  reverted through the app the same day:
+  - lead `f8b0e288` deleted;
+  - draft proposal PR-2026-0004 `6063c951` deleted;
+  - party "QA-SWEEP Lead Co 2026-10-03" `c75b2428` archived;
+  - two client requests `a5460b33` and `32727c09` closed.
+
+  The roleplay built its own firm, "Sharma Mehta & Co (QA roleplay)" `a717067f`, and that firm is
+  kept on purpose. The fix agents worked only in their own databases (`bib_audit_*`). One billing
+  walk script that hard-codes the shared `bib` ran two `UPDATE`s scoped to another firm's id;
+  both changed 0 rows. Reports: `bib/qa/audit-2026-10-03/`.
 
 ---
 
