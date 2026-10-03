@@ -380,3 +380,37 @@ describe("a draft's lines can be struck off and added again (B04, B36)", () => {
     expect(positions).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
   });
 });
+
+describe("an issued invoice with money on it is not cancelled (B05, 0326)", () => {
+  it("refuses through the service, in plain words, and leaves it issued", async () => {
+    const invoice = await issued("50000");
+    await service.recordPayment(
+      { tenantId: tenant, invoiceId: invoice, amount: "50000", receivedOn: "2026-07-10", method: "bank_transfer" },
+      SYSTEM_ACTOR,
+    );
+    const refused = await service.cancel(tenant, invoice, SYSTEM_ACTOR).catch((e: unknown) => e);
+    expect(refused).toMatchObject({ code: "INVOICE_HAS_PAYMENTS" });
+    expect((await repo.find(tenant, invoice))?.status).toBe("issued");
+  });
+
+  it("refuses in the database too, for a session that walks past the service", async () => {
+    const invoice = await issued("1000");
+    await service.recordPayment(
+      { tenantId: tenant, invoiceId: invoice, amount: "1000", receivedOn: "2026-07-10", method: "cash" },
+      SYSTEM_ACTOR,
+    );
+    const err = await owner`UPDATE crm.invoice SET status = 'cancelled' WHERE id = ${invoice}`.catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("23001");
+  });
+
+  it("cancels once a mistaken payment has been reversed", async () => {
+    const invoice = await issued("1000");
+    for (const amount of ["1000", "-1000"]) {
+      await service.recordPayment(
+        { tenantId: tenant, invoiceId: invoice, amount, receivedOn: "2026-07-10", method: "cash" },
+        SYSTEM_ACTOR,
+      );
+    }
+    expect((await service.cancel(tenant, invoice, SYSTEM_ACTOR)).status).toBe("cancelled");
+  });
+});

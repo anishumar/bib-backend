@@ -14,6 +14,24 @@ BEGIN
 END;
 $$;
 
+-- ── 3. Cancelling a paid invoice, and 0028's payment guard ─────────────────
+DROP TRIGGER trg_invoice_cancel_unpaid ON crm.invoice;
+DROP FUNCTION crm.refuse_cancelling_a_paid_invoice();
+
+CREATE OR REPLACE FUNCTION crm.refuse_payment_on_unissued() RETURNS trigger AS $$
+DECLARE
+  state text;
+BEGIN
+  SELECT status INTO state FROM crm.invoice WHERE id = NEW.invoice_id;
+  IF state <> 'issued' THEN
+    RAISE EXCEPTION
+      'invoice % is %, so a payment cannot be applied to it. Money against a draft has nothing to settle, and money against a cancelled invoice is a refund or a reallocation.',
+      NEW.invoice_id, state USING ERRCODE = 'restrict_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
 -- ── 2. 0322's freeze, as it was ────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION crm.refuse_invoice_number_change() RETURNS trigger AS $$
 BEGIN

@@ -67,6 +67,7 @@ import type {
   InvoiceRepository,
   InvoiceSeriesRecord,
   InvoiceSummary,
+  CancelOutcome,
   IssueOn,
   NewCreditNote,
   ReceivableRecord,
@@ -550,17 +551,33 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
     });
   }
 
-  async cancel(tenantId: string, invoiceId: string): Promise<Invoice> {
-    return this.updateOne(
-      tenantId,
-      invoiceId,
-      (db) => db`
+  async cancel(tenantId: string, invoiceId: string): Promise<CancelOutcome> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // The row first, so a payment recorded at this moment waits for us (its
+      // trigger reads the status FOR SHARE, 0326) or we wait for it.
+      const [current] = await db<{ status: string }[]>`
+        SELECT status FROM crm.invoice WHERE id = ${invoiceId} FOR UPDATE
+      `;
+      if (current?.status === "issued") {
+        const [money] = await db<{ paid: string; any: boolean }[]>`
+          SELECT coalesce(sum(amount), 0)::text AS paid, coalesce(sum(amount), 0) <> 0 AS any
+            FROM crm.payment WHERE invoice_id = ${invoiceId}
+        `;
+        if (money?.any === true) return { paid: money.paid };
+      }
+      const [row] = await db<InvoiceRow[]>`
         UPDATE crm.invoice SET status = 'cancelled'
         WHERE id = ${invoiceId} AND status IN ('draft', 'issued')
         RETURNING ${db.unsafe(INVOICE_COLUMNS)}
-      `,
-      "cancel",
-    );
+      `;
+      if (!row) {
+        throw new Error(
+          `could not cancel invoice ${invoiceId}: no row matched. It has moved on since it was ` +
+            `read — another request got there first.`,
+        );
+      }
+      return { cancelled: toInvoice(row) };
+    });
   }
 
   async registerIrn(

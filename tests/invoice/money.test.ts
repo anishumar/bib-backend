@@ -281,3 +281,36 @@ describe("who owes the firm money", () => {
     expect(receivables[0]?.number).toMatch(/^INV\//);
   });
 });
+
+describe("an invoice with money on it is not cancelled (B05, audit 2026-10-03)", () => {
+  // Cancelling an issued invoice that had been paid orphaned the payment: the
+  // receivables and the list drop a cancelled invoice, the bill behind it
+  // re-opened, and the money received was attached to nothing.
+  it("refuses, in plain words, and says what to do instead", async () => {
+    const s = setup();
+    const id = await issuedInvoice(s);
+    await s.service.recordPayment(
+      { tenantId: TENANT, invoiceId: id, amount: "4000", receivedOn: "2026-07-10", method: "upi" },
+      ACTOR,
+    );
+    const refused = await s.service.cancel(TENANT, id, ACTOR).catch((e: unknown) => e);
+    expect(refused).toMatchObject({ code: "INVOICE_HAS_PAYMENTS" });
+    expect((refused as Error).message).toContain("credit note");
+    expect((refused as Error).message).toContain("4,000.00");
+    expect((await s.invoices.find(TENANT, id))?.status).toBe("issued");
+  });
+
+  it("allows it once the payment has been reversed to nothing", async () => {
+    const s = setup();
+    const id = await issuedInvoice(s);
+    await s.service.recordPayment(
+      { tenantId: TENANT, invoiceId: id, amount: "4000", receivedOn: "2026-07-10", method: "cheque" },
+      ACTOR,
+    );
+    await s.service.recordPayment(
+      { tenantId: TENANT, invoiceId: id, amount: "-4000", receivedOn: "2026-07-12", method: "cheque" },
+      ACTOR,
+    );
+    expect((await s.service.cancel(TENANT, id, ACTOR)).status).toBe("cancelled");
+  });
+});

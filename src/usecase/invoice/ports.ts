@@ -35,6 +35,9 @@ export interface NewInvoice {
   readonly financialYear: number;
 }
 
+/** A cancellation, or the money that stopped it (B05). */
+export type CancelOutcome = { readonly cancelled: Invoice } | { readonly paid: string };
+
 /** What `issue` writes besides the status: the day, the year that day falls
  *  in (and the month that year starts in, for the number's label), and the due
  *  date to fill in when the draft has none (the firm's terms, or null). */
@@ -225,7 +228,13 @@ export interface InvoiceRepository {
    * recording being one method, reached from money instead of from fairness.
    */
   issue(tenantId: string, invoiceId: string, on: IssueOn): Promise<Invoice>;
-  cancel(tenantId: string, invoiceId: string): Promise<Invoice>;
+  /**
+   * Cancel it, unless it is ISSUED and money was received against it (B05):
+   * then nothing changes and the net paid comes back. Checked under the
+   * invoice's row lock, so a payment recorded at the same moment cannot slip
+   * between the check and the write (a trigger refuses it too).
+   */
+  cancel(tenantId: string, invoiceId: string): Promise<CancelOutcome>;
   registerIrn(tenantId: string, invoiceId: string, irn: string, at: string): Promise<Invoice>;
   /** A DRAFT's manager (null: nobody). `status = 'draft'` in the write. */
   setManager(tenantId: string, invoiceId: string, managerUserId: string | null): Promise<Invoice>;

@@ -13,6 +13,14 @@
 --      2027-28, against the consecutive-series rule. The freeze now admits the
 --      year changing in exactly one write: the one that numbers an unnumbered
 --      draft and issues it. Everything else it refused it still refuses.
+--   3. AN ISSUED INVOICE WITH MONEY ON IT IS NOT CANCELLED (B05). Cancelling a
+--      paid invoice orphaned the payment (the receivables and every list drop a
+--      cancelled invoice) and re-opened the bill behind it to be raised again;
+--      the audit found 16 such rows locally. The service refuses in plain words
+--      (a credit note, or reverse a mistaken payment first); this trigger is
+--      what an import or a psql session meets. A payment's own trigger now reads
+--      the invoice FOR SHARE, so a payment and a cancellation at the same moment
+--      serialise instead of both passing. Existing cancelled rows are untouched.
 
 SET ROLE bib_owner;
 
@@ -65,6 +73,43 @@ BEGIN
       OLD.id, OLD.irn USING ERRCODE = 'restrict_violation';
   END IF;
 
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ── 3. Money on it: not cancelled ──────────────────────────────────────────
+CREATE FUNCTION crm.refuse_cancelling_a_paid_invoice() RETURNS trigger AS $$
+DECLARE
+  paid numeric;
+BEGIN
+  SELECT coalesce(sum(amount), 0) INTO paid FROM crm.payment WHERE invoice_id = OLD.id;
+  IF paid <> 0 THEN
+    RAISE EXCEPTION
+      'invoice % has % of payments against it, so it cannot be cancelled: the money would be attached to nothing. Issue a credit note, or record a refund of a mistaken payment first.',
+      coalesce(OLD.number, OLD.id::text), paid USING ERRCODE = 'restrict_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_invoice_cancel_unpaid
+  BEFORE UPDATE OF status ON crm.invoice
+  FOR EACH ROW
+  WHEN (OLD.status = 'issued' AND NEW.status = 'cancelled')
+  EXECUTE FUNCTION crm.refuse_cancelling_a_paid_invoice();
+
+-- 0028's payment guard, reading the invoice FOR SHARE: a cancellation holding
+-- the row makes this wait and then see `cancelled`.
+CREATE OR REPLACE FUNCTION crm.refuse_payment_on_unissued() RETURNS trigger AS $$
+DECLARE
+  state text;
+BEGIN
+  SELECT status INTO state FROM crm.invoice WHERE id = NEW.invoice_id FOR SHARE;
+  IF state <> 'issued' THEN
+    RAISE EXCEPTION
+      'invoice % is %, so a payment cannot be applied to it. Money against a draft has nothing to settle, and money against a cancelled invoice is a refund or a reallocation.',
+      NEW.invoice_id, state USING ERRCODE = 'restrict_violation';
+  END IF;
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;

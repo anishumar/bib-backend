@@ -40,7 +40,8 @@ export type InvoiceErrorCode =
   | "ENGAGEMENT_IN_ANOTHER_CURRENCY"
   | "MANAGER_NOT_STAFF"
   | "INVOICE_MANAGER_FROZEN"
-  | "CREDIT_NOTE_DATE_OUT_OF_RANGE";
+  | "CREDIT_NOTE_DATE_OUT_OF_RANGE"
+  | "INVOICE_HAS_PAYMENTS";
 
 /** `asOf` is the caller's TODAY, not a date to choose (see `isCallersToday`).
  *  A document that genuinely belongs to another day has its own field. */
@@ -409,6 +410,41 @@ export class CreditNoteDateOutOfRange extends InvoiceError {
             `Date it today or earlier.`
         : `A credit note cannot be dated ${dayInWords(given)}, which is before the invoice it credits was ` +
             `issued${invoiceIssuedOn === null ? "" : ` (${dayInWords(invoiceIssuedOn)})`}. Date it on or after that day.`,
+    );
+  }
+}
+
+/** "INR 4,000.00": an amount as a person reads it, for a refusal. On the
+ *  STRING, never through a number; lakh grouping for INR, thousands otherwise. */
+export function moneyInWords(amount: string, currency: string): string {
+  const negative = amount.startsWith("-");
+  const [whole = "0", fraction = ""] = (negative ? amount.slice(1) : amount).split(".");
+  const cents = (fraction + "00").slice(0, 2);
+  const digits = whole.replace(/^0+(?=\d)/, "");
+  let grouped: string;
+  if (currency.toUpperCase() === "INR" && digits.length > 3) {
+    const head = digits.slice(0, -3);
+    grouped = `${head.replace(/\B(?=(\d{2})+(?!\d))/g, ",")},${digits.slice(-3)}`;
+  } else {
+    grouped = digits.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  }
+  return `${currency.toUpperCase()} ${negative ? "-" : ""}${grouped}.${cents}`;
+}
+
+/**
+ * An issued invoice with money received against it is not cancelled (audit
+ * 2026-10-03, B05). The receivables and every list drop a cancelled invoice,
+ * so the payment would be attached to nothing, and the bill behind it would
+ * re-open to be raised again. The database refuses it too.
+ */
+export class InvoiceHasPayments extends InvoiceError {
+  constructor(number: string | null, paid: string, currency: string) {
+    super(
+      "INVOICE_HAS_PAYMENTS",
+      `${number ?? "This invoice"} has ${moneyInWords(paid, currency)} of payments recorded against it, so it ` +
+        `cannot be cancelled: that money would be attached to nothing. To take money off what the client ` +
+        `owes, issue a credit note. If a payment was recorded by mistake, record a refund of the same ` +
+        `amount first, then cancel.`,
     );
   }
 }

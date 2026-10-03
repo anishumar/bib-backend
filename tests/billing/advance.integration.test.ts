@@ -541,7 +541,10 @@ describe("an advance cancelled and raised again (0321)", () => {
     await expect(desk.link({ tenantId, dueId: oct, invoiceId: first }, me)).rejects.toBeInstanceOf(InvoiceDoesNotFitDue);
     await raiseAndIssue(oct);
 
-    // The advance invoice was wrong: cancelled, and raised again from its bill.
+    // The advance invoice was wrong: its payment is moved off it (a refund on
+    // it, B05: a paid invoice is not cancelled), it is cancelled, and raised
+    // again from its bill.
+    await invoicing.recordPayment({ tenantId, invoiceId: first, amount: "-23600", receivedOn: "2026-12-06", method: "bank_transfer" }, me);
     await invoicing.cancel(tenantId, first, { type: "human", id: admin });
     const second = await raiseAndIssue(advId);
     const [pool] = await owner<{ remaining: string; applied: string }[]>`
@@ -566,6 +569,7 @@ describe("an advance cancelled and raised again (0321)", () => {
     const oct = await periodDue(booksId, "10");
     expect((await desk.raise({ tenantId, dueIds: [oct], lines: [{ dueId: oct, taxPercent: "18" }] }, me)).covered).toEqual([oct]);
 
+    await invoicing.recordPayment({ tenantId, invoiceId: adv, amount: "-59000", receivedOn: "2026-12-06", method: "bank_transfer" }, me);
     await invoicing.cancel(tenantId, adv, { type: "human", id: admin });
     expect((await desk.list({ tenantId, filters: { status: "all" } })).dues.find((d) => d.id === oct)?.status).toBe("open");
     const out = await desk.raise({ tenantId, dueIds: [oct], lines: [{ dueId: oct, taxPercent: "18" }] }, me);

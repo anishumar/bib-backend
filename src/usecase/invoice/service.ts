@@ -75,6 +75,7 @@ import {
   InvoiceManagerFrozen,
   ManagerNotStaff,
   CreditNoteDateOutOfRange,
+  InvoiceHasPayments,
 } from "../../domain/invoice/errors";
 import { dayInZone, isCallersToday } from "../../domain/scheduler/zone";
 import type {
@@ -405,7 +406,12 @@ export class InvoiceService {
     if (!canTransition(invoice.status, "cancelled")) {
       throw new InvalidInvoiceTransition(invoice.status, "cancelled");
     }
-    const cancelled = await this.deps.invoices.cancel(tenantId, invoiceId);
+    // NOT WITH MONEY ON IT (B05). A paid invoice cancelled orphaned the
+    // payment and re-opened the bill behind it to be raised again. The money
+    // is taken off with a credit note, or a mistaken payment is reversed first.
+    const outcome = await this.deps.invoices.cancel(tenantId, invoiceId);
+    if ("paid" in outcome) throw new InvoiceHasPayments(invoice.number, outcome.paid, invoice.currency);
+    const cancelled = outcome.cancelled;
     await this.deps.events.recordEvent({
       tenantId,
       verb: "invoice.cancelled",

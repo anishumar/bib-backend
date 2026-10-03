@@ -30,6 +30,7 @@ import type {
   InvoiceSeriesRecord,
   InvoiceFirmSettings,
   InvoiceSummary,
+  CancelOutcome,
   IssueOn,
   IssuedCopies,
   NewCreditNote,
@@ -199,8 +200,14 @@ export class FakeInvoiceRepo implements InvoiceRepository {
     });
   }
 
-  cancel(tenantId: string, invoiceId: string): Promise<Invoice> {
-    return this.patch(tenantId, invoiceId, { status: "cancelled" });
+  async cancel(tenantId: string, invoiceId: string): Promise<CancelOutcome> {
+    // As the adapter: an issued invoice with money on it stays (B05).
+    const invoice = await this.find(tenantId, invoiceId);
+    if (invoice?.status === "issued") {
+      const paid = this.payments.filter((p) => p.invoiceId === invoiceId).reduce((acc, p) => acc + scaled(p.amount), 0n);
+      if (paid !== 0n) return { paid: unscaled(paid) };
+    }
+    return { cancelled: await this.patch(tenantId, invoiceId, { status: "cancelled" }) };
   }
 
   registerIrn(tenantId: string, invoiceId: string, irn: string, at: string): Promise<Invoice> {
