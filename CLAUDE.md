@@ -1824,7 +1824,7 @@ The user's calls the same night (memory `bib-auto-invoice-answers-2026-10-01`, S
   (catch-up, auto-draft, AdvanceDesk on real SQL, digest claim), `sweep.integration.test.ts`,
   `tests/invoice/numbering.integration.test.ts`. Walk: `bib/demo-assets/tools/ai-adv-walk.mjs`.
 
-## Notifications: the bell, and who is told what (0323, 2026-10-03)
+## Notifications: the bell, the email, and who is told what (0323, 0324)
 
 My day is STATE (what is on my desk now; the row leaves when the work does). A notification
 is an EVENT (something happened that I should know): it arrives once, is read or not, links
@@ -1875,12 +1875,28 @@ to its source, and stays as history. Design note and Ashish's open questions:
   list (cursor by the millisecond the client was handed), `unread-count` (capped 100, one
   partial index, built to be polled once a minute per visible tab), mark read, read-all up to
   an instant, preferences, firm-defaults. Not in `PORTAL_PATHS`.
-- **Not built:** email and push channels (columns exist; email waits on Ashish's answer about
-  instant vs digest), client-portal notifications, a cap on "check to decide" when a firm's
-  policy lets everybody check. "Bill to raise" reaches the bill's manager (else KM) only, not
-  the boss-escalation or no-price SPOC paths My day has.
-- Tests: `tests/notify/*.test.ts`, `inbox.integration`, `fanout.integration`. One-firm run on
-  the shared DB: `bib/demo-assets/tools/nt-notify-tenant.mts`. Walk: `nt-walk.mjs` (32/32).
+- **Check to decide reaches the sender's MANAGER** (DESIGN.md §J, Q2), when that manager may
+  check it (T2.9's rule); otherwise every eligible checker, so a check is never silent. The
+  maker of a task check is the task's HOLDER: `trg_work_item_approval_derive_maker` fills
+  `submitted_by` from the task, whatever the insert said.
+- **Email (0324, DESIGN.md §J).** Every category is on by email by default; each person may
+  switch their own off. HOW is the category's (`emailMode`): `escalation` and `filing_missed`
+  at once (`NotificationEmails.sendInstant`, on the outbox's every-minute queue, one letter per
+  person per run, rows under 24 h old), everything else in ONE email a day at the firm's hour
+  in the firm's zone (`sendDigests`, queue `notify.email-digest`, hourly; `dailyDigestDue`),
+  unread and unresolved only, reaching back 7 days. `emailed_at` is CLAIMED before the send and
+  released if the relay refuses; the daily email is claimed per firm, person and day
+  (`notify.email_digest`), so a doubled worker sends one. A refused daily email's rows stay
+  unemailed for the next day. The firm's hour: `notify.firm_setting` (no row = 09:00), shown on
+  GET firm-defaults, set by PUT `/notifications/digest-hour` (`tenant:admin`, ledger
+  `tenant.notification_digest_hour_set`). The words are the bell's (`readRecords`, the one
+  query both use) with the reader's fee visibility; `SmtpMailer.sendNotifications` names the
+  firm in the subject (header-safe) and links every notification, the list and `/account`.
+- **Not built:** push (phase 2), client-portal notifications. "Bill to raise" reaches the
+  bill's manager (else KM) only, not the boss-escalation or no-price SPOC paths My day has.
+- Tests: `tests/notify/*.test.ts` (incl. `letter.test`), `inbox.integration`,
+  `fanout.integration`, `email.integration`. One-firm run on the shared DB (outbox, reminders,
+  emails): `bib/demo-assets/tools/nt-notify-tenant.mts`. Walk: `nt-walk.mjs` (42/42, Mailpit).
 
 ## Billing safeguards: what the end-to-end review found (0321, 2026-10-02)
 
