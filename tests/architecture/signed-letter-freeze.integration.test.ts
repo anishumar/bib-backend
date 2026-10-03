@@ -275,6 +275,8 @@ function probeValueFor(column: ColumnRow, currentlyNull: boolean): string {
       return `'2001-02-03T04:05:06+00'::${column.type}`;
     case "U":
       if (column.type === "uuid") return `'11111111-1111-4111-8111-111111111111'::uuid`;
+      // `printed_parties` (0334): what the letter printed, frozen with it.
+      if (column.type === "jsonb") return `'{"probe": true}'::jsonb`;
       break;
     default:
       break;
