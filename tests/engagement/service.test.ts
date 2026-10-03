@@ -2501,6 +2501,43 @@ describe("asking the billing desk to schedule the work that went live", () => {
   });
 });
 
+describe("filling the compliance calendar when work goes live (audit 2026-10-03, CA#24)", () => {
+  function withCalendar(fail = false) {
+    const s = setup();
+    const filled: string[] = [];
+    const service = new EngagementService({
+      ...s,
+      calendar: {
+        fillCalendar: (tenantId) => {
+          filled.push(tenantId);
+          return fail ? Promise.reject(new Error("calendar is down")) : Promise.resolve(3);
+        },
+      },
+    });
+    return { ...s, service, filled };
+  }
+
+  it("asks for the firm's calendar to be filled on signature, once", async () => {
+    const s = withCalendar();
+    const id = await draft(s);
+    await completeTerms(s, id);
+    await s.service.send(TENANT, id, ACTOR);
+    await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
+    expect(s.filled).toEqual([TENANT]);
+  });
+
+  it("never turns a signature into a failure when the calendar cannot be filled", async () => {
+    // Tonight's sweep fills it either way; the client has already signed.
+    const s = withCalendar(true);
+    const id = await draft(s);
+    await completeTerms(s, id);
+    await s.service.send(TENANT, id, ACTOR);
+    const { letter } = await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
+    expect(letter.status).toBe("signed");
+    expect(s.filled).toEqual([TENANT]);
+  });
+});
+
 describe("when a recurring fee is invoiced, as the letter says it (0319)", () => {
   const line = (s: ReturnType<typeof setup>, id: string, over: Record<string, string>) =>
     s.service.addLine({

@@ -1227,6 +1227,9 @@ export function wire(cfg: Config, log: Logger): Wired {
   const engagement = new EngagementService({
     // 0320: a signed letter's advance becomes a bill to raise.
     advanceBilling: advanceBills,
+    // CA#24: a signed letter's filings reach the calendar at once, through the
+    // nightly sweep's own generator, not tonight.
+    calendar: obligations,
     // 0319: a signed letter's billing terms set each engagement's schedule.
     goLiveBilling: new GoLiveScheduler({
       schedules: new PostgresBillingSchedules(pools.app),

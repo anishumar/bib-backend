@@ -91,6 +91,17 @@ export interface ClientStructureDirectory {
  * nothing here: whether the firm bills automatically, and what the schedule
  * is, are the billing desk's rules.
  */
+/**
+ * Fills the firm's compliance calendar now, as tonight's sweep would (audit
+ * 2026-10-03, CA#24): a client signed today sees the filings its services owe
+ * at once, not after the nightly pass. Satisfied structurally by
+ * `ObligationService.fillCalendar`, so neither use case imports the other. It
+ * decides nothing here: which periods are owed is the generator's rule.
+ */
+export interface CalendarFiller {
+  fillCalendar(tenantId: string, actor: Actor): Promise<unknown>;
+}
+
 export interface GoLiveBilling {
   scheduleActivated(
     input: { readonly tenantId: string; readonly engagementIds: readonly string[]; readonly liveOn: string },

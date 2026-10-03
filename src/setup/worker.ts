@@ -673,6 +673,9 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
   const engagement: EngagementService = new EngagementService({
     // 0320: and writes the advance bill it owes.
     advanceBilling: advanceBills,
+    // CA#24: a signed letter's filings reach the calendar at once, through the
+    // nightly sweep's own generator, not tonight.
+    calendar: obligations,
     // 0319: an e-signed letter settled here sets its engagements' billing
     // schedules from its terms, exactly as one signed on the server does.
     goLiveBilling: new GoLiveScheduler({

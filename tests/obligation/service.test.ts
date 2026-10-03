@@ -2117,3 +2117,27 @@ describe("the link and unlink events name the service, as it read at the write",
     expect(linked?.payload).toMatchObject({ serviceKey: "gst-filing", serviceName: null });
   });
 });
+
+describe("filling the calendar the moment work goes live (audit 2026-10-03, CA#24)", () => {
+  // Right after a client signed, the calendar said "Every period so far ended
+  // before the engagement began" and the nightly sweep later added the
+  // September returns due in October. Signing now fills it at once, with the
+  // sweep's own generator, so the two cannot disagree and the sweep finds
+  // nothing left to add.
+  it("writes what tonight's sweep would, raises no task, and leaves the sweep nothing to add", async () => {
+    // Signed 3 Oct 2026 in India; September's GSTR-3B is due 20 Oct.
+    const h = harness({ now: "2026-10-03T06:00:00Z", zone: "Asia/Kolkata" });
+    await firmWithGst(h, { effectiveFrom: "2026-10-03" });
+
+    const filled = await h.service.fillCalendar(FIRM, ACTOR);
+    expect(filled).toBeGreaterThan(0);
+    const periods = h.instances.rows.map((r) => r.periodStart).sort();
+    expect(periods[0]).toBe("2026-09-01");
+    expect(h.instances.rows.find((r) => r.periodStart === "2026-09-01")?.statutoryDueOn).toBe("2026-10-20");
+    // Generates only: a task is the sweep's, at the firm's own lead time.
+    expect(h.workItems.raised).toHaveLength(0);
+
+    const sweep = await h.service.sweepTenant(FIRM, ACTOR);
+    expect(sweep.created).toBe(0);
+  });
+});
