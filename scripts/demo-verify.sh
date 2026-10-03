@@ -70,11 +70,12 @@ esac
 DOMAIN=10xglobal.in
 
 # PYTHON ON WINDOWS ENDS EVERY LINE WITH A CARRIAGE RETURN. Every id below is
-# read out of a response by a one-line Python program inside `$(...)`, which
-# strips the line feed and keeps the carriage return, so the next URL carried an
-# id ending in one and the API answered "not found" for a record that was there
-# (audit 2026-10-03). Every python3 call goes through this, and reads and writes
-# UTF-8 on every platform.
+# read out of a response by a one-line Python program inside `$(...)`. Git
+# Bash drops the carriage return at the very end of a `$(...)`, but not one
+# inside an answer of several lines, and other shells drop none: an id that
+# keeps one makes the API answer "not found" for a record that is there
+# (reported by the audit agents, 2026-10-03). Every python3 call goes through
+# this, so the answer is the same on every shell, in UTF-8 on every platform.
 export PYTHONUTF8=1
 python3() { command python3 "$@" | tr -d '\r'; }
 
