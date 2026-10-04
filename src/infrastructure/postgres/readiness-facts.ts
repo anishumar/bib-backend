@@ -191,8 +191,12 @@ export class PostgresReadinessFacts implements ReadinessFactSource {
                -- Q056: its GSTIN in force today, and a live bank account (0369).
                EXISTS (SELECT 1 FROM core.party_identifier i
                         WHERE i.party_id = p.id AND i.type = 'gstin' AND i.voided_at IS NULL
-                          AND i.valid_from <= current_date
-                          AND (i.valid_to IS NULL OR i.valid_to >= current_date)) AS has_gstin,
+                          -- The company's own day (0337), never the UTC one: a
+                          -- GSTIN valid from today in India is not yet valid in
+                          -- Greenwich until 05:30.
+                          AND i.valid_from <= (now() AT TIME ZONE crm.issuer_zone(p.tenant_id, p.id))::date
+                          AND (i.valid_to IS NULL
+                               OR i.valid_to >= (now() AT TIME ZONE crm.issuer_zone(p.tenant_id, p.id))::date)) AS has_gstin,
                EXISTS (SELECT 1 FROM crm.firm_entity_bank_account b
                         WHERE b.entity_party_id = p.id AND b.retired_at IS NULL) AS has_bank
           FROM core.party p

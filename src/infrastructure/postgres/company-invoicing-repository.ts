@@ -38,7 +38,8 @@ export class PostgresCompanyInvoicingRepository implements CompanyInvoicingRepos
         SELECT p.id AS party_id, p.display_name AS name, le.jurisdiction AS country,
                (SELECT i.value::text FROM core.party_identifier i
                  WHERE i.party_id = p.id AND i.type = 'gstin' AND i.voided_at IS NULL
-                   AND i.valid_from <= current_date AND (i.valid_to IS NULL OR i.valid_to >= current_date)
+                   AND i.valid_from <= (now() AT TIME ZONE crm.issuer_zone(p.tenant_id, p.id))::date
+                   AND (i.valid_to IS NULL OR i.valid_to >= (now() AT TIME ZONE crm.issuer_zone(p.tenant_id, p.id))::date)
                  ORDER BY i.is_primary DESC, i.valid_from DESC, i.created_at DESC LIMIT 1) AS gstin
           FROM core.party p
           JOIN core.organization o ON o.party_id = p.id AND o.tenant_id = p.tenant_id
