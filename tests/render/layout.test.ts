@@ -1,4 +1,6 @@
 // The renderer's pure rules, and the one property the engine was chosen for.
+import { gstPrint, tdsRows } from "../../src/domain/invoice/gst-print";
+import { amountInWords, documentMoney } from "../../src/domain/render/money";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -513,6 +515,88 @@ describe("the classic letter and the invoice render exactly as they did before 0
   it("an invoice", async () => {
     expect(sha(await new PdfLibRenderer().render(invoice))).toBe(
       "25208dc33fbead3761b4afa5780ea2ec65dd65886feeae8650007ff9fed53809",
+    );
+  });
+});
+
+// THE GST TAX INVOICE (Q056, S5): a NEW layout, pinned here on its first day.
+// The plain invoice above did not move (its hash is unchanged): a GST invoice
+// is a different document, drawn only for an invoice issued since 0370 by an
+// Indian company with a GSTIN.
+describe("the GST tax invoice (Q056)", () => {
+  const money = (a: string): string => documentMoney(a, "INR", { minorUnits: "always" });
+  const gst = gstPrint({
+    treatment: "gst_intra",
+    currency: "INR",
+    money,
+    countryName: (c) => c,
+    supplierName: "10x Global Advisory Private Limited",
+    placeOfSupplyStateCode: "27",
+    placeOfSupplyCountry: null,
+    lines: [
+      { description: "Monthly bookkeeping, September 2026", sac: "998222", quantity: "1", unitAmount: "25000", taxPercent: "18", net: "25000.0000" },
+      { description: "TDS return, Q2", sac: "998231", quantity: "1", unitAmount: "5000", taxPercent: "18", net: "5000.0000" },
+    ],
+    summary: [
+      { sac: "998222", taxPercent: "18", taxable: "25000.0000", cgst: "2250.0000", sgst: "2250.0000", utgst: "0", igst: "0", tax: "4500.0000" },
+      { sac: "998231", taxPercent: "18", taxable: "5000.0000", cgst: "450.0000", sgst: "450.0000", utgst: "0", igst: "0", tax: "900.0000" },
+    ],
+    totals: {
+      gross: "30000.0000",
+      discount: "0.0000",
+      net: "30000.0000",
+      tax: "5400.0000",
+      total: "35400.0000",
+      cgst: "2700.0000",
+      sgst: "2700.0000",
+      utgst: "0.0000",
+      igst: "0.0000",
+    },
+    taxInInr: null,
+    lut: null,
+    bank: {
+      accountName: "10x Global Advisory Pvt Ltd",
+      accountNumber: "50200012345678",
+      bankName: "HDFC Bank",
+      branch: "Fort, Mumbai",
+      ifsc: "HDFC0001234",
+      swift: null,
+      iban: null,
+    },
+  });
+  const doc: RenderableDocument = {
+    documentTitle: "Tax Invoice",
+    reference: "INV/2026-27/0007",
+    issuer: { name: "10x Global Advisory Private Limited", lines: ["Nariman Point, Mumbai", "GSTIN 27ABCDE1234F1Z5", "State: Maharashtra (27)"] },
+    recipient: { name: "Meridian Textiles Private Limited", lines: ["Lower Parel, Mumbai", "GSTIN 27AAACM1234K1Z9", "State: Maharashtra (27)"] },
+    recipientLabel: "Billed to",
+    meta: [
+      { label: "Invoice date", value: "5 October 2026" },
+      { label: "Due", value: "20 October 2026" },
+      ...gst.meta,
+    ],
+    sections: [],
+    table: gst.table,
+    totals: [
+      ...gst.totals,
+      ...tdsRows({ section: "194J", percent: "10", tds: "3000.0000", netPayable: "32400.0000", money }),
+    ],
+    amountInWords: amountInWords("35400.0000", "INR"),
+    taxInvoice: gst.print,
+    footer: "10x Global Advisory Private Limited",
+    logo: null,
+    issuedOn: "2026-10-05",
+  };
+
+  it("renders to the same bytes every time", async () => {
+    const a = await new PdfLibRenderer().render(doc);
+    const b = await new PdfLibRenderer().render(doc);
+    expect(sha(a)).toBe(sha(b));
+  });
+
+  it("renders as pinned", async () => {
+    expect(sha(await new PdfLibRenderer().render(doc))).toBe(
+      "aecfb6ec139dab0532177f6a99107634a76d5f5f5fe8de0550d87963d7426b40",
     );
   });
 });

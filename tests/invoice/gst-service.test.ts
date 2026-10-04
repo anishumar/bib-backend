@@ -128,7 +128,7 @@ describe("a draft follows the client and the company", () => {
     const s = setup();
     Object.assign(s.invoices.world, { supplierCountry: "AE", supplierGstin: null, recipientCountry: "AE" });
     const id = await draft(s);
-    await line(s, id, { taxPercent: "5", sac: undefined });
+    await line(s, id, { taxPercent: "5" });
     const issued = await s.service.issue(TENANT, id, ACTOR);
     expect(issued.tax.treatment).toBe("plain");
     expect(issued.tax.supplierGstin).toBeNull();

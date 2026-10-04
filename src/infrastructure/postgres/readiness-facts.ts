@@ -153,9 +153,14 @@ export class PostgresReadinessFacts implements ReadinessFactSource {
       `;
 
       // ── Live services and the process each names ─────────────────────────
-      const services = await db<{ key: string; name: string | null; process_key: string | null; process_published: boolean }[]>`
+      const services = await db<
+        { key: string; name: string | null; process_key: string | null; process_published: boolean; sac: string | null; tax_rate: string | null }[]
+      >`
         SELECT en.key,
                v.body ->> 'name' AS name,
+               -- How India taxes it (Q056): the SAC and the GST rate.
+               NULLIF(btrim(v.body -> 'tax' -> 'IN' ->> 'sac'), '') AS sac,
+               NULLIF(btrim(v.body -> 'tax' -> 'IN' ->> 'ratePercent'), '') AS tax_rate,
                NULLIF(btrim(v.body ->> 'workflowTemplateKey'), '') AS process_key,
                EXISTS (SELECT 1
                          FROM config.entry we
@@ -176,11 +181,20 @@ export class PostgresReadinessFacts implements ReadinessFactSource {
       `;
 
       // ── The firm's own companies (2026-10-03) ────────────────────────────
-      const companies = await db<{ party_id: string; name: string; country: string | null; has_address: boolean }[]>`
+      const companies = await db<
+        { party_id: string; name: string; country: string | null; has_address: boolean; has_gstin: boolean; has_bank: boolean }[]
+      >`
         SELECT p.id AS party_id, p.display_name AS name, le.jurisdiction AS country,
                COALESCE(jsonb_array_length(
                  CASE WHEN jsonb_typeof(le.registered_address -> 'lines') = 'array'
-                      THEN le.registered_address -> 'lines' END) > 0, false) AS has_address
+                      THEN le.registered_address -> 'lines' END) > 0, false) AS has_address,
+               -- Q056: its GSTIN in force today, and a live bank account (0369).
+               EXISTS (SELECT 1 FROM core.party_identifier i
+                        WHERE i.party_id = p.id AND i.type = 'gstin' AND i.voided_at IS NULL
+                          AND i.valid_from <= current_date
+                          AND (i.valid_to IS NULL OR i.valid_to >= current_date)) AS has_gstin,
+               EXISTS (SELECT 1 FROM crm.firm_entity_bank_account b
+                        WHERE b.entity_party_id = p.id AND b.retired_at IS NULL) AS has_bank
           FROM core.party p
           JOIN core.organization o ON o.party_id = p.id AND o.tenant_id = p.tenant_id
           LEFT JOIN core.legal_entity le ON le.party_id = p.id AND le.tenant_id = p.tenant_id
@@ -209,6 +223,8 @@ export class PostgresReadinessFacts implements ReadinessFactSource {
           name: c.name,
           country: c.country,
           hasAddress: c.has_address,
+          hasGstin: c.has_gstin,
+          hasBankAccount: c.has_bank,
         })),
         timeZone: tenant?.time_zone ?? DEFAULT_TIME_ZONE,
         activeStaff: people?.n ?? 0,
@@ -232,6 +248,8 @@ export class PostgresReadinessFacts implements ReadinessFactSource {
           name: s.name ?? s.key,
           processKey: s.process_key,
           processPublished: s.process_key !== null && s.process_published,
+          sac: s.sac,
+          taxRate: s.tax_rate,
         })),
         requestRouting: tenant?.client_request_routing ?? "none",
       };

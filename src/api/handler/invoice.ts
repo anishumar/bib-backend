@@ -507,7 +507,11 @@ const issueRoute = createRoute({
     "the issue date is refused (DUE_BEFORE_ISSUE, 409: change it with PUT /due-date); one with no " +
     "due date takes the firm's payment terms when it has set them (0327), else stays without one. " +
     "A draft numbered before 0322 keeps its number and is refused when that number would go out of " +
-    "order (INVOICE_NUMBER_OUT_OF_ORDER, 409, B51): cancel it and raise it again.",
+    "order (INVOICE_NUMBER_OUT_OF_ORDER, 409, B51): cancel it and raise it again. Q056: its tax is decided " +
+    "for the issue date and frozen (CGST + SGST, UTGST, IGST, or zero-rated under the company's LUT); an " +
+    "Indian GST invoice is refused while its place of supply cannot be read (PLACE_OF_SUPPLY_UNKNOWN, 409: " +
+    "PUT /place-of-supply) or a line has no SAC (INVOICE_LINE_NEEDS_SAC, 409: PUT /lines/{id}/sac, or the " +
+    "catalogue service's SAC).",
   request: { params: z.object({ invoiceId: z.string().uuid() }), query: CallerDayQuery },
   responses: {
     200: { description: "Issued", content: { "application/json": { schema: InvoiceSchema } } },
@@ -516,8 +520,8 @@ const issueRoute = createRoute({
     404: errorResponse("No such invoice at this firm"),
     400: errorResponse("asOf is not today anywhere"),
     409: errorResponse(
-      "Not a draft, it has no lines, its due date is before today's issue date, or its number " +
-        "(drawn before 0322) would go out of order",
+      "Not a draft, it has no lines, its due date is before today's issue date, its number " +
+        "(drawn before 0322) would go out of order, or (a GST invoice) no place of supply or a line without a SAC",
     ),
   },
 });

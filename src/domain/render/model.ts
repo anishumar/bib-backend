@@ -309,6 +309,20 @@ export interface ProposalDocument {
   readonly letterhead?: readonly string[] | undefined;
 }
 
+/** The block a GST invoice draws after its totals (Q056: drawn after the total in words). */
+export interface TaxInvoicePrint {
+  /** "Tax amount in words": Indian Rupees One Thousand Eight Hundred Only. */
+  readonly taxInWords: string | null;
+  /** The SAC-wise tax summary. */
+  readonly summary: LineTable;
+  /** Reverse charge, the LUT declaration, the tax in INR on a foreign invoice. */
+  readonly declarations: readonly string[];
+  /** Where to pay, one line each; empty draws no block. */
+  readonly bank: readonly string[];
+  /** "For 10x Global Advisory Private Limited". */
+  readonly signatoryFor: string;
+}
+
 export interface RenderableDocument {
   /** "Engagement Letter", "Tax Invoice" — what the page is headed. */
   readonly documentTitle: string;
@@ -328,6 +342,14 @@ export interface RenderableDocument {
    * every document drawn before it, whose bytes therefore do not move.
    */
   readonly amountInWords?: string | undefined;
+  /**
+   * What a GST tax invoice prints after its total in words (Q056, S5): the tax
+   * in words, the SAC-wise tax summary, the reverse-charge and LUT
+   * declarations, the bank details and the signatory line. Absent on every
+   * other document, and on an invoice from before 0370 or a plain one, whose
+   * bytes therefore do not move.
+   */
+  readonly taxInvoice?: TaxInvoicePrint | undefined;
   /**
    * The agreement's TERMS — an engagement letter's pinned clauses.
    *

@@ -23,11 +23,11 @@ function qaFirm(): ReadinessFacts {
     ],
     reportingLinePolicies: ["manager review"],
     staffWithoutManager: [{ userId: SHRESTHA, name: "Shrestha Pandit" }],
-    services: [{ key: "monthly-accounting", name: "Monthly Accounting & Bookkeeping", processKey: "monthly_accounting", processPublished: true }],
+    services: [{ key: "monthly-accounting", name: "Monthly Accounting & Bookkeeping", processKey: "monthly_accounting", processPublished: true, sac: "998222", taxRate: "18" }],
     requestRouting: "key_manager",
     // The five lines added on 2026-10-03, set done here so this fixture
     // stays about the eight the extract measured.
-    companies: [{ partyId: FIRM, name: "QA firm", country: "IN", hasAddress: true }],
+    companies: [{ partyId: FIRM, name: "QA firm", country: "IN", hasAddress: true, hasGstin: true, hasBankAccount: true }],
     timeZone: "Asia/Kolkata",
     activeStaff: 3,
     publishedTerms: 1,
@@ -41,7 +41,7 @@ const byKey = (lines: readonly ReadinessLine[], key: ReadinessLine["key"]): Read
 };
 
 describe("the lines", () => {
-  it("are the thirteen, in the order a firm sets itself up", () => {
+  it("are the fourteen, in the order a firm sets itself up", () => {
     expect(readinessLines(qaFirm()).map((l) => l.key)).toEqual([...READINESS_KEYS]);
     expect(READINESS_KEYS).toEqual([
       "company_details",
@@ -49,6 +49,7 @@ describe("the lines", () => {
       "staff",
       "deadlines",
       "services",
+      "tax_invoice",
       "standard_terms",
       "reporting_lines",
       "request_routing",
@@ -60,6 +61,39 @@ describe("the lines", () => {
     ]);
   });
 
+  it("ask an Indian company for its GSTIN and bank account, and each service for its SAC and rate (Q056)", () => {
+    const f = qaFirm();
+    const lines = readinessLines({
+      ...f,
+      companies: [
+        { partyId: FIRM, name: "QA firm", country: "IN", hasAddress: true, hasGstin: false, hasBankAccount: false },
+        { partyId: "00000000-0000-4000-8000-0000000000ae", name: "QA Dubai", country: "AE", hasAddress: true, hasGstin: false, hasBankAccount: false },
+      ],
+      services: [
+        { key: "books", name: "Books", processKey: "b", processPublished: true, sac: null, taxRate: "18" },
+        { key: "gst", name: "GST", processKey: "g", processPublished: true, sac: "998231", taxRate: null },
+        { key: "tds", name: "TDS", processKey: "t", processPublished: true, sac: "998231", taxRate: "18" },
+      ],
+    });
+    expect(byKey(lines, "tax_invoice")).toMatchObject({
+      state: "to_do",
+      gaps: [
+        { id: FIRM, ref: null, name: "QA firm", missing: ["gstin", "bank_account"] },
+        { id: null, ref: "books", name: "Books", missing: ["sac"] },
+        { id: null, ref: "gst", name: "GST", missing: ["tax_rate"] },
+      ],
+    });
+  });
+
+  it("have nothing to check for tax invoices at a firm with no Indian company", () => {
+    const f = qaFirm();
+    const lines = readinessLines({
+      ...f,
+      companies: [{ partyId: FIRM, name: "QA Dubai", country: "AE", hasAddress: true, hasGstin: false, hasBankAccount: false }],
+    });
+    expect(byKey(lines, "tax_invoice").state).toBe("nothing_to_check");
+  });
+
   it("say nothing is done on an empty firm, and which lines have nothing to check yet (CA#15)", () => {
     // The audit's firm on its first morning read "4 of 8 done": reporting
     // lines, processes, account team and portal logins were Done because
@@ -67,6 +101,7 @@ describe("the lines", () => {
     const lines = readinessLines({ ...emptyFacts(), day: "2026-10-03" });
     expect(lines.filter((l) => l.done)).toEqual([]);
     expect(lines.filter((l) => l.state === "nothing_to_check").map((l) => l.key)).toEqual([
+      "tax_invoice",
       "reporting_lines",
       "processes",
       "account_team",
@@ -104,7 +139,9 @@ describe("the lines", () => {
     expect(byKey(lines, "request_routing").done).toBe(true);
     expect(byKey(lines, "processes").done).toBe(true);
     expect(byKey(lines, "portal_contacts").done).toBe(true);
-    expect(lines.filter((l) => l.done)).toHaveLength(3 + 5);
+    // Q056: its Indian company has a GSTIN and a bank account, its service a SAC and a rate.
+    expect(byKey(lines, "tax_invoice").done).toBe(true);
+    expect(lines.filter((l) => l.done)).toHaveLength(3 + 5 + 1);
   });
 });
 
@@ -138,9 +175,9 @@ describe("each line turns done when its gap is fixed", () => {
     const f = {
       ...qaFirm(),
       services: [
-        { key: "books", name: "Books", processKey: null, processPublished: false },
-        { key: "gst", name: "GST", processKey: "gst_filing", processPublished: false },
-        { key: "tds", name: "TDS", processKey: "tds", processPublished: true },
+        { key: "books", name: "Books", processKey: null, processPublished: false, sac: "998222", taxRate: "18" },
+        { key: "gst", name: "GST", processKey: "gst_filing", processPublished: false, sac: "998222", taxRate: "18" },
+        { key: "tds", name: "TDS", processKey: "tds", processPublished: true, sac: "998222", taxRate: "18" },
       ],
     };
     expect(byKey(readinessLines(f), "processes").gaps).toEqual([
@@ -196,11 +233,11 @@ describe("the first-week lines (audit 2026-10-03)", () => {
     // Two companies in two zones settle nothing: the firm picks.
     const two = {
       ...utc,
-      companies: [...utc.companies, { partyId: DUBAI, name: "QA Dubai", country: "AE", hasAddress: true }],
+      companies: [...utc.companies, { partyId: DUBAI, name: "QA Dubai", country: "AE", hasAddress: true, hasGstin: true, hasBankAccount: true }],
     };
     expect(byKey(readinessLines(two), "time_zone").gaps[0]?.ref).toBeNull();
     // A country with several zones settles nothing either.
-    const us = { ...utc, companies: [{ partyId: FIRM, name: "QA US", country: "US", hasAddress: true }] };
+    const us = { ...utc, companies: [{ partyId: FIRM, name: "QA US", country: "US", hasAddress: true, hasGstin: true, hasBankAccount: true }] };
     expect(byKey(readinessLines(us), "time_zone").gaps[0]?.ref).toBeNull();
     expect(byKey(readinessLines(qaFirm()), "time_zone").state).toBe("done");
   });
@@ -209,8 +246,8 @@ describe("the first-week lines (audit 2026-10-03)", () => {
     const f = {
       ...qaFirm(),
       companies: [
-        { partyId: FIRM, name: "QA firm", country: null, hasAddress: false },
-        { partyId: DUBAI, name: "QA Dubai", country: "AE", hasAddress: false },
+        { partyId: FIRM, name: "QA firm", country: null, hasAddress: false, hasGstin: true, hasBankAccount: true },
+        { partyId: DUBAI, name: "QA Dubai", country: "AE", hasAddress: false, hasGstin: true, hasBankAccount: true },
       ],
     };
     expect(byKey(readinessLines(f), "company_details").gaps).toEqual([
@@ -247,6 +284,6 @@ describe("the service", () => {
     const r = await service.readiness("00000000-0000-4000-8000-000000000001");
     expect(r.asOf).toBe("2026-09-28");
     expect(facts.askedOn).toEqual(["2026-09-28"]);
-    expect(r.lines).toHaveLength(13);
+    expect(r.lines).toHaveLength(14);
   });
 });
