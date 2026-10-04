@@ -29,7 +29,7 @@ import type { EventSink } from "../ledger/ports";
 import { dayInZone } from "../../domain/scheduler/zone";
 import { yearStartOfCompany, zoneOfCompany } from "../../domain/calendar/model";
 import { monthsPerPeriod, periodsFrom, recurrenceOfService } from "../../domain/scheduler/model";
-import { billingDues, serviceWindowOf } from "../../domain/billing/model";
+import { billingDues, endsBeforeGoLive, serviceWindowOf } from "../../domain/billing/model";
 import { billingManagerFor, type ManagerCache } from "./manager";
 import type {
   AutoBillingFirms,
@@ -103,6 +103,9 @@ export class BillingService {
     const firmToday = dayInZone(now, firmZone);
     const firmYearStart = await this.deps.fiscalYears.fiscalYearStartMonth(tenantId);
     const calendars = await this.deps.timeZones.companyCalendars(tenantId);
+    // The firm's go-live (Q027): a period that ended before it was billed by
+    // hand, if at all, and is never written here.
+    const goLive = await this.deps.firms.billingStartsOn(tenantId);
     const managers: ManagerCache = new Map();
 
     const planned: NewBillingDue[] = [];
@@ -139,7 +142,7 @@ export class BillingService {
         today,
         windows: subject.engagements.map(serviceWindowOf),
       })
-        .filter((d) => !billed.has(d.period.start))
+        .filter((d) => !billed.has(d.period.start) && !endsBeforeGoLive(d.period.end, goLive))
         .slice(0, MAX_PERIODS_PER_SUBJECT);
       if (dues.length === 0) continue;
 

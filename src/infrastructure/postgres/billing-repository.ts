@@ -272,4 +272,13 @@ export class PostgresAutoBillingFirms implements AutoBillingFirms {
     `;
     return rows.map((r) => r.id);
   }
+
+  async billingStartsOn(tenantId: string): Promise<string | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ since: string | null }[]>`
+        SELECT auto_billing_since::text AS since FROM tenancy.tenant WHERE id = ${tenantId}
+      `;
+      return row?.since ?? null;
+    });
+  }
 }

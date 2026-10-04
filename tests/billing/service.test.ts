@@ -55,7 +55,7 @@ function subject(over: Partial<BillingSubject> = {}): Omit<BillingSubject, "dueP
   };
 }
 
-function world(opts: { now?: string; zone?: string; fiscalYear?: number | null; firms?: string[] } = {}) {
+function world(opts: { now?: string; zone?: string; fiscalYear?: number | null; firms?: string[]; goLive?: string } = {}) {
   const dues = new FakeBillingDueWriter();
   const managers = new FakeBillingManagerFacts();
   managers.spocs.set(`${CLIENT}|FRC`, [{ userId: SPOC, managerUserId: MANAGER, managerName: "Meera" }]);
@@ -65,7 +65,11 @@ function world(opts: { now?: string; zone?: string; fiscalYear?: number | null; 
   const service = new BillingService({
     dues,
     managers,
-    firms: new FakeAutoBillingFirms(opts.firms ?? [FIRM]),
+    firms: (() => {
+      const f = new FakeAutoBillingFirms(opts.firms ?? [FIRM]);
+      if (opts.goLive !== undefined) f.startsOn.set(FIRM, opts.goLive);
+      return f;
+    })(),
     fiscalYears: new FakeFiscalYearSource(opts.fiscalYear === undefined ? 4 : opts.fiscalYear),
     timeZones,
     ids: new FakeIds(),
@@ -136,6 +140,22 @@ describe("the billing sweep", () => {
     w.dues.add(FIRM, subject({ engagements: [engagement({ effectiveFrom: "2024-04-01" })] }));
     await w.service.sweep();
     expect(w.dues.dues.map((d) => d.periodLabel)).toEqual(["Oct 2026"]);
+  });
+
+  it("writes no bill for a period that ended before the firm's go-live month (Q027)", async () => {
+    const w = world({ goLive: "2026-11-01" });
+    w.dues.add(FIRM, subject());
+    const [report] = await w.service.sweep();
+    // October ended before November: billed by hand, if at all. November is billed.
+    expect(report).toMatchObject({ created: 1 });
+    expect(w.dues.dues.map((d) => d.periodLabel)).toEqual(["Nov 2026"]);
+  });
+
+  it("bills a quarter that runs across the go-live day", async () => {
+    const w = world({ goLive: "2026-11-01", now: "2027-01-05T06:00:00.000Z" });
+    w.dues.add(FIRM, subject({ billingFrequency: "quarterly", billingFrom: "2026-10-01", firstInvoiceOn: "2027-01-01" }));
+    await w.service.sweep();
+    expect(w.dues.dues.map((d) => [d.periodStart, d.periodEnd])).toEqual([["2026-10-01", "2026-12-31"]]);
   });
 
   it("cuts today on the firm's own calendar", async () => {

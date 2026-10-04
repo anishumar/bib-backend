@@ -35,7 +35,6 @@ const FLAG_CAUSES = [
   "auto_billing_off",
   "no_fiscal_year",
   "not_written",
-  "before_auto_billing",
   "no_price",
 ] as const;
 const NOTE_CODES = [
@@ -43,6 +42,7 @@ const NOTE_CODES = [
   "bill_due_on",
   "billing_run_next",
   "before_billing_start",
+  "before_auto_billing",
   "billed_by_hand",
   "not_served",
   "covered_by_advance",
@@ -79,8 +79,9 @@ const FlagSchema = z
         description:
           "Why there is no bill: `no_schedule` (billing not set up for the service), `auto_billing_off` " +
           "(the firm's switch), `no_fiscal_year` (a quarter or year cannot be cut), `not_written` (set up " +
-          "and due, yet nothing was written), `before_auto_billing` (one-time work finished before " +
-          "automatic billing was switched on). On `not_raised`: `no_price` when the letter fixed none.",
+          "and due, yet nothing was written). On `not_raised`: `no_price` when the letter fixed none. " +
+          "Work that ended before the month automatic billing starts from is a NOTE " +
+          "(`before_auto_billing`, Q027), never a flag.",
       }),
     days: z.number().int().openapi({
       description: "How old the problem is, in days, counted from `since`.",

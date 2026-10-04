@@ -29,7 +29,7 @@
 // still open (Ashish, 1 Oct 2026: the work on a retainer is not complete
 // before the invoice is raised), a bill whose date has not come, and a period
 // before the client's billing began (billed the old way).
-import { addMonthsClamped, billingDues, serviceWindowOf } from "../../domain/billing/model";
+import { addMonthsClamped, billingDues, endsBeforeGoLive, serviceWindowOf } from "../../domain/billing/model";
 import { yearStartOfCompany } from "../../domain/calendar/model";
 import type { CompanyCalendars } from "../../domain/calendar/model";
 import { daysBetween } from "../../domain/obligation/model";
@@ -68,12 +68,16 @@ export type RowKind = "period" | "one_time" | "advance";
 
 export type FlagCode = "no_bill" | "no_final_bill" | "skipped" | "not_raised" | "not_issued" | "unpaid_overdue";
 export type FlagCause =
-  "no_schedule" | "auto_billing_off" | "no_fiscal_year" | "not_written" | "before_auto_billing" | "no_price";
+  "no_schedule" | "auto_billing_off" | "no_fiscal_year" | "not_written" | "no_price";
 export type NoteCode =
   | "raised_before_work_done"
   | "bill_due_on"
   | "billing_run_next"
   | "before_billing_start"
+  /** The period ended, or the one-time work finished, before the month the
+   *  firm's automatic billing starts from (Q027): history, billed by hand if
+   *  at all, never flagged as missed. `date` is that go-live day. */
+  | "before_auto_billing"
   | "billed_by_hand"
   | "not_served"
   | "covered_by_advance"
@@ -524,6 +528,8 @@ function finish(d: Draft, facts: WbFacts, ctx: Ctx): WorkBillingRow {
         if (over) flag("no_bill", "no_schedule", p.end);
       } else if (p.start < s.billingFrom) {
         note("before_billing_start", s.billingFrom);
+      } else if (endsBeforeGoLive(p.end, facts.autoBillingSince)) {
+        note("before_auto_billing", facts.autoBillingSince);
       } else if (d.expected === "not_served") {
         note("not_served");
       } else if (!facts.autoBilling) {
@@ -549,8 +555,8 @@ function finish(d: Draft, facts: WbFacts, ctx: Ctx): WorkBillingRow {
         note("billed_by_hand", s.handInvoices.last?.issuedOn ?? null, s.handInvoices.last?.number ?? null);
       } else if (!facts.autoBilling) {
         flag("no_final_bill", "auto_billing_off", workDoneOn);
-      } else if (facts.autoBillingSince !== null && workDoneOn < facts.autoBillingSince) {
-        flag("no_final_bill", "before_auto_billing", workDoneOn);
+      } else if (endsBeforeGoLive(workDoneOn, facts.autoBillingSince)) {
+        note("before_auto_billing", facts.autoBillingSince);
       } else if (daysBetween(workDoneOn, today) <= 1) {
         note("billing_run_next", workDoneOn);
       } else {

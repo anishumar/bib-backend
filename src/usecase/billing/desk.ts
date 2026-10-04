@@ -25,7 +25,7 @@ import { dayInZone } from "../../domain/scheduler/zone";
 import { yearStartOfCompany, zoneOfCompany } from "../../domain/calendar/model";
 import { periodsFrom, recurrenceOfService } from "../../domain/scheduler/model";
 import { isCalendarDay } from "../../domain/engagement/model";
-import { scheduleFor, scheduleNotice } from "../../domain/billing/model";
+import { goLiveDay, goLiveMonthProblem, scheduleFor, scheduleNotice } from "../../domain/billing/model";
 import { compareAmounts, isAmount, isExchangeRate } from "../../domain/money/model";
 import {
   advancePolicyProblem,
@@ -91,6 +91,9 @@ export interface DeskDeps {
 /** The firm's billing settings, as one screen shows them. */
 export interface BillingSettings {
   readonly autoBilling: boolean;
+  /** The day automatic billing starts from (Q027), the first of the go-live
+   *  month; null when it was never switched on through the app. */
+  readonly autoBillingFrom: string | null;
   readonly advancePolicy: AdvancePolicy;
   readonly taxDefaults: readonly { readonly entityPartyId: string; readonly taxPercent: string }[];
   /** The firm's own payment terms in days (0327); null: none, never a guess. */
@@ -779,13 +782,14 @@ export class BillingDeskService {
   }
 
   async settings(tenantId: string): Promise<BillingSettings> {
-    const [autoBilling, advancePolicy, taxDefaults, invoiceDueDays] = await Promise.all([
+    const [autoBilling, since, advancePolicy, taxDefaults, invoiceDueDays] = await Promise.all([
       this.deps.setting.isOn(tenantId),
+      this.deps.setting.since(tenantId),
       this.deps.policy.policyFor(tenantId),
       this.deps.taxDefaults.list(tenantId),
       this.deps.setting.dueInDays(tenantId),
     ]);
-    return { autoBilling, advancePolicy, taxDefaults, invoiceDueDays };
+    return { autoBilling, autoBillingFrom: since, advancePolicy, taxDefaults, invoiceDueDays };
   }
 
   /**
@@ -859,19 +863,56 @@ export class BillingDeskService {
     });
   }
 
-  async setAutoBilling(tenantId: string, on: boolean, actor: Actor): Promise<boolean> {
+  /**
+   * The firm's switch, and the month it starts from (Q027).
+   *
+   * Turning it ON takes the go-live month (`YYYY-MM`, the firm's current month
+   * when absent): nothing that ended or finished before its first day is billed
+   * automatically, flagged as missed or put under To raise, because the firm
+   * billed it by hand. While it is on, `fromMonth` alone moves that month.
+   * Turning it off keeps the day, and turning it on again asks again.
+   */
+  async setAutoBilling(tenantId: string, on: boolean, actor: Actor, fromMonth?: string): Promise<boolean> {
     const from = await this.deps.setting.isOn(tenantId);
-    if (from === on) return on;
-    // The day it goes on (0321): final bills are written for work finished from it.
-    await this.deps.setting.set(tenantId, on, await this.today(tenantId));
+    const today = await this.today(tenantId);
+    if (fromMonth !== undefined) {
+      const problem = goLiveMonthProblem(fromMonth, today);
+      if (problem !== null) throw new InvalidBillingInput(problem);
+    }
+    if (from === on) {
+      if (on && fromMonth !== undefined) await this.setAutoBillingFrom(tenantId, fromMonth, actor);
+      return on;
+    }
+    const since = on ? goLiveDay(fromMonth ?? today.slice(0, 7)) : today;
+    await this.deps.setting.set(tenantId, on, since);
     await this.deps.events.recordEvent({
       tenantId,
       verb: "tenant.auto_billing_set",
       objectId: tenantId,
       actor,
-      payload: { from, to: on },
+      payload: on ? { from, to: on, startsOn: since } : { from, to: on },
     });
     return on;
+  }
+
+  /** Move the go-live month while automatic billing is on (Q027). */
+  async setAutoBillingFrom(tenantId: string, month: string, actor: Actor): Promise<void> {
+    const problem = goLiveMonthProblem(month, await this.today(tenantId));
+    if (problem !== null) throw new InvalidBillingInput(problem);
+    if (!(await this.deps.setting.isOn(tenantId))) {
+      throw new InvalidBillingInput("Turn automatic billing on first: it asks for the month it starts from.");
+    }
+    const from = await this.deps.setting.since(tenantId);
+    const to = goLiveDay(month);
+    if (from === to) return;
+    await this.deps.setting.setSince(tenantId, to);
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "tenant.auto_billing_from_set",
+      objectId: tenantId,
+      actor,
+      payload: { from, to },
+    });
   }
 
   // ── Helpers ──────────────────────────────────────────────────────────────

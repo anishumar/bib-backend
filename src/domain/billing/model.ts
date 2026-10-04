@@ -71,6 +71,40 @@ export function addMonthsClamped(date: string, months: number): string {
   return iso(y, m, Math.min(day, daysInMonth(y, m)));
 }
 
+// ── The month automatic billing starts from (Q027) ─────────────────────────
+
+/**
+ * Why a go-live month cannot be used, or null. `YYYY-MM`, not before 2000 and
+ * at most twelve months after the firm's current month: a firm going live
+ * next quarter may say so now, a year beyond that is a typo.
+ */
+export function goLiveMonthProblem(month: string, today: string): string | null {
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+    return "Give the month automatic billing starts from as YYYY-MM, e.g. 2026-11.";
+  }
+  const index = (m: string): number => Number(m.slice(0, 4)) * 12 + Number(m.slice(5, 7)) - 1;
+  if (index(month) < index("2000-01")) return "The month automatic billing starts from cannot be before 2000.";
+  if (index(month) > index(today.slice(0, 7)) + 12) {
+    return "The month automatic billing starts from can be at most twelve months ahead.";
+  }
+  return null;
+}
+
+/** The first day of a `YYYY-MM` month: the floor the firm's bills start from. */
+export function goLiveDay(month: string): string {
+  return `${month}-01`;
+}
+
+/**
+ * A period that ENDS before the firm's go-live day is history (Q027): no bill,
+ * no "To raise" row and no missed-bill flag. A period running across it is
+ * billed. No go-live day recorded (never switched on through the app): nothing
+ * is history.
+ */
+export function endsBeforeGoLive(periodEnd: string, goLive: string | null): boolean {
+  return goLive !== null && periodEnd < goLive;
+}
+
 // ── The schedule an engagement starts with (0319) ─────────────────────────
 
 /**

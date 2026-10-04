@@ -899,6 +899,21 @@ export class PostgresAutoBillingSetting implements AutoBillingSetting {
     });
   }
 
+  async since(tenantId: string): Promise<string | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ since: string | null }[]>`
+        SELECT auto_billing_since::text AS since FROM tenancy.tenant WHERE id = ${tenantId}
+      `;
+      return row?.since ?? null;
+    });
+  }
+
+  async setSince(tenantId: string, since: string): Promise<void> {
+    await withTenant(this.app, tenantId, async (db) => {
+      await db`UPDATE tenancy.tenant SET auto_billing_since = ${since}::date WHERE id = ${tenantId}`;
+    });
+  }
+
   async dueInDays(tenantId: string): Promise<number | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<{ invoice_due_days: number | null }[]>`

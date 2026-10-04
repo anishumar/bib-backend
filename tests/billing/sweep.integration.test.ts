@@ -387,6 +387,16 @@ describe("the billing sweep on a real database (0318)", () => {
     await owner`UPDATE tenancy.tenant SET auto_billing = true WHERE id = ${tenantId}`;
     expect(await firms.firmsWithAutoBilling()).toContain(tenantId);
   });
+
+  it("reads and moves the go-live day inside the firm (Q027)", async () => {
+    const firms = new PostgresAutoBillingFirms(app);
+    const setting = new PostgresAutoBillingSetting(app);
+    const before = await setting.since(tenantId);
+    await setting.setSince(tenantId, "2026-11-01");
+    expect(await firms.billingStartsOn(tenantId)).toBe("2026-11-01");
+    expect(await setting.since(tenantId)).toBe("2026-11-01");
+    await owner`UPDATE tenancy.tenant SET auto_billing_since = ${before} WHERE id = ${tenantId}`;
+  });
 });
 
 describe("the billing desk on a real database (0318)", () => {
