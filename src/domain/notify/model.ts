@@ -62,6 +62,7 @@ export const NOTIFY_CATEGORIES = {
   check_requested:   { label: "Work is sent to you to check",          group: "work",      mandatoryInApp: false, defaults: ON },
   escalation:        { label: "Work is escalated to you",              group: "work",      mandatoryInApp: true,  defaults: ON },
   lead_assigned:     { label: "A lead is given to you",                group: "clients",   mandatoryInApp: false, defaults: ON },
+  lead_new:          { label: "A new lead comes in (admins)",          group: "clients",   mandatoryInApp: false, defaults: ON },
   client_request:    { label: "A client sends a request or a reply",   group: "clients",   mandatoryInApp: false, defaults: ON },
   client_answered:   { label: "A client answers what you asked for",   group: "clients",   mandatoryInApp: false, defaults: ON },
   proposal_decided:  { label: "A client accepts or declines a proposal", group: "clients", mandatoryInApp: false, defaults: ON },
@@ -281,7 +282,15 @@ export function renderNotification(n: RenderInput, seesFees: boolean): Rendered 
     }
 
     case "lead_assigned":
+      // Placed by the firm's rule at capture (Q066): the person who typed the
+      // lead did not choose you, the rotation did.
+      if (p["byRule"] === true) return { title: "The firm's rule gave you a lead", detail: about };
       return { title: by === null ? "A lead is on your desk" : `${by} gave you a lead`, detail: about };
+
+    case "lead_new": {
+      const who = by === null ? "A new lead came in" : `${by} added a lead`;
+      return { title: p["unassigned"] === true ? `${who}, not assigned yet` : who, detail: about };
+    }
 
     case "client_request":
       return {

@@ -59,6 +59,10 @@ export interface Announce {
   readonly sourceId: string;
   readonly payload: Readonly<Record<string, unknown>>;
   readonly to: readonly Audience[];
+  /** People this announcement skips because another one in the same plan
+   *  already tells them (a lead's owner hears "a lead is given to you", not
+   *  also "a new lead comes in"). */
+  readonly except?: readonly string[];
 }
 
 export interface Resolve {
@@ -103,6 +107,7 @@ export const FANOUT_VERBS = [
   "obligation.missed",
   "obligation.filed",
   "obligation.resolved",
+  "lead.captured",
   "lead.owner_assigned",
   "lead.stage_changed",
   "client_request.raised",
@@ -301,6 +306,34 @@ export function planFor(e: LedgerFact): Plan {
       };
 
     // ── clients ───────────────────────────────────────────────────────────
+    // A NEW LEAD (Q066, Sid 2026-10-04: "to the one selected while mentioning
+    // in the input of new leads and admin to have notification of all"). The
+    // owner named at capture, or chosen by the firm's rule, hears it is theirs;
+    // every admin hears a lead came in. The creator is dropped as always, so an
+    // admin who types a lead in is not told of it, and the owner is not told
+    // twice. A merge into an open lead is not a new lead and writes no event
+    // read here.
+    case "lead.captured": {
+      const owner = str(p, "ownerUserId");
+      const byRule = owner !== null && str(p, "ownerAssignedBy") !== "requested";
+      return {
+        resolve: [],
+        announce: [
+          ...(owner === null
+            ? []
+            : [{ category: "lead_assigned" as const, sourceType: "lead", sourceId: e.objectId, payload: byRule ? { byRule: true } : {}, to: [user(owner)] }]),
+          {
+            category: "lead_new",
+            sourceType: "lead",
+            sourceId: e.objectId,
+            payload: owner === null ? { unassigned: true } : {},
+            to: [{ kind: "permission", permission: "tenant:admin" }],
+            except: owner === null ? [] : [owner],
+          },
+        ],
+      };
+    }
+
     case "lead.owner_assigned": {
       const owner = str(p, "ownerUserId");
       return {
@@ -314,7 +347,7 @@ export function planFor(e: LedgerFact): Plan {
 
     case "lead.stage_changed":
       return p["closed"] === true
-        ? { announce: [], resolve: [{ sourceType: "lead", sourceId: e.objectId, categories: ["lead_assigned"] }] }
+        ? { announce: [], resolve: [{ sourceType: "lead", sourceId: e.objectId, categories: ["lead_assigned", "lead_new"] }] }
         : NOTHING;
 
     // A request the routing rule placed is announced by its `assigned` event,

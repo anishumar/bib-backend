@@ -257,6 +257,40 @@ describe("the outbox", () => {
     eligible = [];
   });
 
+  it("a new lead: its owner hears once, every OTHER admin hears, the creator nobody (Q066)", async () => {
+    // A second admin for this case only: switched off again at the end so the
+    // advance-reminder counts below still see one admin.
+    const elan = await user("elan");
+    await member(tenantA, elan, "partner");
+    const leadA = randomUUID();
+    const leadB = randomUUID();
+    const leadC = randomUUID();
+
+    // Asha (admin) types a lead for Bilal: Bilal hears it is his, Elan hears a
+    // lead came in, Asha hears nothing of her own act.
+    const one = await event(tenantA, "lead.captured", "lead", leadA, asha, { ownerUserId: bilal, ownerAssignedBy: "requested" });
+    // Bilal types a lead for Elan (an admin): Elan hears it is hers, ONCE; Asha
+    // hears a lead came in.
+    const two = await event(tenantA, "lead.captured", "lead", leadB, bilal, { ownerUserId: elan, ownerAssignedBy: "requested" });
+    // Bilal leaves one unassigned: both admins hear.
+    const three = await event(tenantA, "lead.captured", "lead", leadC, bilal, { ownerUserId: null, ownerAssignedBy: null });
+    await fanout.runForTenant(tenantA);
+    const all = await rows(tenantA);
+    const told = (e: string) =>
+      all.filter((r) => r.event_id === e).map((r) => `${r.recipient_user_id === asha ? "asha" : r.recipient_user_id === bilal ? "bilal" : "elan"}:${r.category}`).sort();
+    expect(told(one)).toEqual(["bilal:lead_assigned", "elan:lead_new"]);
+    expect(told(two)).toEqual(["asha:lead_new", "elan:lead_assigned"]);
+    expect(told(three)).toEqual(["asha:lead_new", "elan:lead_new"]);
+    expect(await rows(tenantB)).toEqual([]);
+
+    // Closing the lead resolves both kinds.
+    await event(tenantA, "lead.stage_changed", "lead", leadC, bilal, { closed: true });
+    await fanout.runForTenant(tenantA);
+    expect((await rows(tenantA)).filter((r) => r.source_id === leadC).every((r) => r.resolved_at !== null)).toBe(true);
+
+    await owner`UPDATE tenancy.membership SET is_active = false WHERE tenant_id = ${tenantA} AND user_id = ${elan}`;
+  });
+
   it("reads a relationship from the firm's own tables", async () => {
     expect(await directory.workItemAssignee(tenantA, workItem)).toBe(asha);
     expect(await directory.workItemAssignee(tenantB, workItem)).toBeNull();
