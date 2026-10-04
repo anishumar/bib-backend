@@ -4951,3 +4951,57 @@ A lead has no timeline table: its history is the ledger.
   "for this tenant". The shipped rule pack's notes no longer speak as one firm; the pack KEY
   (`in-firm-sheet@2026.08`) is unchanged because it is part of the seeding conflict key, and the
   frontend prints it as words.
+
+## Quick wins of 2026-10-05: Q066, Q027, Q059, Q064, Q076 (0350)
+
+Branch `feat/quick-wins-1005`; handover `bib/prompts/build-2026-10-05/S1/`.
+
+- **Q066, a new lead tells its owner and every admin.** The outbox reads `lead.captured`: the
+  owner hears `lead_assigned` ("The firm's rule gave you a lead" when the rotation chose), every
+  holder of `tenant:admin` hears the new category `lead_new`, except the creator (nobody hears
+  of their own act) and the owner (an `Announce` may name people it skips: `except`). Closing a
+  lead resolves both. The API still runs the strategy only when no owner is SENT; the form makes
+  the choice explicit.
+- **Q027, the go-live month.** `tenancy.tenant.auto_billing_since` (0321) is now the first day of
+  the month the firm chose when switching on (`PUT /billing/settings {autoBilling, autoBillingFrom:
+  "YYYY-MM"}`, absent = this month; alone it moves the month while on, refused while off; at most
+  twelve months ahead). It is the floor for everything automatic: `endsBeforeGoLive` keeps the
+  sweep from writing a bill for a period that ENDS before it (a period across it is billed),
+  final bills read it as before, and Work vs Billing shows the NOTE `before_auto_billing` (no
+  longer a flag) for work before it. Ledger `tenant.auto_billing_set` carries `startsOn`;
+  `tenant.auto_billing_from_set` records a move. Advances are untouched.
+- **Q059, client emails from the client's person.** `PostgresClientSenders`: a proposal about ONE
+  Dept is from that Dept's SPOC, anything else (several Depts, portal letters) from the client's
+  Key Manager; in force on the firm's day, active staff; a resend takes the first company the
+  contact sees that HAS a Key Manager. The letter's From name is "Priya Sharma, 10x Global",
+  Reply-To is Priya, and the From ADDRESS is hers only when her domain is in
+  `tenancy.tenant.send_from_domains` (0350, CHECKed lower-case domains, max 20; `GET/PUT
+  /tenancy/mail-senders`, `tenant:admin`, ledger `tenant.send_domains_set`). Otherwise the relay's
+  `BIB_MAIL_FROM`. Nobody in the seat: as before. Only `Letter.fromAddress` can change the
+  envelope address; staff letters, magic links and resets never set it. Invoices, letters and
+  reminders are not emailed to clients at all (DocuSign sends letters; the chaser has no channel).
+- **Q064, a group's contact and its sisters.** Access stays granted, one row and one event per
+  company. `PostgresPortalGroup.groupOf`: ownership (`parent_of`, `shareholder_of`) both ways, any
+  depth (one hop never reaches a sister), organizations only, never the firm's own, an archived
+  company or another tenant's, in force on the firm's day, depth 20. `grantGroupOf` grants the
+  rest through `grant` (same refusals), leaving companies already held. `POST /portal-invites
+  {alsoGroup}` grants before the letter goes; `POST /portal-access/memberships/{id}/group`;
+  `GET /portal-access/clients/{id}/group` returns the group and `contactsMissing` (contacts who
+  see another company of it, not this one): offered, never granted silently.
+- **Q076, a client company's registration is required.** `POST /parties/organizations` (the
+  Clients screen) is `PartyService.createClientCompany`: country and type required, year end
+  required outside India, India fixed at `03-31` (`yearEndProblem`/`yearEndFor`), all three rows
+  in one transaction. `createOrganization` (no registration) stays for a lead's prospect and an
+  import's group umbrella. Registering and correcting follow the same rule; `PATCH
+  /parties/{id}/legal-entity` takes `financialYearEnd`. A proposal or letter (draft, copy, from a
+  quote) or a line for an ORGANIZATION with no registration is refused, `COMPANY_NOT_REGISTERED`
+  (409), in `draftProposal`/`draftLetter`; a person is never asked. So a lead's prospect must be
+  registered before it is quoted. Import: abroad with no year end is a row error. Setup's
+  fourteenth line `client_details` names every client company the firm has QUOTED OR ENGAGED
+  (proposal, letter, letter line or engagement) missing `country`/`company_type`, or abroad
+  `year_end`. Nothing is backfilled.
+- Tests: `tests/notify/fanout*`, `tests/billing/{desk,service,work-vs-billing}.test.ts`,
+  `sweep.integration`, `tests/mail/model.test.ts`, `tests/clientmail/*` (incl.
+  `senders.integration`), `tests/portalaccess/service.test.ts`, `tests/portal/group.integration`,
+  `tests/party/*`, `tests/readiness/*`, proposal/engagement service tests. Walk:
+  `bib/demo-assets/tools/qw-walk.mjs` (38/38, Mailpit headers).
