@@ -17,7 +17,8 @@ import { zoneDayOf } from "./instant";
 import { insertDocumentBlocks, strikeDocumentBlocks } from "./block-repository";
 import { insertRecordedAcceptance, readRecordedAcceptance } from "./recorded-acceptance";
 import type { NewRecordedAcceptance } from "../../domain/acceptance/model";
-import type { Proposal, ProposalLine, ProposalStatus } from "../../domain/proposal/model";
+import type { Proposal, ProposalLine, ProposalStatus, ProposalTotals } from "../../domain/proposal/model";
+import type { CurrencyRate } from "../../domain/money/model";
 import { ProposalCitedByLetter } from "../../domain/proposal/errors";
 import { readServiceBody } from "../../domain/config/model";
 import { resolveTerms } from "../../domain/document/model";
@@ -69,6 +70,9 @@ interface ProposalRow {
   deleted_at: Date | null;
   deleted_by_user_id: string | null;
   copied_from_id: string | null;
+  /** The other currencies' rates (0344), as the column list's sub-select
+   *  builds them; amounts and rates are text in the JSON, never numbers. */
+  rates: CurrencyRate[] | null;
 }
 
 /**
@@ -84,8 +88,64 @@ const PROPOSAL_COLUMN_NAMES = [
   "view_count", "declined_reason", "background", "addressed_to_party_id", "prepared_by_user_id",
   "sent_pdf_version_id", "deleted_at", "deleted_by_user_id", "copied_from_id",
 ] as const;
-const PROPOSAL_COLUMNS = PROPOSAL_COLUMN_NAMES.join(", ");
-const PROPOSAL_COLUMNS_P = PROPOSAL_COLUMN_NAMES.map((c) => `p.${c}`).join(", ");
+/** A proposal's other currencies' rates (0344), as JSON with every figure as
+ *  TEXT: postgres.js parses JSON numbers into floats, which is how a rate of
+ *  22.7012345678 would come back changed. */
+const ratesOf = (proposal: string): string => `
+  (SELECT coalesce(json_agg(json_build_object(
+            'currency', r.currency, 'fxRate', r.fx_rate::text,
+            'fxRateDate', r.fx_rate_date::text, 'source', r.source) ORDER BY r.currency), '[]'::json)
+     FROM crm.proposal_fx_rate r WHERE r.proposal_id = ${proposal}.id) AS rates`;
+const PROPOSAL_COLUMNS = `${PROPOSAL_COLUMN_NAMES.join(", ")}, ${ratesOf("proposal")}`;
+const PROPOSAL_COLUMNS_P = `${PROPOSAL_COLUMN_NAMES.map((c) => `p.${c}`).join(", ")}, ${ratesOf("p")}`;
+
+/**
+ * A proposal's totals PER CURRENCY (0344), as JSON with text figures, one
+ * element per currency its live lines are in. The same arithmetic as
+ * `crm.proposal_totals` (0023), grouped by the line's currency as well: two
+ * currencies are never added together. `toCurrencyTotals` orders them and
+ * supplies the zero row for a proposal with no line.
+ */
+const currencyTotalsOf = (proposal: string): string => `
+  (SELECT coalesce(json_agg(json_build_object(
+            'currency', x.currency, 'gross', x.gross::text, 'discount', x.discount::text,
+            'net', x.net::text, 'lineCount', x.line_count, 'unpriced', x.unpriced)
+            ORDER BY x.currency), '[]'::json)
+     FROM (SELECT l.currency, count(*) AS line_count, sum(a.gross) AS gross,
+                  sum(a.gross - a.net) AS discount, sum(a.net) AS net,
+                  count(*) FILTER (WHERE a.gross IS NULL) AS unpriced
+             FROM crm.proposal_line_amount a
+             JOIN crm.proposal_line l ON l.id = a.id
+            WHERE a.proposal_id = ${proposal}.id
+            GROUP BY l.currency) x) AS currency_totals`;
+
+interface CurrencyTotalsJson {
+  currency: string;
+  gross: string | null;
+  discount: string | null;
+  net: string | null;
+  lineCount: number;
+  unpriced: number;
+}
+
+/**
+ * Per-currency totals in the order every screen and the PDF read them: the
+ * main currency first, then by code. A proposal with no live line has ONE row,
+ * its main currency at zero, which is what `totals` always said of it.
+ */
+function toCurrencyTotals(rows: readonly CurrencyTotalsJson[] | null, main: string): ProposalTotals[] {
+  const list = [...(rows ?? [])].sort((a, b) =>
+    a.currency === main ? -1 : b.currency === main ? 1 : a.currency.localeCompare(b.currency),
+  );
+  if (list.length === 0) return [toTotals(undefined, main)];
+  return list.map((r) => ({
+    gross: r.gross ?? "0",
+    discount: r.discount ?? "0",
+    net: r.net ?? "0",
+    currency: r.currency,
+    unpricedLineCount: Number(r.unpriced),
+  }));
+}
 
 interface LineRow {
   id: string;
@@ -142,6 +202,7 @@ function toProposal(r: ProposalRow): Proposal {
     currency: r.currency,
     fxRate: r.fx_rate,
     fxRateDate: toDay(r.fx_rate_date),
+    rates: r.rates ?? [],
     validUntil: r.valid_until === null ? null : toDay(r.valid_until),
     sentAt: r.sent_at?.toISOString() ?? null,
     decidedAt: r.decided_at?.toISOString() ?? null,
@@ -206,7 +267,7 @@ function toLine(r: LineRow): ProposalLine {
  * or the total is a lie; that is the whole reason the count is on this type
  * rather than somewhere a caller can forget to ask for.
  */
-function toTotals(r: TotalsRow | undefined, currency: string): ProposalRecord["totals"] {
+function toTotals(r: TotalsRow | undefined, currency: string): ProposalTotals {
   return {
     gross: r?.gross ?? "0",
     discount: r?.discount ?? "0",
@@ -436,40 +497,46 @@ export class PostgresProposalRepository implements ProposalRepository {
         ORDER BY l.position
       `;
 
-      const [totals] = await db<TotalsRow[]>`
-        SELECT line_count, gross, discount, net, unpriced_line_count
-        FROM crm.proposal_totals WHERE proposal_id = ${proposalId}
+      const [totals] = await db<{ currency_totals: CurrencyTotalsJson[] | null }[]>`
+        SELECT ${db.unsafe(currencyTotalsOf("p"))} FROM crm.proposal p WHERE p.id = ${proposalId}
       `;
 
       // THE MONEY PER FREQUENCY (T6.18, D8), added by the database from the same
       // per-line view the document total comes from. `sum` skips an unpriced
       // line's NULL, and the count beside it says so. Reading order: monthly
       // first, lines that state no frequency last.
+      //
+      // And per CURRENCY (0344): "USD 5,000 / month + AED 4,000 / month", never
+      // one figure across two. The main currency first, then by code.
       const byFrequency = await db<
         {
+          currency: string;
           frequency: BillingFrequency | null;
           net: string | null;
           line_count: string;
           unpriced_line_count: string;
         }[]
       >`
-        SELECT l.billing_frequency AS frequency,
+        SELECT l.currency,
+               l.billing_frequency AS frequency,
                sum(a.net)::text AS net,
                count(*) AS line_count,
                count(*) FILTER (WHERE l.unit_amount IS NULL) AS unpriced_line_count
         FROM crm.proposal_line l
         JOIN crm.proposal_line_amount a ON a.id = l.id
         WHERE l.proposal_id = ${proposalId} AND l.removed_at IS NULL
-        GROUP BY l.billing_frequency
-        ORDER BY coalesce(array_position(
+        GROUP BY l.currency, l.billing_frequency
+        ORDER BY (l.currency = ${head.currency}) DESC, l.currency,
+                 coalesce(array_position(
                    ARRAY['monthly', 'quarterly', 'annually', 'one_time', 'custom'],
                    l.billing_frequency::text), 99)
       `;
 
       // A YEAR OF THE RECURRING FEES (CA#42), added by the database: monthly
       // x 12, quarterly x 4, annually x 1. No one-off or custom fee is in it.
-      const [annual] = await db<{ value: string | null }[]>`
-        SELECT sum(a.net * CASE l.billing_frequency WHEN 'monthly' THEN 12
+      const annual = await db<{ currency: string; value: string | null }[]>`
+        SELECT l.currency,
+               sum(a.net * CASE l.billing_frequency WHEN 'monthly' THEN 12
                                                     WHEN 'quarterly' THEN 4
                                                     WHEN 'annually' THEN 1 END)::text AS value
         FROM crm.proposal_line l
@@ -477,6 +544,8 @@ export class PostgresProposalRepository implements ProposalRepository {
         WHERE l.proposal_id = ${proposalId} AND l.removed_at IS NULL
           AND l.unit_amount IS NOT NULL
           AND l.billing_frequency IN ('monthly', 'quarterly', 'annually')
+        GROUP BY l.currency
+        ORDER BY (l.currency = ${head.currency}) DESC, l.currency
       `;
 
       // The firm's Depts and delivery teams, retired rows included — the render
@@ -524,8 +593,9 @@ export class PostgresProposalRepository implements ProposalRepository {
           jurisdiction: head.issuer_jurisdiction,
         },
         issuedOn: head.issued_on,
-        annualValue: annual?.value ?? null,
+        annualValue: annual.flatMap((a) => (a.value === null ? [] : [{ amount: a.value, currency: a.currency }])),
         totalsByFrequency: byFrequency.map((f) => ({
+          currency: f.currency,
           frequency: f.frequency,
           net: f.net ?? "0",
           lineCount: Number(f.line_count),
@@ -561,7 +631,7 @@ export class PostgresProposalRepository implements ProposalRepository {
             net: r.net,
           };
         }),
-        totals: toTotals(totals, head.currency),
+        totals: toCurrencyTotals(totals?.currency_totals ?? null, head.currency),
         // email is the discriminator, not the id: an account always has an
         // address and may have no name.
         approvedBy:
@@ -658,24 +728,18 @@ export class PostgresProposalRepository implements ProposalRepository {
         (ProposalRow & {
           party_display_name: string;
           issuer_display_name: string;
-          gross: string | null;
-          discount: string | null;
-          net: string | null;
-          line_count: string;
-          unpriced_line_count: string;
+          currency_totals: CurrencyTotalsJson[] | null;
         })[]
       >`
         SELECT ${db.unsafe(PROPOSAL_COLUMNS_P)},
                party.display_name AS party_display_name,
                issuer.display_name AS issuer_display_name,
-               t.gross, t.discount, t.net, coalesce(t.line_count, 0) AS line_count,
-               coalesce(t.unpriced_line_count, 0) AS unpriced_line_count
+               -- Per currency (0344); a proposal with no lines has none, and
+               -- the mapper reads that as one zero row.
+               ${db.unsafe(currencyTotalsOf("p"))}
         FROM crm.proposal p
         JOIN core.party party ON party.id = p.party_id
         JOIN core.party issuer ON issuer.id = p.issuing_entity_party_id
-        -- LEFT, because a proposal with no lines has no row in the view at all:
-        -- SUM over nothing is null, and the mapper reads that as zero.
-        LEFT JOIN crm.proposal_totals t ON t.proposal_id = p.id
         WHERE (${filters.status ?? null}::text IS NULL OR p.status = ${filters.status ?? null})
           AND (${filters.partyId ?? null}::uuid IS NULL OR p.party_id = ${filters.partyId ?? null})
           -- A deleted draft was never an offer (0086): not in the list, under
@@ -688,8 +752,8 @@ export class PostgresProposalRepository implements ProposalRepository {
           proposal: toProposal(r),
           party: { id: r.party_id, displayName: r.party_display_name },
           issuingEntity: { id: r.issuing_entity_party_id, displayName: r.issuer_display_name },
-          totals: toTotals(r, r.currency),
-          lineCount: Number(r.line_count),
+          totals: toCurrencyTotals(r.currency_totals, r.currency),
+          lineCount: (r.currency_totals ?? []).reduce((n, t) => n + Number(t.lineCount), 0),
         }),
       );
     });
@@ -763,7 +827,7 @@ export class PostgresProposalRepository implements ProposalRepository {
                jurisdiction = $8, billing_frequency = $9, scope_override = $10,
                client_obligations_override = $11, volume_limits_override = $12,
                exclusions_override = $13, oop_estimate_min = $14, oop_estimate_max = $15,
-               oop_currency = $16, pricing_note = $17
+               oop_currency = $16, pricing_note = $17, currency = $18
           FROM crm.proposal p
          WHERE l.id = $1 AND l.proposal_id = $2 AND l.tenant_id = $3 AND l.removed_at IS NULL
            AND p.id = l.proposal_id AND p.status = 'draft' AND p.deleted_at IS NULL
@@ -787,6 +851,7 @@ export class PostgresProposalRepository implements ProposalRepository {
           edit.oopEstimate?.max ?? null,
           edit.oopEstimate?.currency ?? null,
           edit.pricingNote,
+          edit.currency,
         ],
       );
       if (!row) return null;
@@ -888,10 +953,7 @@ export class PostgresProposalRepository implements ProposalRepository {
           firm_name: string;
           issuer_display_name: string;
           party_display_name: string;
-          gross: string | null;
-          discount: string | null;
-          net: string | null;
-          unpriced_line_count: string | null;
+          currency_totals: CurrencyTotalsJson[] | null;
           answer_decision: "accepted" | "rejected" | null;
           answer_signer_name: string | null;
           answer_decided_at: Date | null;
@@ -901,7 +963,7 @@ export class PostgresProposalRepository implements ProposalRepository {
                firm.name AS firm_name,
                issuer.display_name AS issuer_display_name,
                party.display_name AS party_display_name,
-               t.gross, t.discount, t.net, t.unpriced_line_count,
+               ${db.unsafe(currencyTotalsOf("p"))},
                answer.decision AS answer_decision,
                answer.signer_name AS answer_signer_name,
                answer.decided_at AS answer_decided_at
@@ -912,7 +974,6 @@ export class PostgresProposalRepository implements ProposalRepository {
         -- which company they would be contracting with.
         JOIN core.party issuer ON issuer.id = p.issuing_entity_party_id
         JOIN tenancy.tenant firm ON firm.id = p.tenant_id
-        LEFT JOIN crm.proposal_totals t ON t.proposal_id = p.id
         -- The answer given on this page, by name and date (0085). The address
         -- and browser in the same row are the firm's, not the reader's, and are
         -- not selected here.
@@ -926,6 +987,7 @@ export class PostgresProposalRepository implements ProposalRepository {
           description: string;
           quantity: string;
           unit_amount: string | null;
+          currency: string;
           discount_percent: string;
           net: string | null;
           pricing_note: string | null;
@@ -935,7 +997,7 @@ export class PostgresProposalRepository implements ProposalRepository {
           oop_currency: string | null;
         }[]
       >`
-        SELECT l.description, l.quantity, l.unit_amount, l.discount_percent, a.net,
+        SELECT l.description, l.quantity, l.unit_amount, l.currency, l.discount_percent, a.net,
                -- What the RECIPIENT reads where a figure would be, how often
                -- they will be invoiced, and what they are told to expect to
                -- reimburse. The four scope blocks are deliberately not here:
@@ -965,6 +1027,7 @@ export class PostgresProposalRepository implements ProposalRepository {
           description: l.description,
           quantity: l.quantity,
           unitAmount: l.unit_amount,
+          currency: l.currency,
           discountPercent: l.discount_percent,
           net: l.net,
           pricingNote: l.pricing_note,
@@ -980,17 +1043,11 @@ export class PostgresProposalRepository implements ProposalRepository {
                   currency: l.oop_currency,
                 },
         })),
-        totals: {
-          gross: head.gross ?? "0",
-          discount: head.discount ?? "0",
-          net: head.net ?? "0",
-          currency: head.currency,
-          // The recipient is told the same thing a partner is: how many lines
-          // this figure does not cover. A client reading a total that quietly
-          // omits two "as mutually agreed" lines is the worst place for this to
-          // go wrong.
-          unpricedLineCount: Number(head.unpriced_line_count ?? 0),
-        },
+        // Per currency (0344). The recipient is told the same thing a partner
+        // is: how many lines each figure does not cover. A client reading a
+        // total that quietly omits two "as mutually agreed" lines is the worst
+        // place for this to go wrong.
+        totals: toCurrencyTotals(head.currency_totals, head.currency),
         answer:
           head.answer_decision === null ||
           head.answer_signer_name === null ||
@@ -1062,6 +1119,17 @@ export class PostgresProposalRepository implements ProposalRepository {
       // is a separate boolean per field because NULL is a real value here —
       // clearing the background is a change, not an absence of one.
       const has = (k: keyof ProposalRevision): boolean => change[k] !== undefined;
+      // A NEW MAIN CURRENCY that had a rate row of its own (0344): its rate is
+      // the head's from now on, so the row goes, in this transaction. The
+      // invariant is checked at commit, when both halves are done.
+      if (change.currency !== undefined) {
+        await db`
+          DELETE FROM crm.proposal_fx_rate r
+           USING crm.proposal p
+           WHERE r.proposal_id = ${proposalId} AND r.currency = ${change.currency}
+             AND p.id = r.proposal_id AND p.status = 'draft' AND p.deleted_at IS NULL
+        `;
+      }
       const [row] = await db<ProposalRow[]>`
         UPDATE crm.proposal
            SET title = CASE WHEN ${has("title")} THEN ${change.title ?? null} ELSE title END,
@@ -1078,9 +1146,8 @@ export class PostgresProposalRepository implements ProposalRepository {
                issuing_entity_party_id = CASE WHEN ${has("issuingEntityPartyId")}
                                               THEN ${change.issuingEntityPartyId ?? null}::uuid
                                               ELSE issuing_entity_party_id END,
-               -- The currency cascades to the lines through their key (0312):
-               -- only lines struck off this draft, because the WHERE below
-               -- refuses a new currency while any line is live.
+               -- The MAIN currency (0344). Lines keep their own: the WHERE
+               -- below refuses a move while any live line is in the old one.
                currency = CASE WHEN ${has("currency")} THEN ${change.currency ?? null}
                                ELSE currency END,
                fx_rate = CASE WHEN ${has("fxRate")} THEN ${change.fxRate ?? null}::numeric
@@ -1090,12 +1157,13 @@ export class PostgresProposalRepository implements ProposalRepository {
          -- A live draft only, repeated here: a proposal sent or deleted since the
          -- service read it is left exactly as it stands.
          WHERE id = ${proposalId} AND status = 'draft' AND deleted_at IS NULL
-           -- And a new currency only over no live line, for the same reason: a
-           -- line quoted a moment ago is priced in the old one.
+           -- And a new main currency only while no live line is in the old one,
+           -- for the same reason: a line quoted a moment ago is priced in it.
            AND (${change.currency ?? null}::text IS NULL
                 OR currency = ${change.currency ?? null}
                 OR NOT EXISTS (SELECT 1 FROM crm.proposal_line l
-                               WHERE l.proposal_id = ${proposalId} AND l.removed_at IS NULL))
+                               WHERE l.proposal_id = ${proposalId} AND l.removed_at IS NULL
+                                 AND l.currency = crm.proposal.currency))
         RETURNING ${db.unsafe(PROPOSAL_COLUMNS)}
       `;
       if (!row) return null;
@@ -1114,6 +1182,38 @@ export class PostgresProposalRepository implements ProposalRepository {
   }
 
   // ── 0085: the proposal by email, and the client's own answer ─────────────
+
+  async setRate(tenantId: string, proposalId: string, rate: CurrencyRate): Promise<CurrencyRate | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // Onto a live DRAFT only, the SELECT's WHERE saying so: a proposal sent
+      // since the use case read it keeps the rates it went out with.
+      const [row] = await db<{ currency: string; fx_rate: string; fx_rate_date: string; source: string }[]>`
+        INSERT INTO crm.proposal_fx_rate (tenant_id, proposal_id, currency, fx_rate, fx_rate_date, source)
+        SELECT p.tenant_id, p.id, ${rate.currency}, ${rate.fxRate}::numeric, ${rate.fxRateDate}::date, ${rate.source}
+          FROM crm.proposal p
+         WHERE p.id = ${proposalId} AND p.status = 'draft' AND p.deleted_at IS NULL
+        ON CONFLICT (proposal_id, currency) DO UPDATE
+           SET fx_rate = EXCLUDED.fx_rate, fx_rate_date = EXCLUDED.fx_rate_date, source = EXCLUDED.source
+        RETURNING currency, fx_rate::text AS fx_rate, fx_rate_date::text AS fx_rate_date, source
+      `;
+      return row
+        ? { currency: row.currency, fxRate: row.fx_rate, fxRateDate: row.fx_rate_date, source: row.source }
+        : null;
+    });
+  }
+
+  async removeRate(tenantId: string, proposalId: string, currency: string): Promise<boolean> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db`
+        DELETE FROM crm.proposal_fx_rate r
+         USING crm.proposal p
+         WHERE r.proposal_id = ${proposalId} AND r.currency = ${currency}
+           AND p.id = r.proposal_id AND p.status = 'draft' AND p.deleted_at IS NULL
+        RETURNING r.currency
+      `;
+      return rows.length > 0;
+    });
+  }
 
   async findIdByShareDigest(tenantId: string, digest: string): Promise<string | null> {
     return withTenant(this.app, tenantId, async (db) => {

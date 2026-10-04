@@ -91,11 +91,32 @@ export async function keyManagerOn(
 }
 
 /**
- * The person who signs for the firm (`tenancy.tenant.firm_signatory_user_id`,
- * set on `/admin/firm`). One per firm and no day: it is a column, not an
- * effective-dated row.
+ * The partner who signs for the firm, FOR THIS CLIENT (0343, Q005): whoever
+ * signed for the firm on the client's latest signed letter, still on the
+ * staff; that is the client's engagement partner, and since several partners
+ * can sign, the firm's default is no longer the same person. Then the firm's
+ * default (`tenancy.tenant.firm_signatory_user_id`, on `/admin/firm`), as
+ * before, for a client with no signed letter or a partner who has left.
  */
-export async function signingPartnerOf(db: Db, tenantId: string): Promise<OwnerPerson | null> {
+export async function signingPartnerOf(
+  db: Db,
+  tenantId: string,
+  clientPartyId: string | null = null,
+): Promise<OwnerPerson | null> {
+  if (clientPartyId !== null) {
+    const [own] = await db<{ user_id: string; display_name: string | null }[]>`
+      SELECT l.firm_signatory_user_id AS user_id, u.display_name
+        FROM crm.engagement_letter l
+        JOIN tenancy.user_account u ON u.id = l.firm_signatory_user_id
+        JOIN tenancy.membership m
+          ON m.tenant_id = l.tenant_id AND m.user_id = l.firm_signatory_user_id
+         AND m.audience = 'STAFF' AND m.is_active
+       WHERE l.party_id = ${clientPartyId} AND l.status = 'signed'
+       ORDER BY l.signed_at DESC
+       LIMIT 1
+    `;
+    if (own) return { userId: own.user_id, displayName: own.display_name };
+  }
   const rows = await db<{ user_id: string; display_name: string | null }[]>`
     SELECT t.firm_signatory_user_id AS user_id, u.display_name
     FROM tenancy.tenant t
@@ -117,7 +138,7 @@ export class PostgresWorkOwnerDirectory implements WorkOwnerDirectory {
     return withTenant(this.app, tenantId, (db) => keyManagerOn(db, clientPartyId, onDate));
   }
 
-  signingPartner(tenantId: string): Promise<OwnerPerson | null> {
-    return withTenant(this.app, tenantId, (db) => signingPartnerOf(db, tenantId));
+  signingPartner(tenantId: string, clientPartyId: string | null = null): Promise<OwnerPerson | null> {
+    return withTenant(this.app, tenantId, (db) => signingPartnerOf(db, tenantId, clientPartyId));
   }
 }

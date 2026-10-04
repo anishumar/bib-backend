@@ -38,9 +38,15 @@ export class PostgresAdvanceBillFacts implements AdvanceBillFacts {
       `;
       if (letter === undefined) return null;
       const lines = await db<
-        { engagement_id: string; status: string; advance_amount: string | null; dept_code: string | null }[]
+        {
+          engagement_id: string;
+          status: string;
+          advance_amount: string | null;
+          currency: string;
+          dept_code: string | null;
+        }[]
       >`
-        SELECT e.id AS engagement_id, e.status, ll.advance_amount::text AS advance_amount,
+        SELECT e.id AS engagement_id, e.status, ll.advance_amount::text AS advance_amount, ll.currency,
                live.body ->> 'module' AS dept_code
           FROM crm.engagement e
           JOIN crm.engagement_letter_line ll
@@ -66,6 +72,7 @@ export class PostgresAdvanceBillFacts implements AdvanceBillFacts {
           engagementId: l.engagement_id,
           status: l.status,
           advanceAmount: l.advance_amount,
+          currency: l.currency,
           deptCode: l.dept_code,
         })),
       };

@@ -141,7 +141,7 @@ describe("revising a draft letter's head", () => {
     ).rejects.toBeInstanceOf(LetterNotEditable);
   });
 
-  it("changes the currency only while nothing is priced — a pulled line still counts", async () => {
+  it("changes the main currency only while no LIVE fee is in it — a pulled line no longer counts (0344)", async () => {
     const s = setup();
     const id = await draft(s);
     const moved = await s.service.revise(
@@ -155,20 +155,31 @@ describe("revising a draft letter's head", () => {
       s.service.revise({ tenantId: TENANT, letterId: id, currency: "INR" }, ACTOR),
     ).rejects.toBeInstanceOf(LetterInvalidCurrencyChange);
 
-    const added = await line(s, id);
-    await s.service.removeLine(TENANT, id, added.id);
+    // A pulled line's key no longer carries the letter's currency, so it
+    // holds nothing back; a live one in the main currency does.
+    const pulled = await line(s, id);
+    await s.service.removeLine(TENANT, id, pulled.id);
+    await s.service.revise(
+      { tenantId: TENANT, letterId: id, currency: "INR", fxRate: "1", fxRateDate: "2026-09-28" },
+      ACTOR,
+    );
+    await line(s, id);
     await expect(
       s.service.revise(
-        { tenantId: TENANT, letterId: id, currency: "INR", fxRate: "1", fxRateDate: "2026-09-28" },
+        { tenantId: TENANT, letterId: id, currency: "AED", fxRate: "22.75", fxRateDate: "2026-09-28" },
         ACTOR,
       ),
     ).rejects.toBeInstanceOf(LetterCurrencyLocked);
-    // The same currency at a corrected rate is not a new currency.
-    const corrected = await s.service.revise(
-      { tenantId: TENANT, letterId: id, currency: "AED", fxRate: "22.8", fxRateDate: "2026-09-28" },
+    await s.service.revise(
+      { tenantId: TENANT, letterId: id, currency: "INR", fxRate: "1", fxRateDate: "2026-09-28" },
       ACTOR,
     );
-    expect(corrected.fxRate).toBe("22.8");
+    // The same currency at a corrected rate is not a new currency.
+    const corrected = await s.service.revise(
+      { tenantId: TENANT, letterId: id, currency: "INR", fxRate: "1.0", fxRateDate: "2026-09-28" },
+      ACTOR,
+    );
+    expect(corrected.fxRate).toBe("1.0");
   });
 
   it("moves the issuer and the country, and records who contracts under whose law", async () => {
@@ -379,8 +390,8 @@ describe("what the read carries for the preview", () => {
       ["B2", null],
     ]);
     expect(view.totalsByFrequency).toEqual([
-      { frequency: "monthly", net: "5000.0000", lineCount: 2, unpricedLineCount: 1 },
-      { frequency: "annually", net: "120000.0000", lineCount: 1, unpricedLineCount: 0 },
+      { currency: "INR", frequency: "monthly", net: "5000.0000", lineCount: 2, unpricedLineCount: 1 },
+      { currency: "INR", frequency: "annually", net: "120000.0000", lineCount: 1, unpricedLineCount: 0 },
     ]);
   });
 });

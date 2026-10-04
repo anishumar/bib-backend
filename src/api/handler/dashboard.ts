@@ -433,6 +433,60 @@ const revenueByManagerRoute = createRoute({
   },
 });
 
+const TodaysRateSchema = z
+  .object({
+    fxRate: z.string().openapi({ description: "One unit of the currency, in the reporting currency." }),
+    fxRateDate: z.string().openapi({ description: "The day of the rate: the firm's day or the latest before it." }),
+    source: z.string().openapi({ description: '"ExchangeRate-API", "Currency API" or "Same currency".' }),
+  })
+  .openapi("TodaysRate");
+
+const MrrByCurrencySchema = z
+  .object({
+    reportingCurrency: z.string(),
+    asOf: z.string().openapi({ description: "The firm's day the rates are today's for." }),
+    currencies: z.array(
+      z.object({
+        currency: z.string(),
+        monthly: z.string().openapi({ description: "A month of the recurring fees, in this currency." }),
+        atSignedRates: z.string().openapi({ description: "In the reporting currency at each letter's own rate: what MRR counts." }),
+        atTodaysRate: z.string().nullable().openapi({ description: "In the reporting currency at today's rate; null with no rate held." }),
+        todaysRate: TodaysRateSchema.nullable(),
+        engagements: z.number().int(),
+      }),
+    ),
+    clients: z.array(
+      z.object({
+        partyId: z.string().uuid(),
+        name: z.string(),
+        currency: z.string(),
+        monthly: z.string(),
+        atSignedRates: z.string(),
+        atTodaysRate: z.string().nullable(),
+      }),
+    ),
+    totalAtSignedRates: z.string().openapi({ description: "Equals MRR on the overview." }),
+    totalAtTodaysRate: z.string().nullable(),
+  })
+  .openapi("MrrByCurrency");
+
+const mrrByCurrencyRoute = createRoute({
+  method: "get",
+  path: "/api/v1/dashboard/mrr-by-currency",
+  tags: ["dashboard"],
+  summary: "Recurring fees by currency, at the signed rates and at today's rate",
+  description:
+    "0345, Q009. Each currency's recurring fees a month in that currency, in the reporting " +
+    "currency at the rates the letters were signed at (MRR, unchanged), and at today's rate from " +
+    "the exchange-rate feed with its date and source; per client too. Never one figure that adds " +
+    "two currencies.",
+  responses: {
+    200: { description: "The report", content: { "application/json": { schema: MrrByCurrencySchema } } },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("No org selected, or the caller does not have commercial visibility"),
+  },
+});
+
 export function registerDashboardRoutes(app: OpenAPIHono<AppEnv>, deps: DashboardDeps): void {
   /** The fee axis, as a gate rather than a redaction — see the file header. */
   const denyWithoutFees = (principal: Parameters<AuthzService["seesFees"]>[0] | null) => {
@@ -457,6 +511,39 @@ export function registerDashboardRoutes(app: OpenAPIHono<AppEnv>, deps: Dashboar
     const denied = denyWithoutFees(c.get("principal"));
     if (denied !== null) return c.json(denied, 403);
     return c.json(overviewToWire(await deps.service.overview(s.tenantId)), 200);
+  });
+
+  app.openapi(mrrByCurrencyRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const denied = denyWithoutFees(c.get("principal"));
+    if (denied !== null) return c.json(denied, 403);
+    const r = await deps.service.mrrByCurrency(s.tenantId);
+    return c.json(
+      {
+        reportingCurrency: r.reportingCurrency,
+        asOf: r.asOf,
+        currencies: r.currencies.map((x) => ({
+          currency: x.currency,
+          monthly: x.monthly,
+          atSignedRates: x.atSignedRates,
+          atTodaysRate: x.atTodaysRate,
+          todaysRate: x.todaysRate === null ? null : { ...x.todaysRate },
+          engagements: x.engagements,
+        })),
+        clients: r.clients.map((x) => ({
+          partyId: x.partyId,
+          name: x.name,
+          currency: x.currency,
+          monthly: x.monthly,
+          atSignedRates: x.atSignedRates,
+          atTodaysRate: x.atTodaysRate,
+        })),
+        totalAtSignedRates: r.totalAtSignedRates,
+        totalAtTodaysRate: r.totalAtTodaysRate,
+      },
+      200,
+    );
   });
 
   app.openapi(mrrByRoute, async (c) => {

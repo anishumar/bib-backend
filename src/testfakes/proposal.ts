@@ -19,6 +19,7 @@ import { FakeStaffDirectory } from "./lead";
 import { FakeFirmTimeZone } from "./tenancy";
 import { FakeClock } from "./clock";
 import type { Proposal, ProposalLine, ProposalStatus } from "../domain/proposal/model";
+import type { CurrencyRate, Money } from "../domain/money/model";
 import { VIEW_DEDUPE_MINUTES } from "../domain/proposal/model";
 import type { NewRecordedAcceptance } from "../domain/acceptance/model";
 import { EvidenceNotFiledHere } from "../domain/acceptance/errors";
@@ -105,6 +106,7 @@ export class FakeProposalRepo implements ProposalRepository {
       currency: p.currency,
       fxRate: p.fxRate,
       fxRateDate: p.fxRateDate,
+      rates: [],
       validUntil: p.validUntil,
       sentAt: null,
       decidedAt: null,
@@ -151,13 +153,13 @@ export class FakeProposalRepo implements ProposalRepository {
     prose: readonly ProseLine[] | null = null,
   ): Promise<Proposal | null> {
     const current = this.rows.find((r) => r.tenantId === tenantId && r.id === proposalId);
-    // The adapter's WHERE clause: a live draft only, and a new currency only
-    // over no live line.
+    // The adapter's WHERE clause: a live draft only, and a new MAIN currency
+    // only while no live line is in the old one (0344).
     if (current?.status !== "draft" || current.deletedAt !== null) return Promise.resolve(null);
     if (
       change.currency !== undefined &&
       change.currency !== current.currency &&
-      this.liveLines(tenantId, proposalId).length > 0
+      this.liveLines(tenantId, proposalId).some((l) => l.currency === current.currency)
     ) {
       return Promise.resolve(null);
     }
@@ -168,15 +170,15 @@ export class FakeProposalRepo implements ProposalRepository {
       }
       await this.blocks.addMany(prose.map((p) => ({ ...p, tenantId, owner })));
     }
-    // The currency cascades to every line, struck-off ones included (0312).
-    if (change.currency !== undefined) {
-      for (const l of this.lines) if (l.proposalId === proposalId) l.currency = change.currency;
-    }
+    // Lines keep their own currency (0344); a new main currency's rate row,
+    // if it had one, goes: its rate is the head's from now on.
     return Promise.resolve(
       this.replace(tenantId, proposalId, (p) => ({
         ...p,
         issuingEntityPartyId: change.issuingEntityPartyId ?? p.issuingEntityPartyId,
         currency: change.currency ?? p.currency,
+        rates:
+          change.currency === undefined ? p.rates : p.rates.filter((r) => r.currency !== change.currency),
         fxRate: change.fxRate ?? p.fxRate,
         fxRateDate: change.fxRateDate ?? p.fxRateDate,
         title: change.title ?? p.title,
@@ -328,6 +330,7 @@ export class FakeProposalRepo implements ProposalRepository {
         description: l.description,
         quantity: l.quantity,
         unitAmount: l.unitAmount,
+        currency: l.currency,
         discountPercent: l.discountPercent,
         net: netOf(l),
         // The recipient reads the reason where the figure would be.
@@ -386,8 +389,8 @@ export class FakeProposalRepo implements ProposalRepository {
         jurisdiction: this.partyJurisdictions.get(proposal.issuingEntityPartyId) ?? null,
       },
       issuedOn: (proposal.sentAt ?? "2026-06-01T09:00:00.000Z").slice(0, 10),
-      totalsByFrequency: totalsByFrequencyOf(lines),
-      annualValue: annualValueOf(lines),
+      totalsByFrequency: totalsByFrequencyOf(lines, proposal.currency),
+      annualValue: annualValueOf(lines, proposal.currency),
       depts: this.axes
         .filter((a) => a.axis === "dept")
         .map((a) => ({ code: a.code, name: a.name, sortOrder: a.sortOrder })),
@@ -587,6 +590,27 @@ export class FakeProposalRepo implements ProposalRepository {
   }
 
   // ── 0085 ────────────────────────────────────────────────────────────────
+
+  /** The adapter's upsert, onto a live draft only (0344). */
+  setRate(tenantId: string, proposalId: string, rate: CurrencyRate): Promise<CurrencyRate | null> {
+    const current = this.rows.find((r) => r.tenantId === tenantId && r.id === proposalId);
+    if (current?.status !== "draft" || current.deletedAt !== null) return Promise.resolve(null);
+    this.replace(tenantId, proposalId, (p) => ({
+      ...p,
+      rates: [...p.rates.filter((r) => r.currency !== rate.currency), rate].sort((a, b) =>
+        a.currency.localeCompare(b.currency),
+      ),
+    }));
+    return Promise.resolve(rate);
+  }
+
+  removeRate(tenantId: string, proposalId: string, currency: string): Promise<boolean> {
+    const current = this.rows.find((r) => r.tenantId === tenantId && r.id === proposalId);
+    if (current?.status !== "draft" || current.deletedAt !== null) return Promise.resolve(false);
+    if (!current.rates.some((r) => r.currency === currency)) return Promise.resolve(false);
+    this.replace(tenantId, proposalId, (p) => ({ ...p, rates: p.rates.filter((r) => r.currency !== currency) }));
+    return Promise.resolve(true);
+  }
 
   findIdByShareDigest(_tenantId: string, digest: string): Promise<string | null> {
     return Promise.resolve(this.shareDigests.get(digest) ?? null);
@@ -965,66 +989,86 @@ function netOf(
   return net === null ? null : fromScaled(net);
 }
 
-function totalsOf(
-  lines: readonly Pick<ProposalLine, "unitAmount" | "quantity" | "discountPercent">[],
-  currency: string,
-): ProposalRecord["totals"] {
-  let gross = 0n;
-  let net = 0n;
-  let unpriced = 0;
-  for (const line of lines) {
-    const lineGross = grossOf(line);
-    const lineNet = netScaled(line);
-    if (lineGross === null || lineNet === null) {
-      unpriced += 1;
-      continue;
-    }
-    gross += lineGross;
-    net += lineNet;
-  }
-  return {
-    gross: fromScaled(gross),
-    discount: fromScaled(gross - net),
-    net: fromScaled(net),
-    currency,
-    unpricedLineCount: unpriced,
-  };
+/** The currencies these lines are in, the main one first, then by code: the
+ *  adapter's reading order (0344). */
+function currenciesOf(lines: readonly Pick<ProposalLine, "currency">[], main: string): string[] {
+  return [...new Set(lines.map((l) => l.currency))].sort((a, b) =>
+    a === main ? -1 : b === main ? 1 : a.localeCompare(b),
+  );
 }
 
-/** The adapter's GROUP BY, in its reading order, with this fake's exact sums. */
-function totalsByFrequencyOf(
-  lines: readonly Pick<ProposalLine, "unitAmount" | "quantity" | "discountPercent" | "billingFrequency">[],
-): ProposalRecord["totalsByFrequency"] {
-  const order = ["monthly", "quarterly", "annually", "one_time", "custom", null] as const;
-  return order.flatMap((frequency) => {
-    const at = lines.filter((l) => l.billingFrequency === frequency);
-    if (at.length === 0) return [];
+/** Per currency (0344); one zero row in the main currency when there is no line. */
+function totalsOf(
+  lines: readonly Pick<ProposalLine, "unitAmount" | "quantity" | "discountPercent" | "currency">[],
+  main: string,
+): ProposalRecord["totals"] {
+  const currencies = currenciesOf(lines, main);
+  return (currencies.length === 0 ? [main] : currencies).map((currency) => {
+    let gross = 0n;
     let net = 0n;
     let unpriced = 0;
-    for (const line of at) {
+    for (const line of lines.filter((l) => l.currency === currency)) {
+      const lineGross = grossOf(line);
       const lineNet = netScaled(line);
-      if (lineNet === null) unpriced += 1;
-      else net += lineNet;
+      if (lineGross === null || lineNet === null) {
+        unpriced += 1;
+        continue;
+      }
+      gross += lineGross;
+      net += lineNet;
     }
-    return [{ frequency, net: fromScaled(net), lineCount: at.length, unpricedLineCount: unpriced }];
+    return {
+      gross: fromScaled(gross),
+      discount: fromScaled(gross - net),
+      net: fromScaled(net),
+      currency,
+      unpricedLineCount: unpriced,
+    };
   });
 }
 
-/** A year of the recurring fees (CA#42), as the adapter's SQL adds it. */
+/** The adapter's GROUP BY currency and frequency, in its reading order, with
+ *  this fake's exact sums. */
+function totalsByFrequencyOf(
+  lines: readonly Pick<ProposalLine, "unitAmount" | "quantity" | "discountPercent" | "billingFrequency" | "currency">[],
+  main: string,
+): ProposalRecord["totalsByFrequency"] {
+  const order = ["monthly", "quarterly", "annually", "one_time", "custom", null] as const;
+  return currenciesOf(lines, main).flatMap((currency) =>
+    order.flatMap((frequency) => {
+      const at = lines.filter((l) => l.currency === currency && l.billingFrequency === frequency);
+      if (at.length === 0) return [];
+      let net = 0n;
+      let unpriced = 0;
+      for (const line of at) {
+        const lineNet = netScaled(line);
+        if (lineNet === null) unpriced += 1;
+        else net += lineNet;
+      }
+      return [{ currency, frequency, net: fromScaled(net), lineCount: at.length, unpricedLineCount: unpriced }];
+    }),
+  );
+}
+
+/** A year of the recurring fees (CA#42), as the adapter's SQL adds it, per
+ *  currency (0344). */
 function annualValueOf(
-  lines: readonly Pick<ProposalLine, "unitAmount" | "quantity" | "discountPercent" | "billingFrequency">[],
-): string | null {
+  lines: readonly Pick<ProposalLine, "unitAmount" | "quantity" | "discountPercent" | "billingFrequency" | "currency">[],
+  main: string,
+): readonly Money[] {
   const perYear: Partial<Record<string, bigint>> = { monthly: 12n, quarterly: 4n, annually: 1n };
-  let total = 0n;
-  let any = false;
-  for (const line of lines) {
-    const times = line.billingFrequency === null ? undefined : perYear[line.billingFrequency];
-    const lineNet = netScaled(line);
-    if (times === undefined || lineNet === null) continue;
-    total += lineNet * times;
-    any = true;
-  }
-  return any ? fromScaled(total) : null;
+  return currenciesOf(lines, main).flatMap((currency) => {
+    let total = 0n;
+    let any = false;
+    for (const line of lines.filter((l) => l.currency === currency)) {
+      const times = line.billingFrequency === null ? undefined : perYear[line.billingFrequency];
+      const lineNet = netScaled(line);
+      if (times === undefined || lineNet === null) continue;
+      total += lineNet * times;
+      any = true;
+    }
+    return any ? [{ amount: fromScaled(total), currency }] : [];
+  });
 }
 
 /**

@@ -18,6 +18,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import postgres from "postgres";
 import { load } from "../../src/config/config";
 import { PostgresProposalRepository } from "../../src/infrastructure/postgres/proposal-repository";
+import { PostgresSignatoryRepository } from "../../src/infrastructure/postgres/signatory-repository";
 import { PostgresEngagementRepository } from "../../src/infrastructure/postgres/engagement-repository";
 import { PostgresSignatureRequestRepository } from "../../src/infrastructure/postgres/signature-request-repository";
 import { PostgresRenderSource } from "../../src/infrastructure/postgres/render-source";
@@ -123,6 +124,7 @@ const proposals = new ProposalService({
 /** The firm's standing signatory: on the tenant row (which the preview reads)
  *  AND through the port (which Send reads) — the same person either way. */
 let signatoryUserId = "";
+const signatoryList = new PostgresSignatoryRepository(app);
 const letters = new EngagementService({
   letters: new PostgresEngagementRepository(app),
   library: configRepository,
@@ -130,6 +132,14 @@ const letters = new EngagementService({
   firm: {
     firmSignatory: () =>
       Promise.resolve(signatoryUserId === "" ? null : { userId: signatoryUserId, title: "Director" }),
+    // The list (0343), from its real table: the preview reads it in SQL, Send
+    // through this port, and the two must agree on who signs.
+    signatory: async (tenantId, signatoryId) => {
+      const entry = await signatoryList.find(tenantId, signatoryId);
+      return entry === null
+        ? null
+        : { ...entry, displayName: null, isDefault: entry.userId === signatoryUserId };
+    },
   },
   firmSignatureImage: { activeSignatureVersion: () => Promise.resolve(null) },
   parties: new PostgresPartyRepository(app),
@@ -178,6 +188,11 @@ beforeAll(async () => {
   await owner`
     INSERT INTO tenancy.membership (tenant_id, user_id, audience, role, commercial_visibility)
     VALUES (${tenant}, ${preparer}, 'STAFF', 'partner', true)
+  `;
+  // The default is somebody on the firm's list (0343's key), so list first.
+  await owner`
+    INSERT INTO tenancy.firm_signatory (tenant_id, user_id, title)
+    VALUES (${tenant}, ${preparer}, 'Director')
   `;
   await owner`
     UPDATE tenancy.tenant
@@ -423,5 +438,62 @@ describe("the preview of a letter", () => {
     });
     expect(frozen.contentHash).toBe(preview.contentHash);
     expect(frozen.datedAsIfSent).toBeNull();
+  });
+
+  it("prints the partner the drafter CHOSE, and is still the very PDF Send renders (0343)", async () => {
+    const [user] = await owner<{ id: string }[]>`
+      INSERT INTO tenancy.user_account (email, display_name)
+      VALUES (${`ravi-${stamp}@example.test`}, 'Ravi Iyer') RETURNING id
+    `;
+    if (!user) throw new Error("could not create the second partner");
+    await owner`
+      INSERT INTO tenancy.membership (tenant_id, user_id, audience, role, commercial_visibility)
+      VALUES (${tenant}, ${user.id}, 'STAFF', 'partner', true)
+    `;
+    const [entry] = await owner<{ id: string }[]>`
+      INSERT INTO tenancy.firm_signatory (tenant_id, user_id, title)
+      VALUES (${tenant}, ${user.id}, 'Partner') RETURNING id
+    `;
+    if (!entry) throw new Error("could not list the second partner");
+
+    const letter = await letters.draft(
+      {
+        tenantId: tenant,
+        partyId: nexus,
+        jurisdiction: "IN",
+        title: "Engagement letter for Nexus Fintech, signed by Ravi",
+        currency: "INR",
+        fxRate: "1",
+        fxRateDate: "2026-09-28",
+        advanceRequired: false,
+        background: "Nexus Fintech provides payment services.",
+        addressedToPartyId: priya,
+      },
+      SYSTEM_ACTOR,
+    );
+    await letters.addLine({
+      tenantId: tenant,
+      letterId: letter.id,
+      entityPartyId: nexus,
+      serviceVersionId: gst,
+      description: "GST returns",
+      quantity: "1",
+      unitAmount: "45000",
+      discountPercent: "0",
+    });
+    await letters.addClause(tenant, letter.id, clause);
+    const tz = await timeZones.timeZoneFor(tenant);
+    const today = dayInZone(systemClock.now().toISOString(), tz);
+    const byDefault = await files.preview({ tenantId: tenant, kind: "engagement_letter", subjectRef: letter.id, asOf: today });
+
+    await letters.revise({ tenantId: tenant, letterId: letter.id, chosenSignatoryId: entry.id }, SYSTEM_ACTOR);
+    const chosen = await files.preview({ tenantId: tenant, kind: "engagement_letter", subjectRef: letter.id, asOf: today });
+    // A different person on the page is a different document.
+    expect(chosen.contentHash).not.toBe(byDefault.contentHash);
+
+    const sent = await letters.send(tenant, letter.id, SYSTEM_ACTOR, { asOf: today });
+    expect(sent.firmSignatoryUserId).toBe(user.id);
+    const out = await source.describe({ tenantId: tenant, kind: "engagement_letter", subjectRef: letter.id });
+    expect(sha(await renderer.render(out?.document ?? (undefined as never)))).toBe(chosen.contentHash);
   });
 });

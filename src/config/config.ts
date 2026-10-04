@@ -180,7 +180,21 @@ const EnvSchema = z.object({
   BIB_WORKER_ESCALATION_CRON: z.string().min(1).default("15 6 * * *"),
   // How long a shutdown waits for a sweep already in flight. Long enough for the
   // slowest one, finite so a wedged handler cannot hold a deploy open forever.
+  // DAILY at 01:30 UTC (07:00 in India), after both feeds have published the
+  // day (ExchangeRate-API updates at 00:00 UTC) and before a firm's working
+  // day starts, so nobody's first rate box of the morning waits on the
+  // internet (0345). Global, not per firm: one call serves every tenant.
+  BIB_WORKER_FX_CRON: z.string().min(1).default("30 1 * * *"),
   BIB_WORKER_SHUTDOWN_GRACE_MS: z.coerce.number().int().positive().default(45_000),
+
+  // ── Exchange-rate feed (0345, Q009) ──────────────────────────────────────
+  // `live` asks the feeds; `off` never touches the network (CI, an air-gapped
+  // box): documents then take only typed rates, as before 0345.
+  BIB_FX_FEED: z.enum(["live", "off"]).default("live"),
+  // ExchangeRate-API's free key (commercial use allowed). Optional: without
+  // it the CC0 Currency API is the only feed, which has no key at all.
+  BIB_FX_EXCHANGERATE_API_KEY: z.string().min(1).optional(),
+  BIB_FX_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
   BIB_RATELIMIT_AUTH_PER_MINUTE: z.coerce.number().int().positive().default(10),
   BIB_RATELIMIT_GENERAL_PER_MINUTE: z.coerce.number().int().positive().default(300),
 
@@ -340,6 +354,15 @@ export interface Config {
   readonly storage: StorageConfig;
   readonly docusign: DocusignConfig;
   readonly mail: MailConfig;
+  readonly fx: FxConfig;
+}
+
+/** The exchange-rate feed (0345). */
+export interface FxConfig {
+  readonly feed: "live" | "off";
+  /** Null: the Currency API alone. */
+  readonly exchangeRateApiKey: string | null;
+  readonly timeoutMs: number;
 }
 
 export interface WorkerConfig {
@@ -360,6 +383,8 @@ export interface WorkerConfig {
   readonly escalationCron: string;
   /** How long `stop()` waits for work in flight before the hard stop. */
   readonly shutdownGraceMs: number;
+  /** When the day's exchange rates are fetched (0345). Daily. */
+  readonly fxCron: string;
 }
 
 /**
@@ -474,6 +499,12 @@ export function load(): Config {
       obligationCron: env.BIB_WORKER_OBLIGATION_CRON,
       escalationCron: env.BIB_WORKER_ESCALATION_CRON,
       shutdownGraceMs: env.BIB_WORKER_SHUTDOWN_GRACE_MS,
+      fxCron: env.BIB_WORKER_FX_CRON,
+    },
+    fx: {
+      feed: env.BIB_FX_FEED,
+      exchangeRateApiKey: env.BIB_FX_EXCHANGERATE_API_KEY ?? null,
+      timeoutMs: env.BIB_FX_TIMEOUT_MS,
     },
     db: {
       ownerUrl: env.BIB_DATABASE_URL,

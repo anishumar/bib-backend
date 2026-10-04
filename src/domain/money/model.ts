@@ -9,7 +9,8 @@
 //
 // CLAUDE.md's rule for this area, restated here because this is where it will
 // be enforced: money is amount + currency + FX rate + rate date, stored as
-// `numeric`, never a float.
+// `numeric`, never a float. Since 0344 a document's rate is per CURRENCY: its
+// head holds the main currency's, a `CurrencyRate` row each other one's.
 
 /**
  * An ISO 4217 alphabetic code, uppercase: "INR", "AED", "SGD".
@@ -214,6 +215,34 @@ function splitDecimal(value: string): [string, string] {
 export interface Money {
   readonly amount: Amount;
   readonly currency: CurrencyCode;
+}
+
+/**
+ * The rate of one OTHER currency a document's fees are in (0344): how many of
+ * the firm's reporting currency one unit of `currency` is, as of `fxRateDate`,
+ * and where the number came from. A proposal or letter keeps its MAIN
+ * currency's rate on its own head; every other currency its lines or groups
+ * use has one of these, frozen with the document.
+ */
+export interface CurrencyRate {
+  readonly currency: CurrencyCode;
+  readonly fxRate: Amount;
+  readonly fxRateDate: string;
+  /** "typed" when a person entered it; otherwise the rate service's name. */
+  readonly source: string;
+}
+
+/**
+ * The rate a document holds for `currency`: its head's for the main currency,
+ * its rate row for any other. Null when the document has none, which 0344's
+ * invariant refuses for any currency a live line or group is in.
+ */
+export function rateFor(
+  doc: { readonly currency: CurrencyCode; readonly fxRate: Amount; readonly fxRateDate: string; readonly rates: readonly CurrencyRate[] },
+  currency: CurrencyCode,
+): { readonly fxRate: Amount; readonly fxRateDate: string } | null {
+  if (currency === doc.currency) return { fxRate: doc.fxRate, fxRateDate: doc.fxRateDate };
+  return doc.rates.find((r) => r.currency === currency) ?? null;
 }
 
 /**

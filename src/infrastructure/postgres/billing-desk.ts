@@ -223,13 +223,17 @@ const DUE_SELECT = `
              CASE WHEN count(DISTINCT e.entity_party_id) = 1 THEN max(ep.display_name) END AS entity_name,
              (array_agg(l.id))[1] AS letter_id,
              max(l.ref) AS letter_ref,
-             max(l.fx_rate) AS fx_rate,
-             max(l.fx_rate_date) AS fx_rate_date
+             -- THE RATE OF THE BILL'S CURRENCY (0344): the letter's own for its
+             -- main currency, else the letter's rate row for that currency.
+             max(CASE WHEN d.currency = l.currency THEN l.fx_rate ELSE r.fx_rate END) AS fx_rate,
+             max(CASE WHEN d.currency = l.currency THEN l.fx_rate_date ELSE r.fx_rate_date END) AS fx_rate_date
         FROM crm.engagement e
         JOIN crm.engagement_letter_line ll
           ON ll.id = e.engagement_letter_line_id AND ll.tenant_id = e.tenant_id
         JOIN crm.engagement_letter l
           ON l.id = e.engagement_letter_id AND l.tenant_id = e.tenant_id
+        LEFT JOIN crm.engagement_letter_fx_rate r
+          ON r.engagement_letter_id = l.id AND r.tenant_id = l.tenant_id AND r.currency = d.currency
         JOIN core.party ep ON ep.id = e.entity_party_id AND ep.tenant_id = e.tenant_id
         LEFT JOIN crm.engagement_letter_fee_group g
           ON g.id = ll.fee_group_id AND g.tenant_id = ll.tenant_id

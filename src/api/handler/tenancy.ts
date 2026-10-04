@@ -8,7 +8,7 @@ import { createRoute } from "@hono/zod-openapi";
 import type { OpenAPIHono } from "@hono/zod-openapi";
 import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
-import type { TenancyService } from "../../usecase/tenancy/service";
+import type { SignatoryView, TenancyService } from "../../usecase/tenancy/service";
 import type { Membership, UserAccount } from "../../domain/tenancy/model";
 import type { MemberRecord } from "../../usecase/tenancy/ports";
 import type { StaffInviteService } from "../../usecase/staffinvite/service";
@@ -74,6 +74,65 @@ const SetFirmSignatoryRequest = z
     title: z.string().min(1).max(120),
   })
   .openapi("SetFirmSignatoryRequest");
+
+/** One person on the firm's list of signatories (0343, Q005). */
+const SignatorySchema = z
+  .object({
+    id: z.string().uuid(),
+    userId: z.string().uuid(),
+    displayName: z.string().nullable().openapi({
+      description: "Null when nobody has named the account; show the roster entry instead.",
+    }),
+    title: z.string().openapi({ description: "What they sign as, printed under their name." }),
+    signatureVersionId: z.string().uuid().nullable().openapi({
+      description:
+        "Their own signature image (a document version), or null. Pinned onto a letter at send. " +
+        "With none, the firm's DEFAULT signatory falls back to the issuing company's signature " +
+        "image; anyone else prints a bare rule, never somebody else's mark.",
+    }),
+    isActive: z.boolean().openapi({ description: "False: retired, cannot be chosen for a new letter." }),
+    isDefault: z.boolean().openapi({ description: "Signs every letter nobody chose a signatory for." }),
+    createdAt: z.string(),
+  })
+  .openapi("Signatory");
+
+const SignatoriesResponse = z
+  .object({ signatories: z.array(SignatorySchema) })
+  .openapi("SignatoriesResponse");
+
+const AddSignatoryRequest = z
+  .object({
+    userId: z.string().uuid(),
+    title: z.string().min(1).max(120),
+    makeDefault: z.boolean().optional().openapi({
+      description: "Also make them the default. A firm's first signatory is its default anyway.",
+    }),
+  })
+  .openapi("AddSignatoryRequest");
+
+const ChangeSignatoryRequest = z
+  .object({
+    title: z.string().min(1).max(120).optional(),
+    signatureVersionId: z.string().uuid().nullable().optional().openapi({
+      description: "A PNG or JPEG already stored (POST /api/v1/documents); null takes it off.",
+    }),
+  })
+  .openapi("ChangeSignatoryRequest");
+
+const SignatoryParam = z.object({ signatoryId: z.string().uuid() });
+
+function signatoryWire(s: SignatoryView): z.infer<typeof SignatorySchema> {
+  return {
+    id: s.id,
+    userId: s.userId,
+    displayName: s.displayName,
+    title: s.title,
+    signatureVersionId: s.signatureVersionId,
+    isActive: s.isActive,
+    isDefault: s.isDefault,
+    createdAt: s.createdAt,
+  };
+}
 
 const UserAccountSchema = z
   .object({
@@ -675,6 +734,102 @@ const setFirmSignatoryRoute = createRoute({
   },
 });
 
+// ── The list of signatories (0343, Q005) ────────────────────────────────────
+//
+// Several people may sign for the firm; each letter chooses one (null: the
+// default). Same split as the single signatory above: reading is config:read,
+// so whoever drafts a letter can see who may sign it; writing is tenant:admin.
+
+const signatoriesRoute = createRoute({
+  method: "get",
+  path: "/api/v1/tenancy/signatories",
+  tags: ["tenancy"],
+  summary: "Everyone who may sign this firm's engagement letters",
+  description: "Retired signatories included, so the list still names who signed older letters.",
+  responses: {
+    200: { description: "The list", content: { "application/json": { schema: SignatoriesResponse } } },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role does not permit it"),
+  },
+});
+
+const addSignatoryRoute = createRoute({
+  method: "post",
+  path: "/api/v1/tenancy/signatories",
+  tags: ["tenancy"],
+  summary: "Put somebody on the list of signatories",
+  description: "An active staff member, once. A firm's first signatory becomes its default.",
+  request: {
+    body: { content: { "application/json": { schema: AddSignatoryRequest } }, required: true },
+  },
+  responses: {
+    201: { description: "Listed", content: { "application/json": { schema: SignatorySchema } } },
+    400: errorResponse("Request failed validation"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not administer the firm"),
+    404: errorResponse("That person has no active staff membership at this firm"),
+    409: errorResponse("Already on the list"),
+  },
+});
+
+const changeSignatoryRoute = createRoute({
+  method: "patch",
+  path: "/api/v1/tenancy/signatories/{signatoryId}",
+  tags: ["tenancy"],
+  summary: "Change what a signatory signs as, or their signature image",
+  description: "Letters already sent keep the block and the image they went out with.",
+  request: {
+    params: SignatoryParam,
+    body: { content: { "application/json": { schema: ChangeSignatoryRequest } }, required: true },
+  },
+  responses: {
+    200: { description: "Changed", content: { "application/json": { schema: SignatorySchema } } },
+    400: errorResponse("Blank title, or the image is not a PNG or JPEG"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not administer the firm"),
+    404: errorResponse("No such signatory, or no such image, at this firm"),
+  },
+});
+
+const defaultSignatoryRoute = createRoute({
+  method: "post",
+  path: "/api/v1/tenancy/signatories/{signatoryId}/default",
+  tags: ["tenancy"],
+  summary: "Make this signatory the firm's default",
+  request: { params: SignatoryParam },
+  responses: {
+    200: { description: "The default now", content: { "application/json": { schema: SignatorySchema } } },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not administer the firm"),
+    404: errorResponse("No such signatory, or they no longer work here"),
+    409: errorResponse("Retired: reinstate them first"),
+  },
+});
+
+const signatoryActiveRoute = createRoute({
+  method: "put",
+  path: "/api/v1/tenancy/signatories/{signatoryId}/active",
+  tags: ["tenancy"],
+  summary: "Retire a signatory, or reinstate one",
+  description:
+    "A retired signatory cannot be chosen for a new letter; letters they signed keep reading. " +
+    "The default cannot be retired until somebody else is the default.",
+  request: {
+    params: SignatoryParam,
+    body: {
+      content: { "application/json": { schema: z.object({ isActive: z.boolean() }).openapi("SignatoryActiveRequest") } },
+      required: true,
+    },
+  },
+  responses: {
+    200: { description: "Done", content: { "application/json": { schema: SignatorySchema } } },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not administer the firm"),
+    404: errorResponse("No such signatory, or (reinstating) they no longer work here"),
+    409: errorResponse("The default cannot be retired"),
+  },
+});
+
 const renameSelfRoute = createRoute({
   method: "patch",
   path: "/api/v1/tenancy/me",
@@ -953,6 +1108,53 @@ export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDep
       { userId: signatory.userId, displayName: signatory.displayName, title: signatory.title },
       200,
     );
+  });
+
+  app.openapi(signatoriesRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const list = await deps.service.listSignatories(s.tenantId);
+    return c.json({ signatories: list.map(signatoryWire) }, 200);
+  });
+
+  app.openapi(addSignatoryRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { userId, title, makeDefault } = c.req.valid("json");
+    const added = await deps.service.addSignatory(
+      { tenantId: s.tenantId, userId, title, makeDefault },
+      s.actor,
+    );
+    return c.json(signatoryWire(added), 201);
+  });
+
+  app.openapi(changeSignatoryRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { signatoryId } = c.req.valid("param");
+    const { title, signatureVersionId } = c.req.valid("json");
+    const changed = await deps.service.changeSignatory(
+      { tenantId: s.tenantId, signatoryId, title, signatureVersionId },
+      s.actor,
+    );
+    return c.json(signatoryWire(changed), 200);
+  });
+
+  app.openapi(defaultSignatoryRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { signatoryId } = c.req.valid("param");
+    const made = await deps.service.makeDefaultSignatory(s.tenantId, signatoryId, s.actor);
+    return c.json(signatoryWire(made), 200);
+  });
+
+  app.openapi(signatoryActiveRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { signatoryId } = c.req.valid("param");
+    const { isActive } = c.req.valid("json");
+    const done = await deps.service.setSignatoryActive(s.tenantId, signatoryId, isActive, s.actor);
+    return c.json(signatoryWire(done), 200);
   });
 
   app.openapi(renameSelfRoute, async (c) => {

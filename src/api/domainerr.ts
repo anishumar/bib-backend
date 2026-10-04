@@ -140,7 +140,16 @@ export function mapError(err: unknown): MappedError {
       // named somebody who is not on this firm's roster. Same answer as
       // MEMBERSHIP_NOT_FOUND above, because it is the same fact.
       case "SIGNATORY_NOT_A_MEMBER":
+      case "SIGNATORY_NOT_FOUND":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      case "INVALID_SIGNATORY_TITLE":
+      case "SIGNATURE_NOT_DRAWABLE":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      // The list's state refuses these, not the request's shape (0343).
+      case "SIGNATORY_ALREADY_LISTED":
+      case "SIGNATORY_RETIRED":
+      case "DEFAULT_SIGNATORY_CANNOT_RETIRE":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
     }
@@ -796,6 +805,7 @@ export function mapError(err: unknown): MappedError {
       case "NOTHING_TO_REVISE":
       case "NOTHING_TO_CHANGE_ON_LINE":
       case "INVALID_CURRENCY_CHANGE":
+      case "RATE_FOR_MAIN_CURRENCY":
       case "INVALID_LINE_DESCRIPTION":
       case "INVALID_RECIPIENT":
       case "SIGNER_NAME_REQUIRED":
@@ -842,6 +852,8 @@ export function mapError(err: unknown): MappedError {
       case "PROPOSAL_CITED_BY_LETTER":
       case "LEAD_DELETED":
       case "CURRENCY_LOCKED_BY_LINES":
+      case "CURRENCY_NEEDS_A_RATE":
+      case "RATE_IN_USE":
       case "PROSE_EDITED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       // Reachable only from a process composed with no mailer — the worker,
@@ -903,6 +915,7 @@ export function mapError(err: unknown): MappedError {
       case "NOTHING_TO_CHANGE_ON_LINE":
       case "INVALID_LINE_DESCRIPTION":
       case "INVALID_CURRENCY_CHANGE":
+      case "RATE_FOR_MAIN_CURRENCY":
       case "NOT_CALLERS_TODAY":
       case "END_REASON_REQUIRED":
       case "INVALID_END_DATE":
@@ -974,6 +987,9 @@ export function mapError(err: unknown): MappedError {
       case "LETTER_NOT_COPYABLE":
       case "QUOTE_DELETED":
       case "CURRENCY_LOCKED_BY_LINES":
+      case "CURRENCY_NEEDS_A_RATE":
+      case "RATE_IN_USE":
+      case "LINE_CURRENCY_IS_SECTIONS":
       case "PROSE_EDITED":
       case "TERMS_ON_LETTER":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };

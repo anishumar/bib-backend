@@ -243,3 +243,56 @@ export interface ManagerRevenue {
   readonly outstanding: string;
   readonly outstandingInvoices: number;
 }
+
+// ── Recurring fees by currency (0345, Q009) ─────────────────────────────────
+//
+// MRR is struck at the rate each letter was SIGNED at, and stays so: a
+// contract's value to the firm is what it agreed. Beside it, as Zoho Books,
+// Xero and QuickBooks show foreign balances, the same fees valued at TODAY's
+// rate, with the rate's date and source, so a partner sees what the dirham
+// work is worth this morning without the MRR figure moving under them.
+
+/** Today's rate for one currency, or why there is none. */
+export interface TodaysRate {
+  readonly fxRate: string;
+  readonly fxRateDate: string;
+  readonly source: string;
+}
+
+/** One currency's recurring fees, a month. */
+export interface CurrencyMrr {
+  readonly currency: string;
+  /** In `currency` itself. */
+  readonly monthly: string;
+  /** In the reporting currency, at each letter's own rate (what MRR counts). */
+  readonly atSignedRates: string;
+  /** In the reporting currency at today's rate; null with no rate held. */
+  readonly atTodaysRate: string | null;
+  /** Null with no rate held; the reporting currency's own row has rate 1. */
+  readonly todaysRate: TodaysRate | null;
+  readonly engagements: number;
+}
+
+/** One client's recurring fees in one currency. */
+export interface ClientCurrencyMrr {
+  readonly partyId: string;
+  readonly name: string;
+  readonly currency: string;
+  readonly monthly: string;
+  readonly atSignedRates: string;
+  readonly atTodaysRate: string | null;
+}
+
+export interface MrrByCurrency {
+  readonly reportingCurrency: string;
+  /** The firm's day the rates are "today" for. */
+  readonly asOf: string;
+  /** The reporting currency first, then by code. */
+  readonly currencies: readonly CurrencyMrr[];
+  /** Biggest first by the signed-rate figure. */
+  readonly clients: readonly ClientCurrencyMrr[];
+  /** Equals the MRR card's figure. */
+  readonly totalAtSignedRates: string;
+  /** Null when any currency has no rate today. */
+  readonly totalAtTodaysRate: string | null;
+}

@@ -41,6 +41,8 @@ export const MONEY_IN_PAYLOAD: Readonly<Partial<Record<EventVerb, readonly strin
   "engagement_letter.advance_recorded": ["amount"],
   "engagement_letter.currency_changed": ["fromFxRate", "toFxRate"],
   "proposal.currency_changed": ["fromFxRate", "toFxRate"],
+  "proposal.rate_set": ["fxRate"],
+  "engagement_letter.rate_set": ["fxRate"],
   "proposal.drafted": ["fxRate"],
   "invoice.raised": ["fxRate"],
   "lead.details_changed": ["estimatedValueFrom", "estimatedValueTo"],

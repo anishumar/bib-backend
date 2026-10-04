@@ -47,7 +47,8 @@ import {
   parseShareToken,
   proposalDeletionBlock,
 } from "../../domain/proposal/model";
-import { isAmount, isExchangeRate, isCurrencyCode, normalizeCurrency } from "../../domain/money/model";
+import { isAmount, isExchangeRate, isCurrencyCode, normalizeCurrency, rateFor } from "../../domain/money/model";
+import type { CurrencyRate } from "../../domain/money/model";
 import { readServiceBody } from "../../domain/config/model";
 import {
   isBillingFrequency,
@@ -77,6 +78,9 @@ import {
   NothingToChangeOnLine,
   InvalidLineDescription,
   CurrencyLockedByLines,
+  CurrencyNeedsARate,
+  RateInUse,
+  RateIsMainCurrency,
   InvalidCurrencyChange,
   ProseEdited,
   UnpricedLineHasDiscount,
@@ -369,6 +373,25 @@ export interface AddLineInput {
     | undefined;
   /** WHY there is no amount, and REQUIRED when there is none. */
   readonly pricingNote?: string | undefined;
+  /** What this line is priced in (0344). Absent: the catalogue price's currency
+   *  when the fee is taken from it and the proposal holds that currency, else
+   *  the proposal's main currency. Any currency but the main one needs its rate
+   *  on the proposal first. */
+  readonly currency?: string | undefined;
+}
+
+/**
+ * The rate of one OTHER currency on a draft (0344). The main currency's rate
+ * is the head's, changed with the currency itself.
+ */
+export interface SetRateInput {
+  readonly tenantId: string;
+  readonly proposalId: string;
+  readonly currency: string;
+  readonly fxRate: string;
+  readonly fxRateDate: string;
+  /** "typed" unless a rate service supplied it. */
+  readonly source?: string | undefined;
 }
 
 /**
@@ -402,10 +425,14 @@ export interface UpdateLineInput {
     | null
     | undefined;
   readonly pricingNote?: string | null | undefined;
+  /** Move the line to another currency (0344): the main one or one the
+   *  proposal holds a rate for. The amount is not converted; it is restated. */
+  readonly currency?: string | undefined;
 }
 
 /** The fields of `UpdateLineInput` that are a change, as opposed to its address. */
 const LINE_EDIT_FIELDS = [
+  "currency",
   "description",
   "quantity",
   "unitAmount",
@@ -506,6 +533,13 @@ export class ProposalService {
       source,
     );
 
+    // THE OTHER CURRENCIES' RATES (0344), as they stood on the closed one: the
+    // copy is a starting point, and each line below needs its currency's rate
+    // before it can go on. A person can change any of them before sending.
+    for (const rate of source.rates) {
+      await this.deps.proposals.setRate(tenantId, copy.id, rate);
+    }
+
     let linesCopied = 0;
     const skipped: SkippedCopyLine[] = [];
     // IN ORDER, one at a time: `addLine` takes each line's position from what
@@ -520,6 +554,7 @@ export class ProposalService {
             serviceVersionId: line.serviceVersionId,
             description: line.description,
             quantity: line.quantity,
+            currency: line.currency,
             ...(line.unitAmount === null ? {} : { unitAmount: line.unitAmount }),
             discountPercent: line.discountPercent,
             ...(line.jurisdiction === null ? {} : { jurisdiction: line.jurisdiction }),
@@ -753,8 +788,9 @@ export class ProposalService {
     }
 
     // THE MONEY (T6.18). Three fields or none: a rate belongs to one currency on
-    // one day. A different currency only while nothing is quoted — every line
-    // is priced in the document's currency and the key would relabel it.
+    // one day. A different MAIN currency only while no live line is in the old
+    // one (0344): lines keep their own currency, and one left in a currency
+    // with no rate would drop out of every converted figure.
     const money = [input.currency, input.fxRate, input.fxRateDate];
     if (money.some((v) => v !== undefined)) {
       if (money.some((v) => v === undefined)) throw new InvalidCurrencyChange();
@@ -764,7 +800,8 @@ export class ProposalService {
       if (!isExchangeRate(fxRate) || Number(fxRate) <= 0) throw new InvalidFxRate(fxRate);
       if (currency !== proposal.currency) {
         const live = await this.deps.proposals.listLines(input.tenantId, input.proposalId);
-        if (live.length > 0) throw new CurrencyLockedByLines(live.length, proposal.currency);
+        const inOld = live.filter((l) => l.currency === proposal.currency).length;
+        if (inOld > 0) throw new CurrencyLockedByLines(inOld, proposal.currency);
       }
       change.currency = currency;
       change.fxRate = fxRate;
@@ -937,13 +974,26 @@ export class ProposalService {
     // fee in from it; the API does that now, so the drafter is never shown the
     // price and the quote is the same. With no price to quote, the refusal says
     // what to send.
+    //
+    // THE LINE'S CURRENCY (0344): the caller's; else, when the fee comes from
+    // the list price, the list price's currency if the proposal holds it; else
+    // the main currency. Whatever it is, the proposal must hold its rate.
     let unitAmount = input.unitAmount ?? null;
-    if (unitAmount === null && pricingNote === null) {
+    const listPrice = readServiceBody(pinned.body).listPrice;
+    const fromList = unitAmount === null && pricingNote === null;
+    const currency =
+      input.currency !== undefined
+        ? this.lineCurrency(input.currency)
+        : fromList && listPrice !== null && rateFor(proposal, listPrice.currency) !== null
+          ? listPrice.currency
+          : proposal.currency;
+    if (rateFor(proposal, currency) === null) throw new CurrencyNeedsARate(currency);
+    if (fromList) {
       const service = readServiceBody(pinned.body);
-      if (service.listPrice === null || service.listPrice.currency !== proposal.currency) {
-        throw new ServiceHasNoListPrice(service.name === "" ? input.description : service.name, proposal.currency);
+      if (listPrice === null || listPrice.currency !== currency) {
+        throw new ServiceHasNoListPrice(service.name === "" ? input.description : service.name, currency);
       }
-      unitAmount = service.listPrice.amount;
+      unitAmount = listPrice.amount;
     }
     checkPricing(unitAmount, pricingNote, input.discountPercent);
 
@@ -964,9 +1014,7 @@ export class ProposalService {
       description: input.description,
       quantity: input.quantity,
       unitAmount,
-      // The proposal's, never the caller's: the composite key would refuse a
-      // different one anyway, and a 400 explaining the rule beats a 500.
-      currency: proposal.currency,
+      currency,
       discountPercent: input.discountPercent,
       jurisdiction,
       // DEFAULTED FROM THE PIN, ONCE, AND STORED. The catalogue says how often
@@ -1020,6 +1068,10 @@ export class ProposalService {
     }
     const quantity = input.quantity ?? current.quantity;
     checkQuantity(quantity);
+    const currency = input.currency === undefined ? current.currency : this.lineCurrency(input.currency);
+    if (currency !== current.currency && rateFor(proposal, currency) === null) {
+      throw new CurrencyNeedsARate(currency);
+    }
     const unitAmount = input.unitAmount === undefined ? current.unitAmount : input.unitAmount;
     const pricingNote =
       input.pricingNote === undefined ? current.pricingNote : blankToNull(input.pricingNote ?? undefined);
@@ -1059,6 +1111,7 @@ export class ProposalService {
       {
         description,
         quantity,
+        currency,
         unitAmount,
         discountPercent,
         jurisdiction,
@@ -1122,6 +1175,62 @@ export class ProposalService {
 
   /** The line's jurisdiction, normalised. Refused rather than silently dropped:
    *  "in" and "IN" are the same country and "INR" is not one. */
+  /**
+   * Give a DRAFT the rate of one of its OTHER currencies, or change it (0344).
+   * The main currency's rate is the head's (`revise`). Recorded, like the main
+   * rate: it is a commercial fact even on a draft.
+   */
+  async setRate(input: SetRateInput, actor: Actor): Promise<CurrencyRate> {
+    const proposal = await this.draftOrThrow(input.tenantId, input.proposalId);
+    const currency = this.lineCurrency(input.currency);
+    if (currency === proposal.currency) throw new RateIsMainCurrency(currency);
+    if (!isExchangeRate(input.fxRate) || Number(input.fxRate) <= 0) throw new InvalidFxRate(input.fxRate);
+    const source = (input.source ?? "typed").trim() === "" ? "typed" : (input.source ?? "typed").trim();
+    const rate = await this.deps.proposals.setRate(input.tenantId, proposal.id, {
+      currency,
+      fxRate: input.fxRate,
+      fxRateDate: input.fxRateDate,
+      source,
+    });
+    if (rate === null) {
+      await this.draftOrThrow(input.tenantId, input.proposalId);
+      throw new RateIsMainCurrency(currency);
+    }
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "proposal.rate_set",
+      objectId: proposal.id,
+      actor,
+      payload: { currency, fxRate: rate.fxRate, fxRateDate: rate.fxRateDate, source: rate.source },
+    });
+    return rate;
+  }
+
+  /** Take a rate off a DRAFT: only while no live line is priced in it. */
+  async removeRate(tenantId: string, proposalId: string, raw: string, actor: Actor): Promise<void> {
+    const proposal = await this.draftOrThrow(tenantId, proposalId);
+    const currency = this.lineCurrency(raw);
+    if (currency === proposal.currency) throw new RateIsMainCurrency(currency);
+    const using = (await this.deps.proposals.listLines(tenantId, proposalId)).filter((l) => l.currency === currency);
+    if (using.length > 0) throw new RateInUse(currency, using.length);
+    if (await this.deps.proposals.removeRate(tenantId, proposalId, currency)) {
+      await this.deps.events.recordEvent({
+        tenantId,
+        verb: "proposal.rate_removed",
+        objectId: proposal.id,
+        actor,
+        payload: { currency },
+      });
+    }
+  }
+
+  /** A line's or a rate's currency: three letters, upper-cased (0344). */
+  private lineCurrency(raw: string): string {
+    const currency = normalizeCurrency(raw);
+    if (!isCurrencyCode(currency)) throw new InvalidQuoteCurrency(raw);
+    return currency;
+  }
+
   private lineJurisdiction(raw: string | undefined): string | null {
     if (raw === undefined || raw.trim() === "") return null;
     const normalised = normalizeJurisdiction(raw);
@@ -2048,6 +2157,7 @@ function planOf(record: ProposalRecord): ProposalPlan {
       terms: l.terms,
       billingFrequency: l.line.billingFrequency,
       net: l.net,
+      currency: l.line.currency,
       pricingNote: l.line.pricingNote,
       oopEstimate: l.line.oopEstimate,
     })),

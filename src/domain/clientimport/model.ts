@@ -642,11 +642,24 @@ export interface LetterLinePlan {
   readonly startedOn: IsoDate;
   readonly billingFrequency: BillingFrequency;
   readonly unitAmount: string | null;
+  /** What the fee is in (0344): the letter's main currency or another. */
+  readonly currency: string;
   readonly jurisdiction: string | null;
   readonly basis: string | null;
 }
 
-/** One migrated letter: a client, a currency, its lines. */
+/** The main currency of a letter whose lines are in `currencies`: the firm's
+ *  own when any line is in it, else the one most lines are in, ties by code. */
+export function mainCurrency(currencies: readonly string[], firmCurrency: string): string {
+  if (currencies.includes(firmCurrency) || currencies.length === 0) return firmCurrency;
+  const count = new Map<string, number>();
+  for (const c of currencies) count.set(c, (count.get(c) ?? 0) + 1);
+  return [...count].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0] ?? firmCurrency;
+}
+
+/** One migrated letter: a client, its lines in whatever currencies they are
+ *  in (0345, Q006). `currency` is the MAIN one; every other currency on a
+ *  line gets a rate on the letter when it is written. */
 export interface LetterPlan {
   readonly clientName: string;
   /** The client-sheet row being billed, or null when the client is on file. */
@@ -1335,6 +1348,7 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
         // recurrence was refused, so one of the two is present here.
         billingFrequency: billingFrequency ?? "custom",
         unitAmount: fee,
+        currency: currency ?? snap.firmCurrency,
         jurisdiction: e.where === null ? null : e.where.toUpperCase(),
         basis: e.basis,
       },
@@ -1348,13 +1362,15 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
     });
   }
 
-  // One letter per client per currency. A line's currency is the letter's, so
-  // two currencies on one client are two letters — and that is the honest
-  // shape, because the paper letters were priced that way too.
+  // ONE LETTER PER CLIENT (0345, Shrestha 2026-10-04), its lines in their own
+  // currencies, as a letter has been able to hold since 0344. The main
+  // currency is the firm's own when any line is in it, else the one most lines
+  // are in (ties by code); every other currency is rated when the letter is
+  // written, from the exchange-rate feed on the letter's start day.
   const letters: LetterPlan[] = [];
   const groups = new Map<string, PlannedLine[]>();
   for (const p of planned) {
-    const k = `${p.billTo.key}|${p.currency}`;
+    const k = p.billTo.key;
     const list = groups.get(k);
     if (list) list.push(p);
     else groups.set(k, [p]);
@@ -1387,7 +1403,7 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
       clientLineNo: first.billTo.lineNo,
       clientPartyId: first.billTo.partyId,
       jurisdiction: letterJurisdiction,
-      currency: first.currency,
+      currency: mainCurrency(list.map((l) => l.currency), snap.firmCurrency),
       effectiveFrom,
       signatory: first.billTo.signatory ?? MIGRATED_SIGNATORY,
       lines: list.map((l) => l.line),

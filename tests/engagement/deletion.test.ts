@@ -86,6 +86,7 @@ function quote(over: Partial<QuotedProposal["proposal"]> = {}): QuotedProposal {
       currency: "INR",
       fxRate: "1",
       fxRateDate: "2026-07-01",
+      rates: [],
       deletedAt: null,
       ...over,
     },

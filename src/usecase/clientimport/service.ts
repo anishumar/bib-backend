@@ -76,6 +76,7 @@ import type {
   ImportDirectory,
   ImportOutcome,
   LetterOutcome,
+  ImportRates,
   LetterWriter,
   OutcomeRow,
   PartyWriter,
@@ -104,6 +105,9 @@ export interface Deps {
   readonly parties: PartyWriter;
   readonly assignments: AssignmentWriter;
   readonly letters: LetterWriter;
+  /** The rates a migrated letter is struck at (0345): the feed's, on the
+   *  letter's start day. */
+  readonly rates: ImportRates;
   readonly portalInvites: PortalInviteWriter;
   readonly portalAccess: PortalAccessGranter;
   readonly portalMembers: PortalMemberFinder;
@@ -646,6 +650,24 @@ export class ClientImportService {
     if (missing !== undefined) return failed(`"${missing.line.entityName}" was not created, so its line has no entity`);
 
     const basis = [...new Set(plan.lines.map((l) => l.basis).filter((b): b is string => b !== null))];
+
+    // THE RATES, from the exchange-rate feed on the day the letter starts
+    // (0345). Until 0345 a migrated letter in another currency was struck at
+    // "1", which counted AED 4,000 a month as INR 4,000 in MRR. One for the
+    // firm's own currency; a currency nobody publishes stops this letter, by
+    // name, rather than guessing.
+    const head = await this.deps.rates.quote(tenantId, plan.currency, plan.effectiveFrom);
+    if (head === null) {
+      return failed(`no exchange rate for ${plan.currency} is available, so the letter cannot be valued. Try again later`);
+    }
+    const others = [...new Set(plan.lines.map((l) => l.currency))].filter((c) => c !== plan.currency).sort();
+    const rated: { currency: string; fxRate: string; fxRateDate: string; source: string }[] = [];
+    for (const currency of others) {
+      const q = await this.deps.rates.quote(tenantId, currency, plan.effectiveFrom);
+      if (q === null) return failed(`no exchange rate for ${currency} is available, so its lines cannot be valued. Try again later`);
+      rated.push({ currency, ...q });
+    }
+
     let step = "drafting the letter";
     let letterId: string | null = null;
     try {
@@ -656,8 +678,8 @@ export class ClientImportService {
           jurisdiction: plan.jurisdiction,
           title: `${plan.clientName}: engagements on file`,
           currency: plan.currency,
-          fxRate: "1",
-          fxRateDate: plan.effectiveFrom,
+          fxRate: head.fxRate,
+          fxRateDate: head.fxRateDate,
           advanceRequired: false,
           background:
             `Recorded from the firm's own records on ${today}, for work already under way. ` +
@@ -670,6 +692,14 @@ export class ClientImportService {
         actor,
       );
       letterId = letter.id;
+
+      for (const r of rated) {
+        step = `rating ${r.currency}`;
+        await this.deps.letters.setRate(
+          { tenantId, letterId: letter.id, currency: r.currency, fxRate: r.fxRate, fxRateDate: r.fxRateDate, source: r.source },
+          actor,
+        );
+      }
 
       for (const { line, partyId } of entities) {
         step = `adding the ${line.serviceCode} line for ${line.entityName}`;
@@ -686,6 +716,7 @@ export class ClientImportService {
           effectiveFrom: line.startedOn,
           jurisdiction: line.jurisdiction ?? undefined,
           billingFrequency: line.billingFrequency,
+          currency: line.currency,
         });
       }
 

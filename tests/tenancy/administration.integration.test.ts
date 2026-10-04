@@ -14,6 +14,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import postgres from "postgres";
 import { load } from "../../src/config/config";
 import { PostgresTenantRepository } from "../../src/infrastructure/postgres/tenant-repository";
+import { PostgresSignatoryRepository } from "../../src/infrastructure/postgres/signatory-repository";
 import { PostgresUserRepository } from "../../src/infrastructure/postgres/user-repository";
 import { PostgresMembershipRepository } from "../../src/infrastructure/postgres/membership-repository";
 import { PostgresServiceAxisRepository } from "../../src/infrastructure/postgres/service-axis-repository";
@@ -115,6 +116,7 @@ const tenancy = new TenancyService({
   roleDirectory: configRepository,
   gradeSeeder: { seedDefaultGrades: (t, a) => staffGrades.seedDefaultGrades(t, a) },
   gradeDirectory: staffGradeRepository,
+  signatories: new PostgresSignatoryRepository(app),
   // T3.1. The real service over the real table, like the two seeders above:
   // provisioning that stopped giving a firm its work-item states would leave it
   // unable to record a single task, and this test is what would catch it.
@@ -435,11 +437,12 @@ describe("who binds the firm", () => {
       { tenantId: firmId, userId: partnerId, title: "Director" },
       SYSTEM_ACTOR,
     );
-    expect(await tenancy.firmSignatory(firmId)).toEqual({
-      userId: partnerId,
-      displayName: "Siddharth Jain",
-      title: "Director",
-    });
+    const named = await tenancy.firmSignatory(firmId);
+    expect(named).toMatchObject({ userId: partnerId, displayName: "Siddharth Jain", title: "Director" });
+    // And the default is an entry on the list (0343), not a bare pair.
+    const list = await tenancy.listSignatories(firmId);
+    expect(list.map((s) => [s.userId, s.title, s.isDefault])).toEqual([[partnerId, "Director", true]]);
+    expect(named?.signatoryId).toBe(list[0]?.id);
   });
 
   it("refuses half a signatory, as the OWNER role", async () => {
@@ -474,5 +477,41 @@ describe("who binds the firm", () => {
        WHERE id = ${firmId}
     `.catch((e: unknown) => e);
     expect((err as { code?: string }).code).toBe("23503"); // foreign_key_violation
+  });
+
+  // ── 0343: the list, and the key that holds the default onto it ─────────────
+
+  it("refuses, in the schema, a default who is not on the list", async () => {
+    // Two places, one fact: the tenant's pair is a key onto the list, so even
+    // the OWNER role cannot name a default the list does not hold.
+    const stranger = await tenancy.ensureUser(`unlisted-${stamp}@lakeview.example`, "Not Listed");
+    const err = await owner`
+      UPDATE tenancy.tenant SET firm_signatory_user_id = ${stranger.id}, firm_signatory_title = 'Director'
+       WHERE id = ${firmId}
+    `.catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("23503");
+  });
+
+  it("moves the tenant's copy when the default's title changes on the list", async () => {
+    const [entry] = await tenancy.listSignatories(firmId);
+    if (!entry) throw new Error("the round trip above should have listed the partner");
+    await tenancy.changeSignatory({ tenantId: firmId, signatoryId: entry.id, title: "Managing Director" }, SYSTEM_ACTOR);
+    const [row] = await owner<{ firm_signatory_title: string }[]>`
+      SELECT firm_signatory_title FROM tenancy.tenant WHERE id = ${firmId}
+    `;
+    expect(row?.firm_signatory_title).toBe("Managing Director");
+  });
+
+  it("is one firm's list and nobody else's", async () => {
+    // tenantId is the firm the roster block above provisioned: under ITS wall,
+    // this firm's signatories do not exist.
+    const theirs = await withTenant(app, tenantId, (db) =>
+      db<{ n: number }[]>`SELECT count(*)::int AS n FROM tenancy.firm_signatory WHERE tenant_id = ${firmId}`,
+    );
+    expect(theirs[0]?.n).toBe(0);
+    const ours = await withTenant(app, firmId, (db) =>
+      db<{ n: number }[]>`SELECT count(*)::int AS n FROM tenancy.firm_signatory`,
+    );
+    expect(ours[0]?.n).toBeGreaterThan(0);
   });
 });

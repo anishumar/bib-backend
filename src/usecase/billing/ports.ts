@@ -437,6 +437,9 @@ export interface LetterAdvanceFacts {
     readonly engagementId: string;
     readonly status: string;
     readonly advanceAmount: string | null;
+    /** What this service is priced in (0344), so its own advance is billed in
+     *  it. Absent reads as the letter's, which every line was before 0344. */
+    readonly currency?: string | undefined;
     readonly deptCode: string | null;
   }[];
 }

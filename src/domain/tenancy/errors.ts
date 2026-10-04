@@ -28,7 +28,13 @@ export type TenancyErrorCode =
   | "MEMBERSHIP_EXISTS"
   | "ROLE_NOT_DEFINED"
   | "LAST_ADMINISTRATOR"
-  | "SIGNATORY_NOT_A_MEMBER";
+  | "SIGNATORY_NOT_A_MEMBER"
+  | "SIGNATORY_NOT_FOUND"
+  | "SIGNATORY_ALREADY_LISTED"
+  | "SIGNATORY_RETIRED"
+  | "DEFAULT_SIGNATORY_CANNOT_RETIRE"
+  | "INVALID_SIGNATORY_TITLE"
+  | "SIGNATURE_NOT_DRAWABLE";
 
 export class InvalidSlug extends TenancyError {
   constructor(slug: string) {
@@ -140,6 +146,71 @@ export class SignatoryNotAMember extends TenancyError {
       `User ${JSON.stringify(userId)} has no active staff membership at this firm, so they ` +
         `cannot be named as the person who binds it. Whoever signs the firm's engagement ` +
         `letters has to work here: add them to the roster first, or reinstate their access.`,
+    );
+  }
+}
+
+/** No signatory with this id on this firm's list (0343). */
+export class SignatoryNotFound extends TenancyError {
+  constructor(signatoryId: string) {
+    super("SIGNATORY_NOT_FOUND", `No signatory ${JSON.stringify(signatoryId)} on this firm's list.`);
+  }
+}
+
+/** The person is already on the list. One entry per person, so the dropdown
+ *  on a letter never offers the same partner twice. */
+export class SignatoryAlreadyListed extends TenancyError {
+  constructor(displayName: string) {
+    super(
+      "SIGNATORY_ALREADY_LISTED",
+      `${displayName} is already on the list of signatories. Change their title there instead.`,
+    );
+  }
+}
+
+/** A retired signatory cannot be chosen for a new letter, and a draft that
+ *  chose one cannot be sent until somebody else is chosen. */
+export class SignatoryRetired extends TenancyError {
+  constructor(displayName: string) {
+    super(
+      "SIGNATORY_RETIRED",
+      `${displayName} no longer signs for the firm. Choose another signatory, or reinstate ` +
+        `them on Your firm.`,
+    );
+  }
+}
+
+/** The default is who signs every letter nobody chose for, and who the owner
+ *  rule falls back to; retiring them would leave both pointing at a person who
+ *  no longer signs. Name another default first. */
+export class DefaultSignatoryCannotRetire extends TenancyError {
+  constructor(displayName: string) {
+    super(
+      "DEFAULT_SIGNATORY_CANNOT_RETIRE",
+      `${displayName} is the firm's default signatory. Make someone else the default first, ` +
+        `then retire them.`,
+    );
+  }
+}
+
+export class InvalidSignatoryTitle extends TenancyError {
+  constructor() {
+    super(
+      "INVALID_SIGNATORY_TITLE",
+      `Say what they sign as, for example "Director" or "Managing Partner". It is printed ` +
+        `under their name on the letter.`,
+    );
+  }
+}
+
+/** The renderer draws PNG and JPEG only; anything else would store fine and
+ *  then vanish from every letter with nothing saying so. */
+export class SignatureNotDrawable extends TenancyError {
+  constructor(mediaType: string) {
+    super(
+      "SIGNATURE_NOT_DRAWABLE",
+      `A signature has to be a PNG or JPEG image to print on a letter, and this file is ` +
+        `${JSON.stringify(mediaType)}.`,
     );
   }
 }

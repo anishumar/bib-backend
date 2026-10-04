@@ -10,6 +10,7 @@
 // partner actually reads. Those are proven in
 // `tests/dashboard/figures.integration.test.ts`, against real Postgres, which
 // is the only place they CAN be proven.
+import type { MrrByCurrency } from "../domain/dashboard/model";
 import type { MrrGap, Slice } from "../domain/dashboard/model";
 import { AGEING_BUCKETS } from "../domain/dashboard/model";
 import type {
@@ -32,6 +33,28 @@ export class FakeDashboardRepo implements DashboardRepository {
   bandAmounts = new Map<string, { amount: string; invoiceCount: number }>();
   slices: Slice[] = [];
   sales = "0";
+  /** The by-currency report as a test sets it (0345), and the days asked. */
+  byCurrency: MrrByCurrency | null = null;
+  byCurrencyDays: string[] = [];
+  mrrCurrencyList: string[] = [];
+
+  mrrCurrencies(): Promise<readonly string[]> {
+    return Promise.resolve(this.mrrCurrencyList);
+  }
+
+  mrrByCurrency(_tenantId: string, day: string): Promise<MrrByCurrency> {
+    this.byCurrencyDays.push(day);
+    return Promise.resolve(
+      this.byCurrency ?? {
+        reportingCurrency: this.currency,
+        asOf: day,
+        currencies: [],
+        clients: [],
+        totalAtSignedRates: "0",
+        totalAtTodaysRate: "0",
+      },
+    );
+  }
   /** Billing by company: the companies, and the rows SQL would have summed.
    *  `billingWindows` records every window asked for, so a test can see
    *  which months the service cut. */

@@ -117,6 +117,8 @@ interface LetterLineRow {
   billing_on: string | null;
   pricing_note: string | null;
   line_total: string | null;
+  /** The line's own currency (0344). */
+  currency: string;
 }
 
 interface BlockRow {
@@ -315,7 +317,7 @@ export class PostgresRenderSource implements RenderSource {
         SELECT l.id, l.position, l.description, l.billing_frequency, l.pricing_note,
                l.scope_override, l.client_obligations_override, l.volume_limits_override,
                l.exclusions_override, l.oop_estimate_min::text, l.oop_estimate_max::text,
-               l.oop_currency,
+               l.oop_currency, l.currency,
                CASE WHEN l.unit_amount IS NULL THEN NULL
                     ELSE round(l.quantity * l.unit_amount * (1 - l.discount_percent / 100), 2)::text
                END AS line_total,
@@ -331,17 +333,19 @@ export class PostgresRenderSource implements RenderSource {
 
       // THE MONEY PER FREQUENCY (T6.18, D8), summed by the database from the
       // same per-line view the staff read's `totalsByFrequency` comes from, so
-      // the paper and the screen print one set of figures.
+      // the paper and the screen print one set of figures. Per CURRENCY too
+      // (0344), the main currency's first: two currencies are never added.
       const byFrequency = await db<
-        { frequency: string | null; net: string | null; unpriced: number }[]
+        { currency: string; frequency: string | null; net: string | null; unpriced: number }[]
       >`
-        SELECT l.billing_frequency AS frequency, sum(a.net)::text AS net,
+        SELECT l.currency, l.billing_frequency AS frequency, sum(a.net)::text AS net,
                (count(*) FILTER (WHERE l.unit_amount IS NULL))::int AS unpriced
         FROM crm.proposal_line l
         JOIN crm.proposal_line_amount a ON a.id = l.id
         WHERE l.proposal_id = ${proposalId} AND l.removed_at IS NULL
-        GROUP BY l.billing_frequency
-        ORDER BY coalesce(array_position(
+        GROUP BY l.currency, l.billing_frequency
+        ORDER BY (l.currency = ${row.currency}) DESC, l.currency,
+                 coalesce(array_position(
                    ARRAY['monthly', 'quarterly', 'annually', 'one_time', 'custom'],
                    l.billing_frequency::text), 99)
       `;
@@ -385,6 +389,7 @@ export class PostgresRenderSource implements RenderSource {
             ),
             billingFrequency: l.billing_frequency,
             net: l.line_total,
+            currency: l.currency,
             pricingNote: l.pricing_note,
             oopEstimate:
               l.oop_estimate_min === null || l.oop_estimate_max === null || l.oop_currency === null
@@ -463,9 +468,9 @@ export class PostgresRenderSource implements RenderSource {
               ? []
               : [heading(1, "Background", "proposal.background"), paragraph(row.background, false, "proposal.background")]),
             ...inScopeFlow(plan),
-            ...proposalSectionsFlow(plan, row.currency),
-            ...proposalFeesFlow(plan, row.currency),
-            ...proposalTotalsFlow(byFrequency, row.currency),
+            ...proposalSectionsFlow(plan),
+            ...proposalFeesFlow(plan),
+            ...proposalTotalsFlow(byFrequency),
             ...(row.valid_until === null
               ? []
               : [paragraph(`This proposal is valid until ${longDate(row.valid_until)}.`, true, "proposal.validUntil")]),
@@ -521,16 +526,21 @@ export class PostgresRenderSource implements RenderSource {
         SELECT el.party_id, el.ref, el.title, el.layout, el.jurisdiction, el.currency,
                el.status, el.issuing_entity_party_id,
                -- WHO SEND WOULD SIGN FOR THE FIRM, read for a draft's preview
-               -- only: the standing signatory on the tenant and the issuer's
-               -- signature in force — the two things Send pins (0081).
-               firm.firm_signatory_user_id AS standing_user_id,
-               firm.firm_signatory_title AS standing_title,
+               -- only, by EngagementService.signerFor's rule (0343): the
+               -- drafter's choice, else the firm's default; the person's OWN
+               -- image, else (the default only) the issuer's signature in force.
+               CASE WHEN chosen.id IS NOT NULL THEN chosen.user_id
+                    ELSE firm.firm_signatory_user_id END AS standing_user_id,
+               CASE WHEN chosen.id IS NOT NULL THEN chosen.title
+                    ELSE firm.firm_signatory_title END AS standing_title,
                standing.display_name AS standing_name,
                standing.email::text AS standing_email,
-               (SELECT b.document_version_id FROM files.brand_asset b
-                 WHERE b.entity_party_id = el.issuing_entity_party_id
-                   AND b.tenant_id = el.tenant_id AND b.kind = 'signature' AND b.is_active
-               ) AS standing_signature_version_id,
+               CASE WHEN chosen.id IS NOT NULL
+                    THEN COALESCE(chosen.signature_version_id,
+                                  CASE WHEN chosen.user_id = firm.firm_signatory_user_id
+                                       THEN mark.version_id END)
+                    ELSE COALESCE(dflt.signature_version_id, mark.version_id)
+               END AS standing_signature_version_id,
                el.background, el.advance_required, el.advance_amount::text,
                addressee.display_name AS addressee_name,
                signatory.email::text AS firm_signatory_email,
@@ -561,7 +571,17 @@ export class PostgresRenderSource implements RenderSource {
         JOIN tenancy.tenant firm ON firm.id = el.tenant_id
         LEFT JOIN core.legal_entity le ON le.party_id = entity.id
         LEFT JOIN tenancy.user_account signatory ON signatory.id = el.firm_signatory_user_id
-        LEFT JOIN tenancy.user_account standing ON standing.id = firm.firm_signatory_user_id
+        LEFT JOIN tenancy.firm_signatory chosen ON chosen.id = el.chosen_signatory_id
+        LEFT JOIN tenancy.firm_signatory dflt
+               ON dflt.tenant_id = el.tenant_id AND dflt.user_id = firm.firm_signatory_user_id
+        LEFT JOIN tenancy.user_account standing
+               ON standing.id = CASE WHEN chosen.id IS NOT NULL THEN chosen.user_id
+                                     ELSE firm.firm_signatory_user_id END
+        LEFT JOIN LATERAL (
+          SELECT b.document_version_id AS version_id FROM files.brand_asset b
+           WHERE b.entity_party_id = el.issuing_entity_party_id
+             AND b.tenant_id = el.tenant_id AND b.kind = 'signature' AND b.is_active
+        ) mark ON true
         LEFT JOIN core.party addressee ON addressee.id = el.addressed_to_party_id
         WHERE el.id = ${letterId}
       `;
@@ -611,7 +631,7 @@ export class PostgresRenderSource implements RenderSource {
     if (row.layout === "annexure") return this.annexureLetter(db, tenantId, letterId, row);
 
     const lines = await db<LetterLineRow[]>`
-      SELECT l.description, l.quantity::text, l.unit_amount::text,
+      SELECT l.description, l.quantity::text, l.unit_amount::text, l.currency,
              l.discount_percent::text, l.billing_frequency, l.pricing_note,
              l.billing_timing, l.billing_on::text AS billing_on,
              CASE WHEN l.unit_amount IS NULL THEN NULL
@@ -694,13 +714,16 @@ export class PostgresRenderSource implements RenderSource {
     // floating point on money, and one "Total" adding a monthly fee to a
     // one-off one, which is a figure nobody owes. A letter whose priced lines
     // all bill alike keeps its one "Total", the same figure as before.
-    const byFrequency = await db<{ frequency: string | null; total: string }[]>`
-      SELECT l.billing_frequency AS frequency,
+    //
+    // Per CURRENCY as well (0344), the main currency's first.
+    const byFrequency = await db<{ currency: string; frequency: string | null; total: string }[]>`
+      SELECT l.currency, l.billing_frequency AS frequency,
              sum(round(l.quantity * l.unit_amount * (1 - l.discount_percent / 100), 2))::text AS total
         FROM crm.engagement_letter_line l
        WHERE l.engagement_letter_id = ${letterId} AND l.removed_at IS NULL AND l.unit_amount IS NOT NULL
-       GROUP BY l.billing_frequency
-       ORDER BY coalesce(array_position(
+       GROUP BY l.currency, l.billing_frequency
+       ORDER BY (l.currency = ${row.currency}) DESC, l.currency,
+                coalesce(array_position(
                   ARRAY['monthly', 'quarterly', 'annually', 'one_time', 'custom'],
                   l.billing_frequency::text), 99)
     `;
@@ -751,15 +774,15 @@ export class PostgresRenderSource implements RenderSource {
                 // column reads as free.
                 l.line_total === null
                   ? (l.pricing_note ?? "To be agreed")
-                  : money(l.line_total, row.currency),
+                  : money(l.line_total, l.currency),
               ]),
             },
       totals:
         byFrequency.length === 1
-          ? [{ label: "Total", value: money(byFrequency[0]?.total ?? "0", row.currency), emphasis: true }]
+          ? [{ label: "Total", value: money(byFrequency[0]?.total ?? "0", byFrequency[0]?.currency ?? row.currency), emphasis: true }]
           : byFrequency.map((f) => ({
               label: `Total, ${(f.frequency === null ? "frequency not stated" : (FREQUENCY_LABELS[f.frequency] ?? f.frequency)).toLowerCase()}`,
-              value: money(f.total, row.currency),
+              value: money(f.total, f.currency),
               emphasis: true,
             })),
       footer: row.signed_by_name === null
@@ -831,7 +854,7 @@ export class PostgresRenderSource implements RenderSource {
              l.scope_override, l.client_obligations_override, l.volume_limits_override,
              l.exclusions_override, l.oop_estimate_min::text, l.oop_estimate_max::text,
              l.oop_currency, l.billing_timing, l.billing_on::text AS billing_on,
-             l.advance_amount::text AS advance_amount,
+             l.advance_amount::text AS advance_amount, l.currency,
              CASE WHEN l.unit_amount IS NULL THEN NULL
                   ELSE round(l.quantity * l.unit_amount * (1 - l.discount_percent / 100), 2)::text
              END AS line_total,
@@ -850,6 +873,30 @@ export class PostgresRenderSource implements RenderSource {
       FROM crm.engagement_letter_fee_group
       WHERE engagement_letter_id = ${letterId} AND removed_at IS NULL
       ORDER BY position
+    `;
+
+    // THE FEES PER CURRENCY AND FREQUENCY (0344), summed by the database the
+    // way the letter's own read sums them: a line priced on its own at its
+    // frequency, a section's fee once at the section's. Printed only on a
+    // letter in more than one currency, so a letter in one prints as before.
+    const totals = await db<{ currency: string; frequency: string | null; net: string }[]>`
+      SELECT x.currency, x.frequency, sum(x.net)::text AS net
+        FROM (
+          SELECT currency, billing_frequency AS frequency,
+                 round(quantity * unit_amount * (1 - discount_percent / 100), 2) AS net
+            FROM crm.engagement_letter_line
+           WHERE engagement_letter_id = ${letterId} AND removed_at IS NULL
+             AND fee_group_id IS NULL AND unit_amount IS NOT NULL
+          UNION ALL
+          SELECT currency, billing_frequency, amount
+            FROM crm.engagement_letter_fee_group
+           WHERE engagement_letter_id = ${letterId} AND removed_at IS NULL
+        ) x
+       GROUP BY x.currency, x.frequency
+       ORDER BY (x.currency = ${row.currency}) DESC, x.currency,
+                coalesce(array_position(
+                  ARRAY['monthly', 'quarterly', 'annually', 'one_time', 'custom'],
+                  x.frequency::text), 99)
     `;
 
     const blocks = await db<BlockRow[]>`
@@ -896,6 +943,7 @@ export class PostgresRenderSource implements RenderSource {
           billingOn: l.billing_on,
           effectiveFrom: l.effective_from,
           net: l.line_total,
+          currency: l.currency,
           pricingNote: l.pricing_note,
           oopEstimate:
             l.oop_estimate_min === null || l.oop_estimate_max === null || l.oop_currency === null
@@ -1011,11 +1059,14 @@ export class PostgresRenderSource implements RenderSource {
                 plan,
                 row,
                 lines.flatMap((l) =>
-                  l.advance_amount === null ? [] : [{ description: l.description, amount: l.advance_amount }],
+                  l.advance_amount === null
+                    ? []
+                    : [{ description: l.description, amount: l.advance_amount, currency: l.currency }],
                 ),
                 fmt,
                 current,
               ),
+              ...currencyTotalsFlow(totals, fmt),
               ...titledBlocks("Commercials", byKind("commercial"), "commercial"),
               ...titledBlocks("Team deployment", byKind("team"), "team"),
               ...titledBlocks("General scope exclusions", byKind("exclusion"), "exclusion"),
@@ -1286,6 +1337,8 @@ interface AnnexureLineRow {
   billing_timing: string | null;
   billing_on: string | null;
   advance_amount: string | null;
+  /** The line's own currency (0344). */
+  currency: string;
 }
 
 interface AnnexureGroupRow {
@@ -1450,7 +1503,7 @@ const PER_PERIOD: Readonly<Record<string, string>> = {
 function feesFlow(
   plan: AnnexurePlan,
   row: LetterRow,
-  lineAdvances: readonly { readonly description: string; readonly amount: string }[],
+  lineAdvances: readonly { readonly description: string; readonly amount: string; readonly currency: string }[],
   fmt: Fmt,
   /** Kept on one page when it fits (CA#60): only on a letter drawn since
    *  0334, so a letter already out keeps its pages. */
@@ -1483,7 +1536,7 @@ function feesFlow(
           const fee =
             f.amount === null
               ? (f.pricingNote ?? "To be agreed")
-              : `${fmt(f.amount, row.currency)}${PER_PERIOD[f.billingFrequency ?? ""] ?? ""}` +
+              : `${fmt(f.amount, f.currency)}${PER_PERIOD[f.billingFrequency ?? ""] ?? ""}` +
                 (f.paymentTerms === null ? "" : `\n(${f.paymentTerms})`);
           return [f.code, f.description, `${frequency}${starts}${billed === "" ? "" : `; ${billed}`}`, fee];
         }),
@@ -1516,12 +1569,31 @@ function feesFlow(
       kind: "figures",
       rows: lineAdvances.map((a) => ({
         label: `Advance for ${a.description}, payable before its work begins`,
-        value: fmt(a.amount, row.currency),
+        value: fmt(a.amount, a.currency),
         emphasis: true,
       })),
     });
   }
   return out;
+}
+
+/**
+ * THE TOTAL OF A LETTER IN SEVERAL CURRENCIES (0344): one figure per currency
+ * and frequency — "USD 5,000 per month + AED 4,000 per month" — and never a
+ * grand total, because two currencies are never added together. Nothing on a
+ * letter in one currency, whose Summary of Fees has always stood without one.
+ */
+function currencyTotalsFlow(
+  rows: readonly { readonly currency: string; readonly frequency: string | null; readonly net: string }[],
+  fmt: Fmt,
+): Flow[] {
+  if (new Set(rows.map((r) => r.currency)).size < 2) return [];
+  const figures = rows.map((r) => {
+    const amount = fmt(r.net, r.currency);
+    if (r.frequency === null) return `${amount} (frequency not stated)`;
+    return `${amount}${PER_PERIOD[r.frequency] ?? ` ${(FREQUENCY_LABELS[r.frequency] ?? r.frequency).toLowerCase()}`}`;
+  });
+  return [{ kind: "paragraph", lead: "Total", text: figures.join(" + ") }];
 }
 
 // ── The proposal's pieces (0084) ────────────────────────────────────────────
@@ -1561,6 +1633,8 @@ interface ProposalLineRow {
   oop_estimate_max: string | null;
   oop_currency: string | null;
   line_total: string | null;
+  /** The line's own currency (0344). */
+  currency: string;
   /** The company the line is for, by name, or null. */
   subject: string | null;
   service_body: Record<string, unknown>;
@@ -1576,17 +1650,15 @@ const PROPOSAL_FREQUENCY: Readonly<Record<string, string>> = {
   custom: "Custom",
 };
 
-/** "H3: INR 50,000 Yearly" — what one service costs. An unpriced line prints
- *  its REASON, never a blank or a zero (G1.6); a priced line keeps its note. */
-function proposalFee(
-  item: ProposalPlan["sections"][number]["items"][number],
-  currency: string,
-): string {
+/** "H3: INR 50,000 Yearly" — what one service costs, in its own currency
+ *  (0344). An unpriced line prints its REASON, never a blank or a zero
+ *  (G1.6); a priced line keeps its note. */
+function proposalFee(item: ProposalPlan["sections"][number]["items"][number]): string {
   if (item.net === null) return item.pricingNote ?? "To be agreed";
   const frequency =
     item.billingFrequency === null ? "" : ` ${PROPOSAL_FREQUENCY[item.billingFrequency] ?? ""}`;
   const note = item.pricingNote === null ? "" : ` (${item.pricingNote})`;
-  return `${documentMoney(item.net, currency)}${frequency.trimEnd()}${note}`;
+  return `${documentMoney(item.net, item.currency)}${frequency.trimEnd()}${note}`;
 }
 
 /** A service as the proposal names it, with its company when that says
@@ -1606,7 +1678,7 @@ function inScopeFlow(plan: ProposalPlan): Flow[] {
 
 /** Each Dept's section: what the firm undertakes, service by service, and the
  *  fee for each. */
-function proposalSectionsFlow(plan: ProposalPlan, currency: string): Flow[] {
+function proposalSectionsFlow(plan: ProposalPlan): Flow[] {
   const out: Flow[] = [];
   for (const section of plan.sections) {
     out.push(heading(1, `${section.code}. ${section.title}`));
@@ -1631,7 +1703,7 @@ function proposalSectionsFlow(plan: ProposalPlan, currency: string): Flow[] {
       out.push({
         kind: "paragraph",
         lead: "Fees",
-        text: `${item.code}: ${proposalFee(item, currency)}`,
+        text: `${item.code}: ${proposalFee(item)}`,
         anchor: `fee:line:${item.lineId}`,
       });
     }
@@ -1640,7 +1712,7 @@ function proposalSectionsFlow(plan: ProposalPlan, currency: string): Flow[] {
 }
 
 /** The Summary of Fees: one row per service, with both of its codes. */
-function proposalFeesFlow(plan: ProposalPlan, currency: string): Flow[] {
+function proposalFeesFlow(plan: ProposalPlan): Flow[] {
   const rows = plan.sections.flatMap((s) =>
     s.items.map((i) => [
       s.code,
@@ -1650,7 +1722,7 @@ function proposalFeesFlow(plan: ProposalPlan, currency: string): Flow[] {
         ? "Not stated"
         : (PROPOSAL_FREQUENCY[i.billingFrequency] ?? i.billingFrequency),
       // The fee alone: the frequency has its own column here.
-      i.net === null ? (i.pricingNote ?? "To be agreed") : documentMoney(i.net, currency),
+      i.net === null ? (i.pricingNote ?? "To be agreed") : documentMoney(i.net, i.currency),
     ]),
   );
   if (rows.length === 0) {
@@ -1687,16 +1759,16 @@ function proposalFeesFlow(plan: ProposalPlan, currency: string): Flow[] {
  * "INR 50,000 Monthly + INR 1,25,000 Yearly + INR 15,000 One-time", never one
  * mixed net that adds a monthly fee to a one-time one. Summed by the database;
  * a line with no price is counted beside the figures rather than read as zero.
+ * Per currency too (0344): "USD 5,000 Monthly + AED 4,000 Monthly".
  */
 function proposalTotalsFlow(
-  rows: readonly { frequency: string | null; net: string | null; unpriced: number }[],
-  currency: string,
+  rows: readonly { currency: string; frequency: string | null; net: string | null; unpriced: number }[],
 ): Flow[] {
   const priced = rows.filter((r) => r.net !== null);
   const unpriced = rows.reduce((n, r) => n + r.unpriced, 0);
   if (priced.length === 0) return [];
   const figures = priced.map((r) => {
-    const amount = documentMoney(r.net ?? "0", currency);
+    const amount = documentMoney(r.net ?? "0", r.currency);
     return r.frequency === null
       ? `${amount} (frequency not stated)`
       : `${amount} ${PROPOSAL_FREQUENCY[r.frequency] ?? r.frequency}`;

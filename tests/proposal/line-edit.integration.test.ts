@@ -193,7 +193,7 @@ describe("the line edit's UPDATE, against real Postgres (T6.18)", () => {
     expect(read?.terms.scope).toEqual({ text: "Quarterly GSTR-1 only.", tailored: true });
     // 6 × 1499.50 = 8997.00, less 12.5% = 7872.375 → 7872.3750, from `numeric`.
     expect(read?.net).toBe("7872.3750");
-    expect(view.totals.net).toBe("7872.3750");
+    expect(view.totals[0]?.net).toBe("7872.3750");
   });
 
   it("null reads back as the catalogue's words and the service's recurrence through the join", async () => {
@@ -220,8 +220,8 @@ describe("the line edit's UPDATE, against real Postgres (T6.18)", () => {
     const view = await service.describe(tenant, proposalId);
     expect(view.lines[0]?.line.unitAmount).toBeNull();
     expect(view.lines[0]?.net).toBeNull();
-    expect(view.totals.unpricedLineCount).toBe(1);
-    expect(view.totals.net).toBe("0");
+    expect(view.totals[0]?.unpricedLineCount).toBe(1);
+    expect(view.totals[0]?.net).toBe("0");
   });
 
   it("the WHERE refuses a line on a proposal that has gone out", async () => {
@@ -241,6 +241,7 @@ describe("the line edit's UPDATE, against real Postgres (T6.18)", () => {
         description: "Changed after sending",
         quantity: "1",
         unitAmount: "1",
+        currency: "INR",
         discountPercent: "0",
         jurisdiction: null,
         billingFrequency: null,

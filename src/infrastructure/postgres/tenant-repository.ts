@@ -96,18 +96,4 @@ export class PostgresTenantRepository implements TenantRepository {
     `;
     return row ? toTenant(row) : null;
   }
-
-  /** Both columns in one statement, because the constraint holds them together
-   *  and two statements would let a crash leave a name with no capacity. */
-  async setFirmSignatory(tenantId: string, userId: string, title: string): Promise<Tenant> {
-    const [row] = await this.app<TenantRow[]>`
-      UPDATE tenancy.tenant
-         SET firm_signatory_user_id = ${userId}, firm_signatory_title = ${title}
-       WHERE id = ${tenantId}
-      RETURNING id, slug, name, status, reporting_currency,
-                firm_signatory_user_id, firm_signatory_title
-    `;
-    if (!row) throw new Error(`tenant ${tenantId} vanished while naming its signatory`);
-    return toTenant(row);
-  }
 }

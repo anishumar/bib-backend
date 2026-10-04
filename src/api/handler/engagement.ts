@@ -24,6 +24,7 @@ import type {
   EngagementRecord,
   FeeGroupRecord,
   LetterSummary,
+  LetterTotals,
   LetterView,
 } from "../../usecase/engagement/ports";
 import type {
@@ -112,6 +113,26 @@ const TotalsSchema = z
   .openapi("EngagementLetterTotals");
 
 const MoneySchema = z.object({ amount: AmountSchema, currency: CurrencySchema });
+
+/** The rate of one OTHER currency on a letter (0344). The main currency's is
+ *  the letter's own `fxRate`. The proposal's shape, under its own name. */
+const LetterCurrencyRateSchema = z
+  .object({
+    currency: CurrencySchema,
+    /** Redacted by the fee axis, like the letter's own rate. */
+    fxRate: RateSchema.nullable(),
+    fxRateDate: DaySchema,
+    source: z.string().openapi({ description: 'Either "typed" or the name of the rate service that supplied it.' }),
+  })
+  .openapi("LetterCurrencyRate");
+
+const SetLetterRateRequest = z
+  .object({
+    fxRate: RateSchema,
+    fxRateDate: DaySchema,
+    source: z.string().min(1).max(60).optional(),
+  })
+  .openapi("SetLetterCurrencyRateRequest");
 
 /** The closed set lives in the domain; zod needs a literal tuple. */
 /** When a recurring fee is invoiced (0319), the domain's own list. */
@@ -212,9 +233,14 @@ const LetterSchema = z
      *  Annexure 2 (the terms) — for every letter drafted now; `classic` for the
      *  letters issued before it, which must re-render as the client holds them. */
     layout: z.enum(LETTER_LAYOUT_VALUES),
-    currency: CurrencySchema,
+    currency: CurrencySchema.openapi({
+      description: "The MAIN currency: the default for a new service, with its rate below (0344).",
+    }),
     fxRate: RateSchema.nullable(),
     fxRateDate: DaySchema,
+    rates: z.array(LetterCurrencyRateSchema).openapi({
+      description: "The rate of every other currency a service or section is priced in (0344), by code.",
+    }),
     advanceRequired: z.boolean(),
     advanceAmount: AmountSchema.nullable(),
     advanceRecordedAt: z.string().nullable(),
@@ -257,6 +283,12 @@ const LetterSchema = z
       description:
         "The withdrawn letter this draft was copied from (0316), or null. Not `supersedesId`, " +
         "which names a SIGNED letter this one replaces.",
+    }),
+    chosenSignatoryId: z.string().uuid().nullable().openapi({
+      description:
+        "Who the drafter chose to sign for the firm (0343): an entry on " +
+        "GET /api/v1/tenancy/signatories, or null for the firm's default at send. Once sent, " +
+        "`firmSignatoryUserId`/`firmSignatoryTitle` are the record.",
     }),
   })
   .openapi("EngagementLetter");
@@ -503,6 +535,8 @@ const LetterCopyLinkSchema = z.object({
  */
 const LetterFrequencyTotalSchema = z
   .object({
+    /** One currency per row (0344): two currencies are never added together. */
+    currency: CurrencySchema,
     frequency: z.enum(BILLING_FREQUENCY_VALUES).nullable(),
     /** Null when redacted by the fee axis. */
     net: AmountSchema.nullable(),
@@ -562,6 +596,8 @@ const LetterDocumentSchema = z
         startsOn: DaySchema.nullable(),
         /** Null for a line with no price of its own, or when redacted. */
         amount: AmountSchema.nullable(),
+        /** The section's or the line's own currency (0344). */
+        currency: CurrencySchema,
         pricingNote: z.string().nullable(),
         /** Redacted with the money. */
         paymentTerms: z.string().nullable(),
@@ -589,7 +625,9 @@ const LetterRecordSchema = z
       jurisdiction: z.string().nullable(),
     }),
     /** The money per billing frequency (D8), never one mixed net. */
-    totalsByFrequency: z.array(LetterFrequencyTotalSchema),
+    totalsByFrequency: z.array(LetterFrequencyTotalSchema).openapi({
+      description: "Per currency and frequency, the main currency's rows first (0344).",
+    }),
     /** How Annexure 1 is organised, as the PDF prints it. */
     document: LetterDocumentSchema,
     /** The addressee by NAME, care-of `party`. Null when the letter names no
@@ -617,7 +655,11 @@ const LetterRecordSchema = z
     feeGroups: z.array(FeeGroupSchema),
     clauses: z.array(LetterClauseSchema),
     blocks: z.array(DocumentBlockSchema),
-    totals: TotalsSchema,
+    totals: z.array(TotalsSchema).openapi({
+      description:
+        "One per currency the live services and sections are in, the main currency first; one " +
+        "zero row in the main currency on an empty letter (0344). Never added together.",
+    }),
     engagements: z.array(EngagementSchema),
     signing: SigningSchema,
     /** Who deleted it (0086), when it was and the account still resolves. */
@@ -667,7 +709,7 @@ const LetterSummarySchema = z
     letter: LetterSchema,
     party: PartyRefSchema,
     issuingEntity: PartyRefSchema,
-    totals: TotalsSchema,
+    totals: z.array(TotalsSchema).openapi({ description: "One per currency, the main currency first (0344)." }),
     lineCount: z.number().int(),
   })
   .openapi("EngagementLetterSummary");
@@ -750,6 +792,11 @@ const ReviseLetterRequest = z
     currency: CurrencySchema.optional(),
     fxRate: RateSchema.optional(),
     fxRateDate: DaySchema.optional(),
+    chosenSignatoryId: z.string().uuid().nullable().optional().openapi({
+      description:
+        "Who signs for the firm (0343): an entry on the firm's list, or null for its default. " +
+        "A retired signatory is refused (SIGNATORY_RETIRED), here and again at send.",
+    }),
   })
   .openapi("ReviseEngagementLetterRequest");
 
@@ -765,6 +812,11 @@ const UpdateLetterLineRequest = z
     entityPartyId: z.string().uuid().optional(),
     quantity: AmountSchema.optional(),
     unitAmount: AmountSchema.nullable().optional(),
+    currency: CurrencySchema.optional().openapi({
+      description:
+        "Another currency the letter holds a rate for (0344): CURRENCY_NEEDS_A_RATE (409) when " +
+        "it holds none. Not on a service in a section (LINE_CURRENCY_IS_SECTIONS, 409).",
+    }),
     discountPercent: AmountSchema.optional(),
     billingFrequency: z.enum(BILLING_FREQUENCY_VALUES).nullable().optional(),
     /** Null clears it. Sent with `billingOn` when it is `on_date`. */
@@ -797,6 +849,12 @@ const AddLineRequest = z
         "The fee. Omit it and `pricingNote` both to quote the catalogue's list price for this " +
         "service in the letter's currency (B09): how a login that cannot see fees adds a priced " +
         "service. SERVICE_HAS_NO_LIST_PRICE (400) when there is none.",
+    }),
+    currency: CurrencySchema.optional().openapi({
+      description:
+        "What this service is priced in (0344): the letter's main currency or another it holds a " +
+        "rate for. Omit for the section's (in a section), else the list price's currency when " +
+        "the fee comes from the list price and the letter holds its rate, else the main currency.",
     }),
     discountPercent: AmountSchema.default("0"),
     effectiveFrom: DaySchema.optional().openapi({
@@ -840,6 +898,9 @@ const AddLineRequest = z
 const FeeGroupRequest = z
   .object({
     title: z.string().min(1).max(200),
+    /** The fee's currency (0344): the main one when omitted, else one the
+     *  letter holds a rate for. */
+    currency: CurrencySchema.optional(),
     billingFrequency: z.enum(BILLING_FREQUENCY_VALUES),
     billingTiming: z.enum(LETTER_BILLING_TIMINGS).optional(),
     billingOn: DaySchema.optional(),
@@ -858,6 +919,8 @@ const FeeGroupRequest = z
 const EditFeeGroupRequest = z
   .object({
     title: z.string().min(1).max(200).optional(),
+    /** A new currency for the fee (0344); its services move with it. */
+    currency: CurrencySchema.optional(),
     billingFrequency: z.enum(BILLING_FREQUENCY_VALUES).optional(),
     billingTiming: z.enum(LETTER_BILLING_TIMINGS).nullable().optional(),
     billingOn: DaySchema.nullable().optional(),
@@ -1261,6 +1324,48 @@ const reviseRoute = createRoute({
     409: errorResponse(
       "Not a draft, a new currency over priced lines, wording written for the client, or terms on the letter",
     ),
+  },
+});
+
+const setRateRoute = createRoute({
+  method: "put",
+  path: "/api/v1/engagement-letters/{letterId}/rates/{currency}",
+  tags: ["engagement-letters"],
+  summary: "Set the exchange rate of one of a draft letter's other currencies",
+  description:
+    "Every currency a service or section is priced in, other than the main one, needs a rate " +
+    "back to the firm's reporting currency (0344). Inserts it, or replaces the one there. The " +
+    "main currency's rate is changed with the currency (PATCH the letter). Answers with the " +
+    "whole letter.",
+  request: {
+    params: z.object({ letterId: z.string().uuid(), currency: CurrencySchema }),
+    body: { content: { "application/json": { schema: SetLetterRateRequest } }, required: true },
+  },
+  responses: {
+    200: { description: "Set", content: { "application/json": { schema: LetterRecordSchema } } },
+    400: errorResponse("Not a rate or a day, or the main currency (RATE_FOR_MAIN_CURRENCY)"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such letter at this firm"),
+    409: errorResponse("The letter is no longer a draft"),
+  },
+});
+
+const removeRateRoute = createRoute({
+  method: "delete",
+  path: "/api/v1/engagement-letters/{letterId}/rates/{currency}",
+  tags: ["engagement-letters"],
+  summary: "Take a currency's rate off a draft letter",
+  description:
+    "Only while no live service or section is priced in it (RATE_IN_USE). Answers with the whole letter.",
+  request: { params: z.object({ letterId: z.string().uuid(), currency: CurrencySchema }) },
+  responses: {
+    200: { description: "Removed", content: { "application/json": { schema: LetterRecordSchema } } },
+    400: errorResponse("The main currency (RATE_FOR_MAIN_CURRENCY)"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such letter at this firm"),
+    409: errorResponse("Not a draft, or services or sections are priced in it (RATE_IN_USE)"),
   },
 });
 
@@ -1772,6 +1877,12 @@ function toLetterBody(
     currency: letter.currency,
     fxRate: fees ? letter.fxRate : null,
     fxRateDate: letter.fxRateDate,
+    rates: letter.rates.map((r) => ({
+      currency: r.currency,
+      fxRate: fees ? r.fxRate : null,
+      fxRateDate: r.fxRateDate,
+      source: r.source,
+    })),
     advanceRequired: letter.advanceRequired,
     advanceAmount: fees ? letter.advanceAmount : null,
     advanceRecordedAt: letter.advanceRecordedAt,
@@ -1797,6 +1908,7 @@ function toLetterBody(
     deletedAt: letter.deletedAt,
     deletedByUserId: letter.deletedByUserId,
     copiedFromId: letter.copiedFromId,
+    chosenSignatoryId: letter.chosenSignatoryId,
   };
 }
 
@@ -1895,6 +2007,7 @@ function toRecordBody(record: LetterView, fees: boolean): z.infer<typeof LetterR
       jurisdiction: record.issuerJurisdiction,
     },
     totalsByFrequency: record.totalsByFrequency.map((t) => ({
+      currency: t.currency,
       frequency: t.frequency,
       net: fees ? t.net : null,
       lineCount: t.lineCount,
@@ -1922,6 +2035,7 @@ function toRecordBody(record: LetterView, fees: boolean): z.infer<typeof LetterR
         billingFrequency: f.billingFrequency,
         startsOn: f.startsOn,
         amount: fees ? f.amount : null,
+        currency: f.currency,
         pricingNote: f.pricingNote,
         paymentTerms: fees ? f.paymentTerms : null,
       })),
@@ -1987,15 +2101,7 @@ function toRecordBody(record: LetterView, fees: boolean): z.infer<typeof LetterR
       sourceId: b.sourceId,
       isEdited: b.isEdited,
     })),
-    totals: {
-      gross: fees ? record.totals.gross : null,
-      discount: fees ? record.totals.discount : null,
-      net: fees ? record.totals.net : null,
-      currency: record.totals.currency,
-      // Not redacted: a count of lines, not an amount, and "this agreement is
-      // not fully priced" is a fact about the work.
-      unpricedLineCount: record.totals.unpricedLineCount,
-    },
+    totals: record.totals.map((t) => toTotalsBody(t, fees)),
     engagements: record.engagements.map(toEngagementBody),
     signing: toSigningBody(record.signing),
     deletedBy: record.deletedBy === null ? null : { ...record.deletedBy },
@@ -2089,18 +2195,24 @@ function toLineEchoBody(line: LetterLine, fees: boolean): z.infer<typeof LetterL
   };
 }
 
+function toTotalsBody(t: LetterTotals, fees: boolean): z.infer<typeof TotalsSchema> {
+  return {
+    gross: fees ? t.gross : null,
+    discount: fees ? t.discount : null,
+    net: fees ? t.net : null,
+    currency: t.currency,
+    // Not redacted: a count of lines, not an amount, and "this agreement is
+    // not fully priced" is a fact about the work.
+    unpricedLineCount: t.unpricedLineCount,
+  };
+}
+
 function toSummaryBody(s: LetterSummary, fees: boolean): z.infer<typeof LetterSummarySchema> {
   return {
     letter: toLetterBody(s.letter, fees),
     party: { id: s.party.id, displayName: s.party.displayName },
     issuingEntity: { id: s.issuingEntity.id, displayName: s.issuingEntity.displayName },
-    totals: {
-      gross: fees ? s.totals.gross : null,
-      discount: fees ? s.totals.discount : null,
-      net: fees ? s.totals.net : null,
-      currency: s.totals.currency,
-      unpricedLineCount: s.totals.unpricedLineCount,
-    },
+    totals: s.totals.map((t) => toTotalsBody(t, fees)),
     lineCount: s.lineCount,
   };
 }
@@ -2252,6 +2364,28 @@ export function registerEngagementRoutes(app: OpenAPIHono<AppEnv>, deps: Engagem
     const { letterId } = c.req.valid("param");
     const body = c.req.valid("json");
     await deps.service.revise({ tenantId: s.tenantId, letterId, ...body }, s.actor);
+    const record = await deps.service.describe(s.tenantId, letterId);
+    return c.json(toRecordBody(record, seesFees(c.get("principal"))), 200);
+  });
+
+  app.openapi(setRateRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { letterId, currency } = c.req.valid("param");
+    const body = c.req.valid("json");
+    await deps.service.setRate(
+      { tenantId: s.tenantId, letterId, currency, fxRate: body.fxRate, fxRateDate: body.fxRateDate, source: body.source },
+      s.actor,
+    );
+    const record = await deps.service.describe(s.tenantId, letterId);
+    return c.json(toRecordBody(record, seesFees(c.get("principal"))), 200);
+  });
+
+  app.openapi(removeRateRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { letterId, currency } = c.req.valid("param");
+    await deps.service.removeRate(s.tenantId, letterId, currency, s.actor);
     const record = await deps.service.describe(s.tenantId, letterId);
     return c.json(toRecordBody(record, seesFees(c.get("principal"))), 200);
   });

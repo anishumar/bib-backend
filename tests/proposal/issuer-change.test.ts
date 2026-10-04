@@ -213,7 +213,7 @@ describe("changing a draft's currency (T6.18, D1)", () => {
       .revise({ tenantId: TENANT, proposalId: id, currency: "USD", fxRate: "83", fxRateDate: "2026-09-28" }, ACTOR)
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(CurrencyLockedByLines);
-    expect((err as Error).message).toMatch(/already quotes 1 service in INR/);
+    expect((err as Error).message).toMatch(/quotes 1 service in INR, its main currency/);
   });
 
   it("allows a new currency once the only line was pulled", async () => {

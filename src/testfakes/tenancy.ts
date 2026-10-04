@@ -27,7 +27,7 @@ import {
   FakeWorkItemRaiser,
 } from "./obligation";
 import type { CompanyCalendar, CompanyCalendars } from "../domain/calendar/model";
-import type { Membership, Tenant, UserAccount } from "../domain/tenancy/model";
+import type { FirmSignatoryEntry, Membership, Tenant, UserAccount } from "../domain/tenancy/model";
 import type {
   ObligationRuleSeeder,
   ObligationVocabularySeeder,
@@ -38,6 +38,8 @@ import type {
   MembershipRepository,
   NewMembership,
   NewTenant,
+  NewFirmSignatory,
+  SignatoryRepository,
   IssuingEntitySeeder,
   NewUser,
   RoleDirectory,
@@ -99,6 +101,81 @@ export class FakeTenantRepo implements TenantRepository {
     };
     this.rows[index] = updated;
     return Promise.resolve(updated);
+  }
+}
+
+/**
+ * The firm's list of signatories (0343), over the SAME tenant rows the fake
+ * tenant store holds: `makeDefault` writes the tenant's pair, and renaming the
+ * default's title moves the tenant's copy, as the real key's ON UPDATE CASCADE
+ * does.
+ */
+export class FakeSignatoryRepo implements SignatoryRepository {
+  readonly rows: FirmSignatoryEntry[] = [];
+  /** Media types of document versions a test has "uploaded", by version id. */
+  readonly versions = new Map<string, string>();
+  constructor(private readonly tenants: FakeTenantRepo) {}
+  list(tenantId: string): Promise<readonly FirmSignatoryEntry[]> {
+    return Promise.resolve(this.rows.filter((r) => r.tenantId === tenantId));
+  }
+  find(tenantId: string, signatoryId: string): Promise<FirmSignatoryEntry | null> {
+    return Promise.resolve(this.rows.find((r) => r.tenantId === tenantId && r.id === signatoryId) ?? null);
+  }
+  findByUser(tenantId: string, userId: string): Promise<FirmSignatoryEntry | null> {
+    return Promise.resolve(this.rows.find((r) => r.tenantId === tenantId && r.userId === userId) ?? null);
+  }
+  add(s: NewFirmSignatory): Promise<FirmSignatoryEntry> {
+    if (this.rows.some((r) => r.tenantId === s.tenantId && r.userId === s.userId)) {
+      throw new Error("fake: firm_signatory_one_per_person");
+    }
+    const row: FirmSignatoryEntry = {
+      id: s.id,
+      tenantId: s.tenantId,
+      userId: s.userId,
+      title: s.title,
+      signatureVersionId: null,
+      isActive: true,
+      createdAt: "2026-10-04T00:00:00.000Z",
+    };
+    this.rows.push(row);
+    return Promise.resolve(row);
+  }
+  update(
+    tenantId: string,
+    signatoryId: string,
+    change: { readonly title?: string | undefined; readonly signatureVersionId?: string | null | undefined },
+  ): Promise<FirmSignatoryEntry> {
+    const i = this.indexOf(tenantId, signatoryId);
+    const current = this.rows[i] as FirmSignatoryEntry;
+    const next: FirmSignatoryEntry = {
+      ...current,
+      ...(change.title === undefined ? {} : { title: change.title }),
+      ...(change.signatureVersionId === undefined ? {} : { signatureVersionId: change.signatureVersionId }),
+    };
+    this.rows[i] = next;
+    const tenant = this.tenants.rows.find((t) => t.id === tenantId);
+    if (tenant && tenant.firmSignatoryUserId === current.userId && change.title !== undefined) {
+      void this.tenants.setFirmSignatory(tenantId, current.userId, change.title);
+    }
+    return Promise.resolve(next);
+  }
+  setActive(tenantId: string, signatoryId: string, isActive: boolean): Promise<FirmSignatoryEntry> {
+    const i = this.indexOf(tenantId, signatoryId);
+    const next: FirmSignatoryEntry = { ...(this.rows[i] as FirmSignatoryEntry), isActive };
+    this.rows[i] = next;
+    return Promise.resolve(next);
+  }
+  async makeDefault(tenantId: string, signatoryId: string): Promise<void> {
+    const row = this.rows[this.indexOf(tenantId, signatoryId)] as FirmSignatoryEntry;
+    await this.tenants.setFirmSignatory(tenantId, row.userId, row.title);
+  }
+  versionMediaType(_tenantId: string, versionId: string): Promise<string | null> {
+    return Promise.resolve(this.versions.get(versionId) ?? null);
+  }
+  private indexOf(tenantId: string, signatoryId: string): number {
+    const i = this.rows.findIndex((r) => r.tenantId === tenantId && r.id === signatoryId);
+    if (i === -1) throw new Error(`fake: no signatory ${signatoryId}`);
+    return i;
   }
 }
 
@@ -260,6 +337,7 @@ export class FakeMembershipRepo implements MembershipRepository, RoleHolders {
 
 export function makeFakes(): {
   tenants: FakeTenantRepo;
+  signatories: FakeSignatoryRepo;
   users: FakeUserRepo;
   memberships: FakeMembershipRepo;
   roleSeeder: RoleRegistrySeeder;
@@ -338,8 +416,10 @@ export function makeFakes(): {
   });
   memberships.users = users;
   memberships.grades = grades;
+  const tenants = new FakeTenantRepo();
   return {
-    tenants: new FakeTenantRepo(),
+    tenants,
+    signatories: new FakeSignatoryRepo(tenants),
     users,
     memberships,
     // The REAL StaffGradeService over the in-memory ladder, on the same

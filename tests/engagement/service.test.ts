@@ -66,6 +66,8 @@ import {
   isDay,
   resolveEffectiveFrom,
 } from "../../src/domain/engagement/model";
+import type { EngagementLetter } from "../../src/domain/engagement/model";
+import { SignatoryNotFound, SignatoryRetired } from "../../src/domain/tenancy/errors";
 import { SEEDED_FIRM_ENTITY } from "../../src/testfakes/document";
 
 const TENANT = "00000000-0000-0000-0000-0000000000aa";
@@ -410,8 +412,8 @@ describe("a line with no price, and the wording that goes with it", () => {
     expect(record.lines[1]?.line.unitAmount).toBeNull();
     expect(record.lines[1]?.net).toBeNull();
     // The total covers the priced line and SAYS it does not cover the other.
-    expect(record.totals.net).toBe("24000.0000");
-    expect(record.totals.unpricedLineCount).toBe(1);
+    expect(record.totals[0]?.net).toBe("24000.0000");
+    expect(record.totals[0]?.unpricedLineCount).toBe(1);
   });
 
   it("refuses a price-less line with no reason, and a discount off one", async () => {
@@ -543,8 +545,8 @@ describe("a line with no price, and the wording that goes with it", () => {
     // The letter is in INR and its total is the fee alone. There is no rate on
     // this document for a third currency, so there is no honest conversion —
     // which is right, because an out-of-pocket estimate was never a fee.
-    expect(record.totals.net).toBe("50000.0000");
-    expect(record.totals.currency).toBe("INR");
+    expect(record.totals[0]?.net).toBe("50000.0000");
+    expect(record.totals[0]?.currency).toBe("INR");
   });
 
   it("refuses a malformed range and an unknown billing frequency", async () => {
@@ -1164,6 +1166,112 @@ describe("the firm's signature block", () => {
   });
 });
 
+// ── Several signatories, and a choice on each letter (0343, Q005) ───────────
+//
+// The client: "the drop down at the time of finalizing EL to select who will
+// sign that particular EL". The choice is a draft's; send snapshots it. The
+// image is the PERSON's: the company's mark only ever prints for the default.
+
+describe("the signatory a letter chooses", () => {
+  const CHOSEN = "00000000-0000-0000-0000-0000000005a1";
+  const DEFAULT_ENTRY = "00000000-0000-0000-0000-0000000005a0";
+  const COMPANY_MARK = "00000000-0000-0000-0000-0000000005b0";
+  const OWN_MARK = "00000000-0000-0000-0000-0000000005b1";
+
+  function firmWithTwo() {
+    const s = setup();
+    s.firm.name(SIGNATORY, "Director");
+    s.firm.add(DEFAULT_ENTRY, SIGNATORY, "Director");
+    s.firm.add(CHOSEN, SUCCESSOR, "Partner", { displayName: "Ravi Iyer" });
+    s.firmSignatureImage.set(SEEDED_FIRM_ENTITY, COMPANY_MARK);
+    return s;
+  }
+
+  it("signs with the chosen partner, and never prints the company's mark over their name", async () => {
+    const s = firmWithTwo();
+    const id = await draft(s);
+    await s.service.revise({ tenantId: TENANT, letterId: id, chosenSignatoryId: CHOSEN }, ACTOR);
+    await completeTerms(s, id);
+    const sent = await s.service.send(TENANT, id, ACTOR);
+    expect(sent.firmSignatoryUserId).toBe(SUCCESSOR);
+    expect(sent.firmSignatoryTitle).toBe("Partner");
+    // The company's mark is the DEFAULT's signature; over Ravi's name it would
+    // be a forged document. No image of his own, so a bare rule.
+    expect(sent.firmSignatureVersionId).toBeNull();
+  });
+
+  it("pins the chosen partner's OWN signature when they have one", async () => {
+    const s = firmWithTwo();
+    s.firm.add(CHOSEN, SUCCESSOR, "Partner", { signatureVersionId: OWN_MARK });
+    const id = await draft(s);
+    await s.service.revise({ tenantId: TENANT, letterId: id, chosenSignatoryId: CHOSEN }, ACTOR);
+    await completeTerms(s, id);
+    expect((await s.service.send(TENANT, id, ACTOR)).firmSignatureVersionId).toBe(OWN_MARK);
+  });
+
+  it("leaves a letter nobody chose for exactly as before: the default, with the company's mark", async () => {
+    const s = firmWithTwo();
+    const id = await draft(s);
+    await completeTerms(s, id);
+    const sent = await s.service.send(TENANT, id, ACTOR);
+    expect(sent.firmSignatoryUserId).toBe(SIGNATORY);
+    expect(sent.firmSignatureVersionId).toBe(COMPANY_MARK);
+  });
+
+  it("prefers the default's own signature over the company's once they upload one", async () => {
+    const s = firmWithTwo();
+    s.firm.name(SIGNATORY, "Director", OWN_MARK);
+    const id = await draft(s);
+    await completeTerms(s, id);
+    expect((await s.service.send(TENANT, id, ACTOR)).firmSignatureVersionId).toBe(OWN_MARK);
+  });
+
+  it("refuses a retired partner when chosen, and at send if retired after", async () => {
+    const s = firmWithTwo();
+    const id = await draft(s);
+    await s.service.revise({ tenantId: TENANT, letterId: id, chosenSignatoryId: CHOSEN }, ACTOR);
+    await completeTerms(s, id);
+    s.firm.retire(CHOSEN);
+    await expect(s.service.send(TENANT, id, ACTOR)).rejects.toBeInstanceOf(SignatoryRetired);
+    // Refused before anything was written.
+    expect((await s.letters.findLetter(TENANT, id))?.status).toBe("draft");
+    expect(s.signatures.rows.size).toBe(0);
+
+    const other = await draft(s);
+    await expect(
+      s.service.revise({ tenantId: TENANT, letterId: other, chosenSignatoryId: CHOSEN }, ACTOR),
+    ).rejects.toBeInstanceOf(SignatoryRetired);
+    await expect(
+      s.service.revise(
+        { tenantId: TENANT, letterId: other, chosenSignatoryId: "00000000-0000-0000-0000-0000000005ff" },
+        ACTOR,
+      ),
+    ).rejects.toBeInstanceOf(SignatoryNotFound);
+  });
+
+  it("goes back to the default when the choice is cleared", async () => {
+    const s = firmWithTwo();
+    const id = await draft(s);
+    await s.service.revise({ tenantId: TENANT, letterId: id, chosenSignatoryId: CHOSEN }, ACTOR);
+    const cleared = await s.service.revise({ tenantId: TENANT, letterId: id, chosenSignatoryId: null }, ACTOR);
+    expect(cleared.chosenSignatoryId).toBeNull();
+    await completeTerms(s, id);
+    expect((await s.service.send(TENANT, id, ACTOR)).firmSignatoryUserId).toBe(SIGNATORY);
+  });
+
+  it("does not move a letter's content hash: the choice is not a term, the snapshot is", async () => {
+    const s = firmWithTwo();
+    const id = await draft(s);
+    await completeTerms(s, id);
+    const letter = (await s.letters.findLetter(TENANT, id)) as EngagementLetter;
+    const base = { letter, lines: [], feeGroups: [], clauses: [] };
+    // canonicalContent's own type does not even admit the column; this proves
+    // the value cannot leak in through the object either.
+    const chose: EngagementLetter = { ...letter, chosenSignatoryId: CHOSEN };
+    expect(canonicalContent(base)).toBe(canonicalContent({ ...base, letter: chose }));
+  });
+});
+
 // ── Whose day a letter is dated and its work starts on (2026-09-28) ─────────
 
 describe("the day on a letter is the caller's, or the firm's, never Greenwich's", () => {
@@ -1697,6 +1805,7 @@ describe("writing an ACCEPTED quote up as a letter (T3.5b)", () => {
       quantity: "12",
       unitAmount: "6000.00",
       discountPercent: "15",
+      currency: "INR",
       jurisdiction: "IN",
       billingFrequency: null,
       scopeOverride: null,
@@ -1724,6 +1833,7 @@ describe("writing an ACCEPTED quote up as a letter (T3.5b)", () => {
         currency: "INR",
         fxRate: "1.0",
         fxRateDate: "2026-07-01",
+        rates: [],
         deletedAt: null,
         ...over,
       },
@@ -1785,13 +1895,28 @@ describe("writing an ACCEPTED quote up as a letter (T3.5b)", () => {
   it("takes the quote's CURRENCY and rate, and offers no way to change them", async () => {
     // Changing the currency underneath copied amounts would reinterpret every
     // figure on the document. There is deliberately no parameter for it.
-    const h = withQuote(quoted([quoteLine()], { currency: "AED", fxRate: "22.5" }));
+    const h = withQuote(quoted([quoteLine({ currency: "AED" })], { currency: "AED", fxRate: "22.5" }));
 
     const out = await h.service.draftFromQuote(ask(), ACTOR);
 
     expect(out.letter.currency).toBe("AED");
     expect(out.letter.fxRate).toBe("22.5");
     expect(out.lines[0]?.currency).toBe("AED");
+  });
+
+  it("carries the quote's other currencies' rates and each line's own currency (0344)", async () => {
+    const h = withQuote(
+      quoted([quoteLine({ description: "a", currency: "AED" }), quoteLine({ description: "b" })], {
+        rates: [{ currency: "AED", fxRate: "22.75", fxRateDate: "2026-07-01", source: "typed" }],
+      }),
+    );
+
+    const out = await h.service.draftFromQuote(ask(), ACTOR);
+
+    expect(out.letter.currency).toBe("INR");
+    expect(out.lines.map((l) => l.currency)).toEqual(["AED", "INR"]);
+    const view = await h.service.describe(TENANT, out.letter.id);
+    expect(view.letter.rates).toEqual([{ currency: "AED", fxRate: "22.75", fxRateDate: "2026-07-01", source: "typed" }]);
   });
 
   it("links the letter back to the quote, and inherits its issuer and title", async () => {
@@ -2097,6 +2222,7 @@ describe("who a letter names beside the client (F-10-1)", () => {
         currency: "INR",
         fxRate: "1",
         fxRateDate: "2026-07-01",
+        rates: [],
         deletedAt: null,
       },
       lines: [],
@@ -2200,6 +2326,7 @@ describe("who a letter names beside the client (F-10-1)", () => {
         currency: "INR",
         fxRate: "1",
         fxRateDate: "2026-07-01",
+        rates: [],
         deletedAt: null,
       },
       lines: [
@@ -2211,6 +2338,7 @@ describe("who a letter names beside the client (F-10-1)", () => {
           quantity: "12",
           unitAmount: "6000.00",
           discountPercent: "0",
+          currency: "INR",
           jurisdiction: "IN",
           billingFrequency: null,
           scopeOverride: null,
@@ -2432,8 +2560,8 @@ describe("fee groups (0083)", () => {
     await completeTerms(s, id);
     const view = await s.service.describe(TENANT, id);
     // 5,000 for the group + 12 × 2,000 for the line priced on its own.
-    expect(view.totals.net).toBe("29000.0000");
-    expect(view.totals.unpricedLineCount).toBe(0);
+    expect(view.totals[0]?.net).toBe("29000.0000");
+    expect(view.totals[0]?.unpricedLineCount).toBe(0);
     expect(view.feeGroups[0]?.lineIds).toHaveLength(2);
   });
 

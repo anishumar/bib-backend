@@ -2,7 +2,7 @@
 // what tenancy requires of infrastructure, this is the file. Interfaces are
 // owned by the use case that needs them (never a shared top-level ports pkg),
 // stated in our vocabulary. Adapters in infrastructure/ implement them.
-import type { Membership, Tenant, UserAccount } from "../../domain/tenancy/model";
+import type { FirmSignatoryEntry, Membership, Tenant, UserAccount } from "../../domain/tenancy/model";
 import type { Actor } from "../../domain/ledger/model";
 import type { Permission } from "../../domain/authz/model";
 import type { CurrencyCode } from "../../domain/money/model";
@@ -28,15 +28,9 @@ export interface TenantRepository {
   create(t: NewTenant): Promise<Tenant>;
   findBySlug(slug: string): Promise<Tenant | null>;
   findById(id: string): Promise<Tenant | null>;
-  /**
-   * Name who binds the firm. Both fields together, because the schema will not
-   * hold one without the other.
-   *
-   * There IS an update here, unlike `reportingCurrency` above, and the
-   * difference is the point: a successor restates nothing, because every letter
-   * already sent carries the signature block it went out with.
-   */
-  setFirmSignatory(tenantId: string, userId: string, title: string): Promise<Tenant>;
+  // No setFirmSignatory here any more (0343): the default is somebody on the
+  // list of signatories, so it is pointed at through SignatoryRepository's
+  // makeDefault, which the key onto the list holds to an entry that exists.
   /**
    * Suspend a firm, or let it back in. Null when there is no such firm.
    *
@@ -46,6 +40,42 @@ export interface TenantRepository {
    * `TenantStanding`.
    */
   setStatus(tenantId: string, status: "active" | "suspended"): Promise<Tenant | null>;
+}
+
+export interface NewFirmSignatory {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly userId: string;
+  readonly title: string;
+  readonly createdBy: string | null;
+}
+
+/**
+ * The firm's list of signatories (0343). Every method is tenant-scoped and runs
+ * under the wall.
+ *
+ * The DEFAULT is the tenant row's pair (0022), held onto this list by a
+ * composite key ON UPDATE CASCADE, so `update` renaming the default's title
+ * moves the tenant's copy in the same statement, and `makeDefault` can only
+ * name somebody already listed.
+ */
+export interface SignatoryRepository {
+  list(tenantId: string): Promise<readonly FirmSignatoryEntry[]>;
+  find(tenantId: string, signatoryId: string): Promise<FirmSignatoryEntry | null>;
+  findByUser(tenantId: string, userId: string): Promise<FirmSignatoryEntry | null>;
+  add(s: NewFirmSignatory): Promise<FirmSignatoryEntry>;
+  /** Absent leaves a field as it is; `signatureVersionId: null` clears it. */
+  update(
+    tenantId: string,
+    signatoryId: string,
+    change: { readonly title?: string | undefined; readonly signatureVersionId?: string | null | undefined },
+  ): Promise<FirmSignatoryEntry>;
+  setActive(tenantId: string, signatoryId: string, isActive: boolean): Promise<FirmSignatoryEntry>;
+  /** Point the tenant's default pair at this entry, in one statement. */
+  makeDefault(tenantId: string, signatoryId: string): Promise<void>;
+  /** The stored media type of one of this firm's document versions, or null
+   *  when there is no such version here: a signature must be drawable. */
+  versionMediaType(tenantId: string, versionId: string): Promise<string | null>;
 }
 
 export interface NewUser {

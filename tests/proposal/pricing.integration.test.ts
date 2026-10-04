@@ -279,13 +279,13 @@ describe("the money adds up, in numeric", () => {
     }
     const fromFake = await fake.describe(tenantA, id);
 
-    expect(Number(fromDb.totals.gross)).toBe(Number(fromFake?.totals.gross));
-    expect(Number(fromDb.totals.net)).toBe(Number(fromFake?.totals.net));
-    expect(Number(fromDb.totals.discount)).toBe(Number(fromFake?.totals.discount));
+    expect(Number(fromDb.totals[0]?.gross)).toBe(Number(fromFake?.totals[0]?.gross));
+    expect(Number(fromDb.totals[0]?.net)).toBe(Number(fromFake?.totals[0]?.net));
+    expect(Number(fromDb.totals[0]?.discount)).toBe(Number(fromFake?.totals[0]?.discount));
 
     // And the arithmetic itself: 4498.50 gross, 12.5% off is 3936.1875 → 3936.1875
     // at four places, plus 0.05 less 33.33%.
-    expect(Number(fromDb.totals.gross)).toBeCloseTo(4498.55, 4);
+    expect(Number(fromDb.totals[0]?.gross)).toBeCloseTo(4498.55, 4);
   });
 
   it("reconciles: gross − discount is exactly net", async () => {
@@ -308,18 +308,18 @@ describe("the money adds up, in numeric", () => {
       });
     }
     const { totals } = await service.describe(tenantA, id);
-    expect(Number(totals.gross) - Number(totals.discount)).toBeCloseTo(Number(totals.net), 4);
+    expect(Number(totals[0]?.gross) - Number(totals[0]?.discount)).toBeCloseTo(Number(totals[0]?.net), 4);
   });
 
   it("an empty proposal is zero, not null", async () => {
     const id = await draft();
     const { totals, lines } = await service.describe(tenantA, id);
     expect(lines).toEqual([]);
-    expect(Number(totals.net)).toBe(0);
-    expect(totals.currency).toBe("INR");
+    expect(Number(totals[0]?.net)).toBe(0);
+    expect(totals[0]?.currency).toBe("INR");
     // Nothing to leave out, either — which is what makes the count below
     // readable at all.
-    expect(totals.unpricedLineCount).toBe(0);
+    expect(totals[0]?.unpricedLineCount).toBe(0);
   });
 });
 
@@ -351,8 +351,8 @@ describe("a line with no price — what the total MEANS then (G1.6)", () => {
     });
 
     const { totals, lines } = await service.describe(tenantA, id);
-    expect(Number(totals.net)).toBe(300000);
-    expect(totals.unpricedLineCount).toBe(1);
+    expect(Number(totals[0]?.net)).toBe(300000);
+    expect(totals[0]?.unpricedLineCount).toBe(1);
     // Per line, NULL and not zero: there is no net of an amount that does not
     // exist.
     expect(lines[1]?.line.unitAmount).toBeNull();
@@ -388,8 +388,8 @@ describe("a line with no price — what the total MEANS then (G1.6)", () => {
       discountPercent: "0",
     });
     const { totals } = await service.describe(tenantA, id);
-    expect(Number(totals.net)).toBe(0);
-    expect(totals.unpricedLineCount).toBe(1);
+    expect(Number(totals[0]?.net)).toBe(0);
+    expect(totals[0]?.unpricedLineCount).toBe(1);
   });
 
   it("the fake and the database agree about what a total leaves out", async () => {
@@ -459,8 +459,8 @@ describe("a line with no price — what the total MEANS then (G1.6)", () => {
       });
     }
     const fromFake = await fake.describe(tenantA, id);
-    expect(Number(fromDb.totals.net)).toBe(Number(fromFake?.totals.net));
-    expect(fromDb.totals.unpricedLineCount).toBe(fromFake?.totals.unpricedLineCount);
+    expect(Number(fromDb.totals[0]?.net)).toBe(Number(fromFake?.totals[0]?.net));
+    expect(fromDb.totals[0]?.unpricedLineCount).toBe(fromFake?.totals[0]?.unpricedLineCount);
     expect(fromFake?.lines[1]?.net).toBeNull();
   });
 
@@ -529,8 +529,8 @@ describe("a line with no price — what the total MEANS then (G1.6)", () => {
       currency: "USD",
     });
     expect(lines[0]?.line.jurisdiction).toBe("US");
-    expect(totals.currency).toBe("INR");
-    expect(Number(totals.net)).toBe(50000);
+    expect(totals[0]?.currency).toBe("INR");
+    expect(Number(totals[0]?.net)).toBe(50000);
   });
 });
 
@@ -560,10 +560,10 @@ describe("the pin", () => {
 });
 
 describe("one proposal, one currency", () => {
-  it("the database refuses a line in another currency", async () => {
-    // A composite foreign key on (proposal_id, tenant_id, currency), not a rule
-    // in the application: a mixed-currency document has a total that means
-    // nothing, and the wall should make that unrepresentable.
+  it("the database refuses a line in a currency the proposal holds no rate for", async () => {
+    // Since 0344 a line may be in another currency, but only one the proposal
+    // holds a rate for: the deferred check refuses anything else at commit,
+    // whoever writes it. Not a rule in the application alone.
     const id = await draft("AED", "23.45");
     const err = await withTenant(app, tenantA, (db) =>
       db`
@@ -573,7 +573,7 @@ describe("one proposal, one currency", () => {
         VALUES (${tenantA}, ${id}, ${gstV1}, 'sneaky', 99, 1, 100, 'INR', 0)
       `,
     ).catch((e: unknown) => e);
-    expect((err as { code?: string }).code).toBe("23503"); // foreign_key_violation
+    expect((err as { code?: string }).code).toBe("23514"); // check_violation, at commit
   });
 
   it("refuses two live lines at the same position", async () => {
@@ -696,7 +696,7 @@ describe("the share link", () => {
     expect(shared.id).toBe(id);
     expect(shared.firmName).toBe("Proposal Test A");
     expect(shared.addressedTo).toBe("Meridian Textiles Private Limited");
-    expect(Number(shared.totals.net)).toBe(25000);
+    expect(Number(shared.totals[0]?.net)).toBe(25000);
 
     // The digest, presented under the OTHER firm's scope, finds nothing — which
     // is what makes putting the tenant in the token safe rather than merely

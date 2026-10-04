@@ -20,7 +20,7 @@ import {
   FakePortalMemberFinder,
   FakeSheetReader,
   RecordingAssignmentWriter,
-  RecordingLetterWriter,
+  RecordingLetterWriter, FixedImportRates,
   RecordingPartyWriter,
   RecordingPortalAccessGranter,
   RecordingPortalInviteWriter,
@@ -96,6 +96,7 @@ function harness(dir: FakeImportDirectory = directory()): Harness {
     parties,
     assignments,
     letters,
+    rates: new FixedImportRates(),
     portalInvites,
     portalAccess,
     portalMembers,
@@ -204,6 +205,24 @@ describe("staging a sheet", () => {
 });
 
 describe("confirming an import", () => {
+  it("strikes ONE letter per client at the feed's rates, never at 1 (0345)", async () => {
+    const h = harness();
+    const usd = ENGAGEMENTS.replace("Cobalt Foods Private Limited,A1,2026-08-01,,7500,INR,,", "Cobalt Foods Private Limited,A1,2026-08-01,,7500,USD,,");
+    const staged = await h.service.stage(
+      { tenantId: TENANT, stagedBy: ADMIN, clients: upload(CLIENTS, "clients.csv"), people: upload(PEOPLE, "people.csv"), engagements: upload(usd, "engagements.csv") },
+      ACTOR,
+    );
+    const confirmed = await h.service.confirm({ tenantId: TENANT, importId: staged.id, confirmedBy: ADMIN }, ACTOR);
+    expect(confirmed.outcome?.created.letters).toBe(2);
+    const cobalt = h.letters.of("draft").map((c) => c.input as { title: string; currency: string; fxRate: string }).find((d) => d.title.startsWith("Cobalt"));
+    // INR is the firm's own and one Cobalt line is in it, so INR is the main currency at 1.
+    expect(cobalt).toMatchObject({ currency: "INR", fxRate: "1" });
+    expect(h.letters.of("setRate").map((c) => c.input)).toEqual([
+      expect.objectContaining({ currency: "USD", fxRate: "84.1", fxRateDate: "2026-08-01", source: "Currency API" }),
+    ]);
+    expect(h.letters.of("addLine").map((c) => (c.input as { currency: string }).currency).sort()).toEqual(["INR", "INR", "USD"]);
+  });
+
   it("walks every row through the ordinary doors, groups first, and signs one letter per client", async () => {
     const h = harness();
     const staged = await stageAll(h);
@@ -497,6 +516,7 @@ describe("the day an import is dated, and which signer takes its letters", () =>
       parties: new RecordingPartyWriter(),
       assignments: new RecordingAssignmentWriter(),
       letters,
+    rates: new FixedImportRates(),
       portalInvites: new RecordingPortalInviteWriter(),
       portalAccess: new RecordingPortalAccessGranter(),
       portalMembers: new FakePortalMemberFinder(),

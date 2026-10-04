@@ -5,7 +5,7 @@ import type { CompanyCalendars } from "../../domain/calendar/model";
 import type { Actor } from "../../domain/ledger/model";
 import type { LetterBillingTiming } from "../../domain/engagement/model";
 import type { NewRecordedAcceptance, RecordedAcceptance } from "../../domain/acceptance/model";
-import type { Amount, CurrencyCode, Money } from "../../domain/money/model";
+import type { Amount, CurrencyCode, CurrencyRate, Money } from "../../domain/money/model";
 import type { EngagementErrorCode } from "../../domain/engagement/errors";
 import type { ClientStructure } from "../../domain/party/model";
 import type {
@@ -236,6 +236,8 @@ export interface LetterRevision {
   readonly currency?: CurrencyCode | undefined;
   readonly fxRate?: Amount | undefined;
   readonly fxRateDate?: string | undefined;
+  /** An entry on the firm's list of signatories, or null for the default (0343). */
+  readonly chosenSignatoryId?: string | null | undefined;
 }
 
 /**
@@ -247,6 +249,9 @@ export interface LetterLineEdit {
   readonly entityPartyId: string;
   readonly description: string;
   readonly quantity: Amount;
+  /** What it is priced in (0344): the letter's main currency or one it holds a
+   *  rate for. A line in a section is in the section's (the key says so). */
+  readonly currency: CurrencyCode;
   readonly unitAmount: Amount | null;
   readonly discountPercent: Amount;
   readonly effectiveFrom: string | null;
@@ -276,6 +281,8 @@ export interface LetterLineEdit {
  * mutually agreed"), which the figure leaves out.
  */
 export interface LetterFrequencyTotal {
+  /** One currency per row (0344): two currencies are never added together. */
+  readonly currency: CurrencyCode;
   /** Null for lines that state no billing frequency. */
   readonly frequency: BillingFrequency | null;
   readonly net: Amount;
@@ -304,9 +311,32 @@ export interface IssuingEntity {
  * a bigger decision than this task (see the note on `EngagementService.send`).
  */
 export interface FirmSignatory {
-  firmSignatory(
-    tenantId: string,
-  ): Promise<{ readonly userId: string; readonly title: string } | null>;
+  /** The DEFAULT: who signs a letter nobody chose a signatory for. Since 0343
+   *  it carries its own image, when the default has uploaded one. */
+  firmSignatory(tenantId: string): Promise<{
+    readonly userId: string;
+    readonly title: string;
+    readonly signatureVersionId?: string | null | undefined;
+  } | null>;
+  /**
+   * One entry on the firm's list of signatories (0343, Q005), or null when
+   * there is no such entry at this firm. How a letter's CHOICE is resolved:
+   * checked when a draft chooses it, and again at send, because the firm may
+   * have retired the person in between.
+   */
+  signatory(tenantId: string, signatoryId: string): Promise<ChosenSignatory | null>;
+}
+
+/** An entry on the firm's list, as a letter needs it (0343). */
+export interface ChosenSignatory {
+  readonly id: string;
+  readonly userId: string;
+  readonly displayName: string | null;
+  readonly title: string;
+  /** Their OWN signature image; null when they have uploaded none. */
+  readonly signatureVersionId: string | null;
+  readonly isActive: boolean;
+  readonly isDefault: boolean;
 }
 
 /**
@@ -426,6 +456,9 @@ export interface NewFeeGroup {
  *  null clears it. Already validated by the use case. */
 export interface FeeGroupEdit {
   readonly title?: string | undefined;
+  /** A new currency for the section's fee (0344): its lines move with it, in
+   *  the same statement, as the key onto the group requires. */
+  readonly currency?: CurrencyCode | undefined;
   readonly billingFrequency?: BillingFrequency | undefined;
   /** With `billingOn`: both written, or neither. */
   readonly billingTiming?: LetterBillingTiming | null | undefined;
@@ -449,6 +482,8 @@ export interface FeeGroupEdit {
  */
 export interface LinePricing {
   readonly feeGroupId: string | null;
+  /** Into a section, the section's currency; out of one, the line keeps it. */
+  readonly currency: CurrencyCode;
   readonly unitAmount: Amount | null;
   readonly discountPercent: Amount;
   readonly pricingNote: string | null;
@@ -599,20 +634,9 @@ export interface LetterRecord {
    *  unpriced — the group is their price. */
   readonly feeGroups: readonly FeeGroupRecord[];
   readonly clauses: readonly LetterClauseRecord[];
-  readonly totals: {
-    readonly gross: Amount;
-    readonly discount: Amount;
-    readonly net: Amount;
-    readonly currency: CurrencyCode;
-    /**
-     * HOW MANY LIVE LINES THE THREE FIGURES ABOVE DO NOT COVER — the lines with
-     * no price. Non-zero means the totals are a FLOOR rather than what this
-     * letter commits the client to, and a screen that prints the figure without
-     * this one prints a number that is not the price of the document. Same
-     * reasoning, and the same field, as `ProposalTotals.unpricedLineCount`.
-     */
-    readonly unpricedLineCount: number;
-  };
+  /** One per currency the live lines and sections are in, the main currency
+   *  first (0344); one zero row in the main currency on an empty letter. */
+  readonly totals: readonly LetterTotals[];
   /** The engagements this letter created, once it has been signed. Rows, as the
    *  repository read them; the service narrows each one against the clock
    *  before it leaves the use case — see `LetterView`. */
@@ -815,6 +839,22 @@ export interface LetterFilters {
   readonly partyId?: string | undefined;
 }
 
+/** What a letter's live lines and sections come to in ONE currency (0344). */
+export interface LetterTotals {
+  readonly gross: Amount;
+  readonly discount: Amount;
+  readonly net: Amount;
+  readonly currency: CurrencyCode;
+  /**
+   * HOW MANY LIVE LINES THE THREE FIGURES ABOVE DO NOT COVER — the lines with
+   * no price. Non-zero means the totals are a FLOOR rather than what this
+   * letter commits the client to, and a screen that prints the figure without
+   * this one prints a number that is not the price of the document. Same
+   * reasoning, and the same field, as `ProposalTotals.unpricedLineCount`.
+   */
+  readonly unpricedLineCount: number;
+}
+
 export interface LetterSummary {
   readonly letter: EngagementLetter;
   readonly party: { readonly id: string; readonly displayName: string };
@@ -855,9 +895,14 @@ export interface EngagementRepository {
     change: LetterRevision,
     prose: readonly LetterProseLine[] | null,
   ): Promise<EngagementLetter | null>;
-  /** Whether any line or section row, live or pulled, holds the letter's
-   *  currency — a new currency needs none (their keys do not cascade). */
-  pricesAnything(tenantId: string, letterId: string): Promise<boolean>;
+  /** How many LIVE lines and sections are priced in `currency` (0344): a main
+   *  currency with any cannot move, and a rate with any cannot go. */
+  pricesIn(tenantId: string, letterId: string, currency: CurrencyCode): Promise<number>;
+  /** Set (insert or replace) the rate of one OTHER currency on a live DRAFT
+   *  (0344). Null when it is no longer a live draft. */
+  setRate(tenantId: string, letterId: string, rate: CurrencyRate): Promise<CurrencyRate | null>;
+  /** Take one off a live DRAFT. False when there was none, or not a draft. */
+  removeRate(tenantId: string, letterId: string, currency: CurrencyCode): Promise<boolean>;
   /** Into a fee group, or out of one — see `LinePricing`. */
   setLinePricing(
     tenantId: string,
@@ -1258,6 +1303,8 @@ export interface QuotedLine {
   readonly quantity: string;
   readonly unitAmount: string | null;
   readonly discountPercent: string;
+  /** What the quote priced it in (0344); the letter keeps it, never converts. */
+  readonly currency: string;
   readonly jurisdiction: string | null;
   readonly billingFrequency: string | null;
   readonly scopeOverride: string | null;
@@ -1293,6 +1340,8 @@ export interface QuotedProposalHeader {
   readonly currency: string;
   readonly fxRate: string;
   readonly fxRateDate: string;
+  /** The other currencies' rates (0344), carried onto the letter as agreed. */
+  readonly rates: readonly CurrencyRate[];
   /** Set when the quote was deleted as made by mistake (0086): it was never
    *  offered, so no letter may be drafted from it or cite it. */
   readonly deletedAt: string | null;

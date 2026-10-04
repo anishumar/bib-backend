@@ -54,6 +54,30 @@ export interface Tenant {
   readonly firmSignatoryTitle: string | null;
 }
 
+/**
+ * One person on the firm's list of signatories (0343, Q005): who may sign an
+ * engagement letter for the firm, the capacity printed under their name, and
+ * their own signature image.
+ *
+ * The firm's DEFAULT is not a flag here: it stays `Tenant.firmSignatoryUserId`
+ * (0022), held onto this list by a composite key, because the owner rule and
+ * the job desk already read it there.
+ *
+ * `isActive` false is RETIRED, not deleted: a partner who has left signed
+ * letters that must keep reading, and cannot be chosen for a new one.
+ */
+export interface FirmSignatoryEntry {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly userId: string;
+  readonly title: string;
+  /** Their own signature, a `files.document_version` id; null when they have
+   *  uploaded none. Pinned onto a letter at send, never drawn live (0081). */
+  readonly signatureVersionId: string | null;
+  readonly isActive: boolean;
+  readonly createdAt: string;
+}
+
 export interface UserAccount {
   readonly id: string;
   readonly email: string;

@@ -32,6 +32,7 @@ function line(overrides: Partial<ProposalPlanLine> = {}): ProposalPlanLine {
     terms: NO_TERMS,
     billingFrequency: "annually",
     net: "1000.00",
+    currency: "INR",
     pricingNote: null,
     oopEstimate: null,
     ...overrides,

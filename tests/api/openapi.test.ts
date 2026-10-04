@@ -3,6 +3,7 @@
 //   1. the spec is generated from the routes (single source of truth),
 //   2. a validation failure returns the SAME envelope as every other error,
 //   3. the principal gate still answers 401 with that envelope.
+import { makeFxFakes } from "../../src/testfakes/fx";
 import { NotificationService } from "../../src/usecase/notify/service";
 import { FakeNotificationInbox, FakeNotificationSettings, FakeNotifyFirmSetting } from "../../src/testfakes/notify";
 import { ReadinessService } from "../../src/usecase/readiness/service";
@@ -101,7 +102,7 @@ import {
   FakeImportDirectory,
   FakeSheetReader,
   RecordingAssignmentWriter,
-  RecordingLetterWriter,
+  RecordingLetterWriter, FixedImportRates,
   RecordingPartyWriter,
   RecordingPortalAccessGranter,
   RecordingPortalInviteWriter,
@@ -430,6 +431,7 @@ function deps(): RouterDeps {
         parties: new RecordingPartyWriter(),
         assignments: new RecordingAssignmentWriter(),
         letters: new RecordingLetterWriter(),
+        rates: new FixedImportRates(),
         portalInvites: new RecordingPortalInviteWriter(),
         portalAccess: new RecordingPortalAccessGranter(),
         portalMembers: new FakePortalMemberFinder(),
@@ -541,6 +543,7 @@ function deps(): RouterDeps {
       service: new DocumentService(makeDocumentFakes()),
       firmEntities: makeFirmEntityFakes().service,
     },
+    fx: { service: makeFxFakes().service },
     readiness: {
       service: new ReadinessService({
         facts: new FakeReadinessFacts(),
