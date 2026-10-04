@@ -58,7 +58,8 @@ export type InvoiceErrorCode =
   | "PLACE_OF_SUPPLY_UNKNOWN"
   | "INVOICE_LINE_NEEDS_SAC"
   | "INVALID_COMPANY_INVOICING"
-  | "COMPANY_RECORD_NOT_FOUND";
+  | "COMPANY_RECORD_NOT_FOUND"
+  | "CLIENT_NOT_FOUND";
 
 /** `asOf` is the caller's TODAY, not a date to choose (see `isCallersToday`).
  *  A document that genuinely belongs to another day has its own field. */
@@ -678,5 +679,12 @@ export class InvalidCompanyInvoicing extends InvoiceError {
 export class CompanyRecordNotFound extends InvoiceError {
   constructor(what: string, id: string) {
     super("COMPANY_RECORD_NOT_FOUND", `There is no ${what} ${id} on this company.`);
+  }
+}
+
+/** A client the request named that this firm does not have. */
+export class InvoiceClientNotFound extends InvoiceError {
+  constructor(partyId: string) {
+    super("CLIENT_NOT_FOUND", `There is no client ${partyId} at this firm.`);
   }
 }

@@ -124,9 +124,9 @@ WITH l AS (
 ), c AS (
   SELECT l.*,
          CASE WHEN l.treatment IN ('gst_intra', 'gst_intra_ut')
-              THEN crm.round_to_minor_unit(l.net * (l.tax_percent / 2) / 100, l.currency) ELSE 0 END AS half,
+              THEN crm.round_to_minor_unit(l.net * (l.tax_percent / 2) / 100, l.currency) ELSE 0.0000 END AS half,
          CASE WHEN l.treatment IN ('gst_inter', 'gst_export_igst')
-              THEN crm.round_to_minor_unit(l.net * l.tax_percent / 100, l.currency) ELSE 0 END AS whole
+              THEN crm.round_to_minor_unit(l.net * l.tax_percent / 100, l.currency) ELSE 0.0000 END AS whole
   FROM l
 )
 SELECT c.id AS invoice_line_id,
@@ -139,11 +139,11 @@ SELECT c.id AS invoice_line_id,
             THEN crm.round_to_minor_unit(c.net * c.tax_percent / 100, c.currency)
           WHEN c.treatment IN ('gst_intra', 'gst_intra_ut') THEN c.half * 2
           WHEN c.treatment IN ('gst_inter', 'gst_export_igst') THEN c.whole
-          ELSE 0
+          ELSE 0.0000
         END)::numeric AS tax,
-       (CASE WHEN c.treatment IN ('gst_intra', 'gst_intra_ut') THEN c.half ELSE 0 END)::numeric AS cgst,
-       (CASE WHEN c.treatment = 'gst_intra' THEN c.half ELSE 0 END)::numeric AS sgst,
-       (CASE WHEN c.treatment = 'gst_intra_ut' THEN c.half ELSE 0 END)::numeric AS utgst,
+       (CASE WHEN c.treatment IN ('gst_intra', 'gst_intra_ut') THEN c.half ELSE 0.0000 END)::numeric AS cgst,
+       (CASE WHEN c.treatment = 'gst_intra' THEN c.half ELSE 0.0000 END)::numeric AS sgst,
+       (CASE WHEN c.treatment = 'gst_intra_ut' THEN c.half ELSE 0.0000 END)::numeric AS utgst,
        c.whole::numeric AS igst
 FROM c;
 
@@ -166,9 +166,9 @@ SELECT a.invoice_id,
        sum(a.igst)                  AS igst,
        -- Q057: what the client is expected to deduct, on the amount BEFORE tax,
        -- and the net it remits. The receivable stays `total`.
-       coalesce(crm.round_to_minor_unit(sum(a.net) * i.tds_percent / 100, i.currency), 0)::numeric AS tds,
+       coalesce(crm.round_to_minor_unit(sum(a.net) * i.tds_percent / 100, i.currency), 0.0000)::numeric AS tds,
        sum(a.net) + sum(a.tax)
-         - coalesce(crm.round_to_minor_unit(sum(a.net) * i.tds_percent / 100, i.currency), 0) AS net_payable
+         - coalesce(crm.round_to_minor_unit(sum(a.net) * i.tds_percent / 100, i.currency), 0.0000) AS net_payable
 FROM crm.invoice_line_amount a
 JOIN crm.invoice i ON i.id = a.invoice_id AND i.tenant_id = a.tenant_id
 GROUP BY a.invoice_id, a.tenant_id, i.tds_percent, i.currency;

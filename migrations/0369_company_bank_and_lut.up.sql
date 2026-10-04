@@ -63,7 +63,10 @@ CREATE POLICY firm_entity_bank_account_isolation ON crm.firm_entity_bank_account
 -- No portal policy: the client reads the bank details on the invoice PDF, which
 -- is rendered on the firm's side.
 
+-- SELECT and INSERT, and UPDATE of the retirement stamp only (the default
+-- privileges grant UPDATE of every column, so it is revoked first). Never DELETE.
 GRANT SELECT, INSERT ON crm.firm_entity_bank_account TO bib_app;
+REVOKE UPDATE, DELETE ON crm.firm_entity_bank_account FROM bib_app;
 GRANT UPDATE (retired_at) ON crm.firm_entity_bank_account TO bib_app;
 
 COMMENT ON TABLE crm.firm_entity_bank_account IS
@@ -97,6 +100,7 @@ CREATE POLICY firm_entity_lut_isolation ON crm.firm_entity_lut
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 
 GRANT SELECT, INSERT ON crm.firm_entity_lut TO bib_app;
+REVOKE UPDATE, DELETE ON crm.firm_entity_lut FROM bib_app;
 GRANT UPDATE (retired_at) ON crm.firm_entity_lut TO bib_app;
 
 COMMENT ON TABLE crm.firm_entity_lut IS

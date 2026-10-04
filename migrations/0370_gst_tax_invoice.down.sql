@@ -18,10 +18,10 @@ SELECT l.id AS invoice_line_id,
          crm.round_to_minor_unit(l.quantity * l.unit_amount * (1 - l.discount_percent / 100), l.currency)
            * l.tax_percent / 100,
          l.currency) AS tax,
-       0::numeric AS cgst,
-       0::numeric AS sgst,
-       0::numeric AS utgst,
-       0::numeric AS igst
+       0.0000::numeric AS cgst,
+       0.0000::numeric AS sgst,
+       0.0000::numeric AS utgst,
+       0.0000::numeric AS igst
 FROM crm.invoice_line l
 WHERE l.removed_at IS NULL;
 
@@ -38,7 +38,7 @@ SELECT a.invoice_id,
        sum(a.sgst)                  AS sgst,
        sum(a.utgst)                 AS utgst,
        sum(a.igst)                  AS igst,
-       0::numeric            AS tds,
+       0.0000::numeric       AS tds,
        sum(a.net) + sum(a.tax)      AS net_payable
 FROM crm.invoice_line_amount a
 GROUP BY a.invoice_id, a.tenant_id;

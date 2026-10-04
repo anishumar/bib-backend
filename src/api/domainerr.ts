@@ -1023,6 +1023,7 @@ export function mapError(err: unknown): MappedError {
       case "DUNNING_ACTION_NOT_FOUND":
       case "ENGAGEMENT_NOT_FOUND":
       case "COMPANY_RECORD_NOT_FOUND":
+      case "CLIENT_NOT_FOUND":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
       // "The invoice is not in the state this call assumed", and none of them is
       // a malformed request. INVOICE_NOT_EDITABLE in particular is answered by

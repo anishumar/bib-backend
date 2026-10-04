@@ -55,6 +55,7 @@ CREATE TRIGGER trg_client_tds_updated
   FOR EACH ROW EXECUTE FUNCTION tenancy.set_updated_at();
 
 GRANT SELECT, INSERT ON crm.client_tds TO bib_app;
+REVOKE UPDATE, DELETE ON crm.client_tds FROM bib_app;
 GRANT UPDATE (section, percent, updated_at) ON crm.client_tds TO bib_app;
 
 COMMENT ON TABLE crm.client_tds IS

@@ -92,6 +92,7 @@ import {
   CreditExceedsUnusedAdvance,
   InvalidPlaceOfSupply,
   InvalidSac,
+  InvoiceClientNotFound,
   InvalidTds,
   InvoiceLineNeedsSac,
   PlaceOfSupplyUnknown,
@@ -386,11 +387,11 @@ export class InvoiceService {
     tds: { readonly section: string; readonly percent: string } | null,
     actor: Actor,
   ): Promise<ClientTds | null> {
-    const party = await this.deps.parties.findParty(tenantId, partyId);
-    if (party === null) throw new InvoiceEngagementNotFound(partyId);
+    // Never one of the firm's own companies: it does not deduct from itself.
     if (await this.deps.firmEntities.isFirmEntity(tenantId, partyId)) {
-      throw new InvoiceBillsTheFirm(party.displayName);
+      throw new InvoiceBillsTheFirm(await this.nameOf(tenantId, partyId));
     }
+    if ((await this.deps.parties.findParty(tenantId, partyId)) === null) throw new InvoiceClientNotFound(partyId);
     let next: ClientTds | null = null;
     if (tds !== null) {
       const section = tds.section.trim().toUpperCase().replace(/\((.*)\)$/, (m) => m.toLowerCase());
