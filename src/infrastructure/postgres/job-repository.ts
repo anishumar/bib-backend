@@ -63,6 +63,7 @@ interface RecurringRow {
   engagement_id: string;
   engagement_letter_id: string;
   entity_party_id: string;
+  issuing_entity_party_id: string;
   effective_from: string;
   recurrence: string;
   sla_days: string | null;
@@ -586,6 +587,8 @@ export class PostgresJobRepository
           e.id                         AS engagement_id,
           e.engagement_letter_id,
           e.entity_party_id,
+          -- WHOSE CALENDAR its periods are cut on (0337): the letter's company.
+          el.issuing_entity_party_id,
           -- A DATE, read as text: the period arithmetic is calendar arithmetic.
           e.effective_from::text       AS effective_from,
           -- The end and the last resume (V2.3), dates too.
@@ -606,6 +609,8 @@ export class PostgresJobRepository
         FROM crm.engagement e
         JOIN crm.engagement_letter_line l
           ON l.id = e.engagement_letter_line_id AND l.tenant_id = e.tenant_id
+        JOIN crm.engagement_letter el
+          ON el.id = e.engagement_letter_id AND el.tenant_id = e.tenant_id
         JOIN config.version pinned
           ON pinned.id = l.service_version_id AND pinned.tenant_id = l.tenant_id
         LEFT JOIN config.version live
@@ -634,6 +639,7 @@ export class PostgresJobRepository
           engagementId: r.engagement_id,
           engagementLetterId: r.engagement_letter_id,
           entityPartyId: r.entity_party_id,
+          issuingEntityPartyId: r.issuing_entity_party_id,
           deptCode: service?.module ?? null,
           teamCode: service?.group ?? null,
           workflowKey: service?.workflowTemplateKey ?? null,

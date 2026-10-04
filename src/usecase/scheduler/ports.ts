@@ -9,6 +9,7 @@
 import type { Job, JobSource, JobStatus } from "../../domain/scheduler/model";
 import type { WorkSplitAxis } from "../../domain/serviceaxis/model";
 import type { Actor } from "../../domain/ledger/model";
+import type { CompanyCalendars } from "../../domain/calendar/model";
 
 export interface NewJob {
   readonly id: string;
@@ -329,6 +330,9 @@ export interface RecurringEngagement {
   readonly engagementId: string;
   readonly engagementLetterId: string;
   readonly entityPartyId: string;
+  /** The firm company its letter is issued by (0337): its periods are cut on
+   *  that company's year and opened on its clock. */
+  readonly issuingEntityPartyId: string;
   readonly deptCode: string | null;
   readonly teamCode: string | null;
   readonly workflowKey: string | null;
@@ -378,6 +382,8 @@ export interface CompliancePolicySource {
  */
 export interface FirmTimeZone {
   timeZoneFor(tenantId: string): Promise<string>;
+  /** Each firm company's own calendar (0337); absent means the firm's. */
+  companyCalendars(tenantId: string): Promise<CompanyCalendars>;
 }
 
 /**

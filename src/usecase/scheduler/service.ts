@@ -23,6 +23,7 @@ import {
   recurrenceOfService,
 } from "../../domain/scheduler/model";
 import { dayInZone, startOfDayInZone } from "../../domain/scheduler/zone";
+import { yearStartOfCompany, zoneOfCompany } from "../../domain/calendar/model";
 import { InvalidTransition, JobNotFound } from "../../domain/scheduler/errors";
 import type { WorkSplitAxis } from "../../domain/serviceaxis/model";
 import { groupByAxis } from "../../domain/serviceaxis/model";
@@ -473,19 +474,28 @@ export class SchedulerService {
     readonly awaitingFiscalYear: number;
     readonly tasksFailed: number;
   }> {
-    const zone = await this.deps.timeZone.timeZoneFor(tenantId);
-    const today = dayInZone(this.deps.clock.now().toISOString(), zone);
+    const firmZone = await this.deps.timeZone.timeZoneFor(tenantId);
+    const calendars = await this.deps.timeZone.companyCalendars(tenantId);
+    const now = this.deps.clock.now().toISOString();
     const floor = await this.deps.compliancePolicy.missedFromOn(tenantId);
-    const fiscalYearStartMonth = await this.deps.compliancePolicy.fiscalYearStartMonth(tenantId);
+    const firmYearStart = await this.deps.compliancePolicy.fiscalYearStartMonth(tenantId);
     const rows = await this.deps.recurring.activeRecurring(tenantId, RECURRING_BATCH);
+    // EACH COMPANY'S OWN CALENDAR (0337): a row's periods are cut on its
+    // letter's company's year and begin on that company's today; its job
+    // opens at midnight on that company's clock. A company that set neither
+    // is on the firm's, as before.
+    const zoneOf = (row: RecurringEngagement): string =>
+      zoneOfCompany(calendars, row.issuingEntityPartyId, firmZone);
 
     let awaitingFiscalYear = 0;
-    // Period -> the engagements owing it. Keyed on start AND end: a quarter
-    // and a month can begin on the same day and are not one period.
+    // Period -> the engagements owing it. Keyed on start, end AND label: a
+    // quarter and a month can begin on the same day and are not one period,
+    // and two companies on different years label the same months apart.
     const wanted = new Map<string, { period: Period; engagements: RecurringEngagement[] }>();
     for (const row of rows) {
       const recurrence = recurrenceOfService(row.recurrence);
       if (recurrence === null) continue;
+      const fiscalYearStartMonth = yearStartOfCompany(calendars, row.issuingEntityPartyId, firmYearStart);
       if (recurrence !== "monthly" && fiscalYearStartMonth === null) {
         awaitingFiscalYear += 1;
         continue;
@@ -495,14 +505,14 @@ export class SchedulerService {
         fiscalYearStartMonth: fiscalYearStartMonth ?? 1,
         effectiveFrom: row.effectiveFrom,
         floor,
-        today,
+        today: dayInZone(now, zoneOf(row)),
         slaDays: row.slaDays,
         endsOn: row.endsOn,
         resumedOn: row.resumedOn,
       });
       for (const period of periods) {
         if (row.linkedPeriods.includes(period.start)) continue;
-        const key = `${period.start}${KEY_SEP}${period.end}`;
+        const key = `${period.start}${KEY_SEP}${period.end}${KEY_SEP}${period.label}`;
         const bucket = wanted.get(key);
         if (bucket) bucket.engagements.push(row);
         else wanted.set(key, { period, engagements: [row] });
@@ -515,8 +525,10 @@ export class SchedulerService {
     for (const { period, engagements } of wanted.values()) {
       for (const group of groupForJobs(engagements, axis)) {
         const engagementIds = group.items.map((e) => e.engagementId);
+        // A group is one letter, so one company: its first item's clock.
+        const first = group.items[0];
         const result = await this.deps.jobs.createIfAbsent(
-          this.periodJobFor(tenantId, group, period, zone),
+          this.periodJobFor(tenantId, group, period, first === undefined ? firmZone : zoneOf(first)),
         );
         // Link, then task, then judge — in that order and for the reasons the
         // activation spawn gives at length. The link is what "this month's
@@ -610,9 +622,9 @@ export class SchedulerService {
       tenantId,
       sourceKind: "engagement_period",
       sourceRef,
-      // The day AFTER the period ends, at the start of that day where the
-      // firm is — the firm's own words for step one of its process: "comes
-      // after close of month".
+      // The day AFTER the period ends, at the start of that day where its
+      // company is (0337) — the firm's own words for step one of its
+      // process: "comes after close of month".
       runnableAt: startOfDayInZone(addDays(period.end, 1), zone),
       splitAxis: group.splitAxis,
       splitCode: group.splitCode,
