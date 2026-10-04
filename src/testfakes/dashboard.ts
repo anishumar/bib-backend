@@ -21,7 +21,9 @@ import type {
   ManagerName,
   ManagerOwedRow,
   MrrTotals,
+  PersonCurrencyRow,
   ReceivableTotals,
+  RevenueQuery,
 } from "../usecase/dashboard/ports";
 
 export class FakeDashboardRepo implements DashboardRepository {
@@ -143,5 +145,15 @@ export class FakeDashboardRepo implements DashboardRepository {
   managerNames(_tenantId: string, userIds: readonly string[]): Promise<readonly ManagerName[]> {
     this.namesAsked.push([...userIds]);
     return Promise.resolve(this.names.filter((n) => userIds.includes(n.userId)));
+  }
+
+  /** The revenue report's rows (Q049) as a test sets them, per `by`, and
+   *  every query asked. */
+  personRows: { manager: PersonCurrencyRow[]; originator: PersonCurrencyRow[] } = { manager: [], originator: [] };
+  revenueAsked: RevenueQuery[] = [];
+
+  revenueByPerson(_tenantId: string, q: RevenueQuery): Promise<readonly PersonCurrencyRow[]> {
+    this.revenueAsked.push(q);
+    return Promise.resolve(this.personRows[q.by].filter((r) => q.currency === undefined || r.currency === q.currency));
   }
 }

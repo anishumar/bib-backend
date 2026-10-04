@@ -992,6 +992,7 @@ export function mapError(err: unknown): MappedError {
       case "LINE_CURRENCY_IS_SECTIONS":
       case "PROSE_EDITED":
       case "TERMS_ON_LETTER":
+      case "ORIGINATOR_NOT_STAFF":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

@@ -129,6 +129,8 @@ import {
 import { PostgresAdvanceBillFacts, PostgresFinalBillFacts } from "../infrastructure/postgres/billing-facts";
 import { PostgresDoneWorkFacts } from "../infrastructure/postgres/done-work";
 import { EarlyBiller } from "../usecase/billing/early";
+import { OriginatorService } from "../usecase/originator/service";
+import { PostgresOriginatorStore } from "../infrastructure/postgres/originator-repository";
 import { DunningService } from "../usecase/dunning/service";
 import { EscalationService } from "../usecase/escalation/service";
 import { NotificationService } from "../usecase/notify/service";
@@ -1447,7 +1449,11 @@ export function wire(cfg: Config, log: Logger): Wired {
         billing: { service: billing, authz, advances: advanceDesk, finals: finalBills, workBilling, early: earlyBills },
         notifications: { service: notifications, authz },
         filestore: { service: fileStore, authz },
-        dashboard: { service: dashboards, authz },
+        dashboard: {
+          service: dashboards,
+          authz,
+          originators: new OriginatorService({ store: new PostgresOriginatorStore(pools.app), events: ledger }),
+        },
         readiness: { service: readiness },
         fx: { service: fx },
       },

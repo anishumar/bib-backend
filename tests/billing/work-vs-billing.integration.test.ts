@@ -275,6 +275,13 @@ beforeAll(async () => {
     RETURNING id
   `;
   if (!state || !template) throw new Error("filing seed failed");
+  // Every firm with filing states has a filed one (0054; the calendar test
+  // checks every firm in the database, so a firm without one fails it on the
+  // next run).
+  await owner`
+    INSERT INTO delivery.obligation_state (tenant_id, code, name, sort_order, is_filed, is_terminal)
+    VALUES (${tenantId}, 'filed', 'Filed', 90, true, true)
+  `;
   await owner`
     INSERT INTO delivery.obligation_instance
       (tenant_id, template_id, entity_party_id, engagement_id, period_start, period_end, period_label,

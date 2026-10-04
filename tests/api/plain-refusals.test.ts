@@ -3,6 +3,9 @@
 // a 403 would confirm it exists", `Role "associate" does not carry
 // "ledger:read"`, and a dashboard refusal about "commercial visibility" being
 // "a setting on the membership".
+import { RecordingEventSink } from "../../src/testfakes/ledger";
+import { OriginatorService } from "../../src/usecase/originator/service";
+import { FakeOriginatorStore } from "../../src/testfakes/originator";
 import { describe, expect, it } from "vitest";
 import { NotPermitted } from "../../src/domain/authz/errors";
 import { PERMISSIONS } from "../../src/domain/authz/model";
@@ -81,6 +84,7 @@ describe("the firm's numbers, for a login that cannot see fees", () => {
         fiscalYears: new FakeFiscalYearSource(),
         clock: new FakeClock(),
       }),
+      originators: new OriginatorService({ store: new FakeOriginatorStore(), events: new RecordingEventSink() }),
       authz: new AuthzService({ permissions: withDefaultRoles(TENANT) }),
     });
     const res = await app.request("/api/v1/dashboard/overview");

@@ -211,6 +211,12 @@ beforeAll(async () => {
     VALUES (${tenantId}, 'pending', 'Pending', 10) RETURNING id
   `;
   if (!pending) throw new Error("state seed failed");
+  // Every firm with filing states has a filed one (0054; the calendar test
+  // checks every firm in the database).
+  await owner`
+    INSERT INTO delivery.obligation_state (tenant_id, code, name, sort_order, is_filed, is_terminal)
+    VALUES (${tenantId}, 'filed', 'Filed', 90, true, true)
+  `;
   auditFiling = await filing(auditRule.id, ["2025-04-01", "2026-03-31", "FY2025-26"], "2026-09-30", pending.id);
   monthlyFiling = await filing(gstr.id, ["2026-04-01", "2026-04-30", "Apr 2026"], "2026-05-11", pending.id);
   unlinkedFiling = await filing(itr.id, ["2025-04-01", "2026-03-31", "FY2025-26"], "2026-07-31", pending.id);
@@ -327,6 +333,10 @@ describe("a yearly bill on its filing's due date (Q071, 0354)", () => {
     const [st] = await owner<{ id: string }[]>`
       INSERT INTO delivery.obligation_state (tenant_id, code, name, sort_order)
       VALUES (${otherTenant}, 'pending', 'Pending', 10) RETURNING id
+    `;
+    await owner`
+      INSERT INTO delivery.obligation_state (tenant_id, code, name, sort_order, is_filed, is_terminal)
+      VALUES (${otherTenant}, 'filed', 'Filed', 90, true, true)
     `;
     if (!t || !st) throw new Error("other firm seed failed");
     const [theirs] = await owner<{ id: string }[]>`

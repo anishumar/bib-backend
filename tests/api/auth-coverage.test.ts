@@ -19,6 +19,8 @@
 // any future plain-Hono route would have been. The middleware guards still
 // covered them, but a test that claims "every route is accounted for" must be
 // able to SEE every route.
+import { OriginatorService } from "../../src/usecase/originator/service";
+import { FakeOriginatorStore } from "../../src/testfakes/originator";
 import { makeFxFakes } from "../../src/testfakes/fx";
 import { NotificationService } from "../../src/usecase/notify/service";
 import { FakeNotificationInbox, FakeNotificationSettings, FakeNotifyFirmSetting } from "../../src/testfakes/notify";
@@ -630,6 +632,7 @@ function deps(): RouterDeps {
         fiscalYears: new FakeFiscalYearSource(),
         clock: new FakeClock(),
       }),
+      originators: new OriginatorService({ store: new FakeOriginatorStore(), events: new RecordingEventSink() }),
       authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }),
     },
     filestore: {
