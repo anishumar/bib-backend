@@ -2182,6 +2182,52 @@ fee axis like the rest of `/dashboard`.
   NOT checked: those managers were resolved from the firm's own SPOCs, and a manager who has
   left since still earned that period, so refusing would leave the bill stuck.
 
+## Work vs Billing — the work, its bill, the invoice and the money (Q041, 2026-10-04, no migration)
+
+Ashish (COO, 10x Global, 4 Oct 2026): *"job done but bill not generated, hume kyun nahi mil sakta
+system mein yeh?"* `GET /api/v1/billing/work-vs-billing` (`party:read`): one row per client ×
+service × period, with the jobs, the statutory filings under that service, the bill (status
+derived as the desk does), its invoice and what is owed (`crm.invoice_balance`). The same idea
+as an unbilled-work (WIP) report in Karbon, Xero Practice Manager and Canopy, for fixed-fee work,
+with receivables beside it. Read model only: `usecase/billing/work-vs-billing.ts` (pure assembly,
+`assembleRows`, `expectedBill`), port `WorkBillingFacts` in `usecase/billing/ports.ts`, adapter
+`infrastructure/postgres/work-billing.ts` (one `withTenant`), handler `api/handler/work-billing.ts`.
+
+- **A bill does not store its job; they meet by SUBJECT and PERIOD.** The subject is the sweep's
+  (an engagement priced alone, `e:<id>`, or a fee group, `g:<id>`). A period job sits on the row
+  of the bill whose period holds the job's first day. A job with no bill yet gets the period and
+  the bill date the SWEEP would give it: `expectedBill` calls `periodsFrom` + `billingDues` with
+  every bill date treated as come, so nothing here assumes "the 1st of next month" (Q042 moves
+  that date). One-time work is one row (`o:`): its job and its final bill. An advance is its own
+  row. A statutory filing (generated for the engagement, or of the same company with its rule
+  linked to the service: CA#11's predicate) sits under the row whose period holds the filing's
+  last day and is NEVER flagged: its service's bill covers it.
+- **Flags are codes, the screen writes the words** (readiness's rule). `no_bill` (period over,
+  work done, no bill; cause `no_schedule`, `auto_billing_off`, `no_fiscal_year` or `not_written`),
+  `no_final_bill` (one-time work done; `auto_billing_off`, `before_auto_billing`, `not_written`),
+  `skipped` (reason, who, when), `not_raised` (bill date passed; `no_price` when the letter fixed
+  none), `not_issued` (a draft more than `DRAFT_STALE_DAYS` = 7 past the bill date),
+  `unpaid_overdue` (issued, owed, past the due date; an invoice with no due date is due on its
+  date, the Xero/Zoho "due on receipt" default). `days` ages each one, and the summary buckets
+  them 0-30 / 31-60 / 61-90 / 90+ like a WIP ageing.
+- **Not problems, written as notes:** a recurring bill raised while its period's job is still open
+  (`raised_before_work_done`; Ashish, 1 Oct: a retainer's work is not complete before the invoice),
+  a bill whose date has not come (`bill_due_on`), the billing run's next pass (`billing_run_next`,
+  a day of grace), a period before the client's `billing_from` (`before_billing_start`: billed the
+  old way), one-time work billed by hand (`billed_by_hand`), a paused period (`not_served`).
+- **Invoices raised by hand** (a line on the work, not cancelled, its invoice on no bill) ride on a
+  `no_schedule` row as `handInvoices`: an invoice line has no period, so they cannot clear the flag,
+  only inform it. The cure is setting billing up.
+- **The manager** is the bill's, else the invoice's, else the client's Key Manager today
+  (`managerFrom`); the filter applies after assembly, the summary counts the filtered rows before
+  "only problems". Window: `from`/`to` (default twelve months ending the firm's today, at most
+  three years); rows whose period touches it, one-time work finished in it or still open.
+- **Fees**: amounts null without the fee axis (`feesVisible` on the answer); paid / part paid /
+  overdue days are not amounts and stay. 2,000 rows at most (`truncated`).
+- Tests: `tests/billing/work-vs-billing.test.ts` (25), `work-vs-billing.integration.test.ts` (8:
+  the derivations on real SQL, the firm's done day, the filing, hand invoices, the wall). Walk:
+  `bib/demo-assets/tools/wvb-walk.mjs` on `wvb-fixture.mjs` (40 checks).
+
 ## Who a commercial document names — the client, not merely the firm (F-10-1, 0306)
 
 The composite `(id, tenant_id)` keys prove a reference is THIS FIRM's and nothing more. The
