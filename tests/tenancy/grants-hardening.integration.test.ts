@@ -25,7 +25,7 @@ afterAll(async () => {
   await owner.end({ timeout: 5 });
 });
 
-describe("0324: the request role cannot rewrite migration history (B30)", () => {
+describe("0336: the request role cannot rewrite migration history (B30)", () => {
   it("holds no privilege on tenancy.schema_migrations", async () => {
     const [row] = await owner<{ ins: boolean; upd: boolean; del: boolean; sel: boolean; trunc: boolean }[]>`
       SELECT has_table_privilege('bib_app', 'tenancy.schema_migrations', 'INSERT')   AS ins,
@@ -54,7 +54,7 @@ describe("0324: the request role cannot rewrite migration history (B30)", () => 
   });
 });
 
-describe("0324: the one SECURITY DEFINER function pins its search_path (B38)", () => {
+describe("0336: the one SECURITY DEFINER function pins its search_path (B38)", () => {
   it("runs administrator_survives() with a fixed search_path", async () => {
     const rows = await owner<{ proname: string; prosecdef: boolean; proconfig: string[] | null }[]>`
       SELECT p.proname, p.prosecdef, p.proconfig

@@ -1,4 +1,4 @@
--- 0324 · Two things the request role and the one definer function should
+-- 0336 · Two things the request role and the one definer function should
 -- never have had (audit 2026-10-03, B30 and B38).
 --
 -- B30 (security audit F-06-1). `bib_app` held INSERT, SELECT and UPDATE on
@@ -32,7 +32,7 @@ BEGIN
      OR has_table_privilege('bib_app', 'tenancy.schema_migrations', 'TRUNCATE')
      OR has_table_privilege('bib_app', 'tenancy.schema_migrations', 'SELECT') THEN
     RAISE EXCEPTION
-      '0324: bib_app still holds a privilege on tenancy.schema_migrations that this role could not revoke. Revoke it as the role that granted it: REVOKE ALL ON tenancy.schema_migrations FROM bib_app;';
+      '0336: bib_app still holds a privilege on tenancy.schema_migrations that this role could not revoke. Revoke it as the role that granted it: REVOKE ALL ON tenancy.schema_migrations FROM bib_app;';
   END IF;
 END $$;
 

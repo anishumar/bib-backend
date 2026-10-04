@@ -1,4 +1,4 @@
-// CA#6 (audit 2026-10-03), proven against real Postgres: 0323 gives
+// CA#6 (audit 2026-10-03), proven against real Postgres: 0335 gives
 // `invoice:issue` to EXACTLY the roles that held `tenant:admin`, so nothing
 // changes for any firm the day issuing is split off administration.
 //
@@ -6,7 +6,7 @@
 // firm that renamed its partner role, or made an "Office admin" of its own,
 // must not lose the ability to issue on the day of a deploy. So this test
 // builds a firm with its OWN roles, a draft pending beside one of them, then
-// runs 0323 over it (it is written to be re-runnable) and reads the rows back.
+// runs 0335 over it (it is written to be re-runnable) and reads the rows back.
 //
 // Run with:  npm run test:integration   (needs a migrated local database)
 import { readFileSync } from "node:fs";
@@ -16,7 +16,7 @@ import { load } from "../../src/config/config";
 
 const cfg = load();
 const owner = postgres(cfg.db.ownerUrl, { max: 1 });
-const MIGRATION = readFileSync("migrations/0323_invoice_issue_permission.up.sql", "utf8");
+const MIGRATION = readFileSync("migrations/0335_invoice_issue_permission.up.sql", "utf8");
 
 const stamp = String(Date.now());
 let tenant = "";
@@ -86,7 +86,7 @@ afterAll(async () => {
   await owner.end({ timeout: 5 });
 });
 
-describe("0323: invoice:issue for the roles that administered", () => {
+describe("0335: invoice:issue for the roles that administered", () => {
   it("publishes a new version of a firm's own administrator role carrying invoice:issue", async () => {
     const rows = await versionsOf("office_admin");
     expect(rows.map((r) => [r.version, r.status])).toEqual([

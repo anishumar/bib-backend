@@ -211,8 +211,8 @@ Redacting the JSON was not the whole wall. Since the 2026-10-03 audit (branch `f
 - **A line with neither `unitAmount` nor `pricingNote`** on a proposal or a letter is quoted at
   the pinned version's list price in the document's currency (`SERVICE_HAS_NO_LIST_PRICE`
   when there is none). It is how a drafter who cannot see fees adds a priced service.
-- **Issuing is `invoice:issue`** (0323), not `tenant:admin`: issue, cancel, credit notes and an
-  advance's refund or keep. 0323 gave it to every role that held `tenant:admin`.
+- **Issuing is `invoice:issue`** (0335), not `tenant:admin`: issue, cancel, credit notes and an
+  advance's refund or keep. 0335 gave it to every role that held `tenant:admin`.
 
 ## The configuration registry — data, not code (P2 / T2.5)
 

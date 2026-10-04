@@ -1,4 +1,4 @@
--- Down for 0324: puts back what 0001 granted and what 0078 left unset. Both
+-- Down for 0336: puts back what 0001 granted and what 0078 left unset. Both
 -- were the weaker state (see the up); this exists so the migration can be
 -- reversed, not because either is wanted.
 

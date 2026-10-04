@@ -1,4 +1,4 @@
--- 0323 · `invoice:issue`: issuing an invoice is no longer the whole of
+-- 0335 · `invoice:issue`: issuing an invoice is no longer the whole of
 -- administering the firm (audit 2026-10-03, CA#6).
 --
 -- Issuing and cancelling an invoice and issuing a credit note needed
@@ -31,18 +31,18 @@ SET ROLE bib_owner;
 -- this marker. Nothing below upgrades from it: the rule is "carries
 -- tenant:admin", which covers the defaults and every firm's own. It is checked
 -- against that rule instead, so the two cannot disagree.
-CREATE TEMP TABLE role_seed_0323(roles jsonb) ON COMMIT DROP;
-INSERT INTO role_seed_0323 VALUES ('{"partner":{"label":"Partner","permissions":["party:read","party:write","ledger:read","config:read","tenant:admin","proposal:approve","work:write","obligation:resolve","portal:grant","acceptance:record","billing:skip","invoice:issue"]},"manager":{"label":"Manager","permissions":["party:read","party:write","ledger:read","config:read","work:write","billing:skip"]},"associate":{"label":"Associate","permissions":["party:read","party:write","config:read","work:write"]},"client_contact":{"label":"Client contact","permissions":["portal:respond","portal:request"],"audience":"CLIENT_PORTAL"},"client_viewer":{"label":"Client contact (read only)","permissions":[],"audience":"CLIENT_PORTAL"}}'::jsonb);  -- @default-roles-seed
+CREATE TEMP TABLE role_seed_0335(roles jsonb) ON COMMIT DROP;
+INSERT INTO role_seed_0335 VALUES ('{"partner":{"label":"Partner","permissions":["party:read","party:write","ledger:read","config:read","tenant:admin","proposal:approve","work:write","obligation:resolve","portal:grant","acceptance:record","billing:skip","invoice:issue"]},"manager":{"label":"Manager","permissions":["party:read","party:write","ledger:read","config:read","work:write","billing:skip"]},"associate":{"label":"Associate","permissions":["party:read","party:write","config:read","work:write"]},"client_contact":{"label":"Client contact","permissions":["portal:respond","portal:request"],"audience":"CLIENT_PORTAL"},"client_viewer":{"label":"Client contact (read only)","permissions":[],"audience":"CLIENT_PORTAL"}}'::jsonb);  -- @default-roles-seed
 
 DO $$
 BEGIN
   IF EXISTS (
     SELECT 1
-      FROM role_seed_0323, jsonb_each(role_seed_0323.roles) AS r
+      FROM role_seed_0335, jsonb_each(role_seed_0335.roles) AS r
      WHERE jsonb_exists(r.value -> 'permissions', 'tenant:admin')
        <> jsonb_exists(r.value -> 'permissions', 'invoice:issue')
   ) THEN
-    RAISE EXCEPTION '0323: a default role carries one of tenant:admin and invoice:issue without the other';
+    RAISE EXCEPTION '0335: a default role carries one of tenant:admin and invoice:issue without the other';
   END IF;
 END $$;
 

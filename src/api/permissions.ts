@@ -766,8 +766,8 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // same permission every other drafting route on both documents takes.
   //
   // ISSUING AND CANCELLING ARE `invoice:issue`, and that is the one considered
-  // difference. (They were `tenant:admin` until 0323, CA#6: a firm had to make
-  // its accounts person a full administrator to issue a bill. 0323 gave the new
+  // difference. (They were `tenant:admin` until 0335, CA#6: a firm had to make
+  // its accounts person a full administrator to issue a bill. 0335 gave the new
   // permission to exactly the roles that carried tenant:admin.) Raising a draft is bookkeeping; ISSUING allocates nothing new
   // but sends a legal demand to a client under one of the firm's own entities,
   // and CANCELLING withdraws one — both leave a permanent mark in a consecutive
@@ -803,7 +803,7 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // redacting the amounts. Raising, linking, skipping and setting a schedule
   // are `party:write`, the permission that raises an invoice by hand: SPOCs
   // and managers both raise bills (Ashish, 2026-10-01). Issuing is
-  // `invoice:issue` on the invoice routes (0323). The FIRM'S SETTINGS are
+  // `invoice:issue` on the invoice routes (0335). The FIRM'S SETTINGS are
   // `tenant:admin`: the switch starts a sweep across every client, and the
   // advance policy and default tax rates (0322) change what every advance does.
   [routeKey("GET", "/api/v1/billing/dues"), "party:read" as const],
@@ -815,7 +815,7 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("POST", "/api/v1/billing/dues/{dueId}/skip"), "billing:skip" as const],
   [routeKey("POST", "/api/v1/billing/dues/{dueId}/link"), "party:write" as const],
   // The advance and the final bill (0320). A refund's credit note and keeping
-  // an advance are `invoice:issue`, as credit notes are (0323). (Approve start
+  // an advance are `invoice:issue`, as credit notes are (0335). (Approve start
   // went with 0322: the advance no longer holds the work.)
   [routeKey("GET", "/api/v1/billing/advances"), "party:read" as const],
   [routeKey("GET", "/api/v1/billing/refunds"), "party:read" as const],
