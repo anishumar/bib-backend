@@ -275,7 +275,7 @@ describe("changing a line on a draft (T6.18)", () => {
     );
     const view = await s.service.describe(TENANT, proposalId);
     // 12 × 3000 = 36000, less 10% = 32400.
-    expect(view.totals.net).toBe("32400.0000");
+    expect(view.totals[0]?.net).toBe("32400.0000");
   });
 
   it("records no event for the edit itself — a draft being written is not a transition", async () => {

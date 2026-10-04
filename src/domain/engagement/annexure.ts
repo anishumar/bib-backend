@@ -29,7 +29,7 @@
 //    for one company names nobody beside its services. A section whose every
 //    service covers the same companies names them once, under its heading. Only
 //    a section that mixes names them per service.
-import type { Amount } from "../money/model";
+import type { Amount, CurrencyCode } from "../money/model";
 import type { BillingFrequency, DocumentTerms, OutOfPocketEstimate } from "../document/model";
 import type { FeeGroup, LetterBillingTiming } from "./model";
 import { sectionCode } from "./model";
@@ -54,6 +54,8 @@ export interface PlanLine {
   /** What the line costs, or null when it has no price of its own — grouped,
    *  or "as mutually agreed". */
   readonly net: Amount | null;
+  /** What it is priced in (0344): the letter's main currency or another. */
+  readonly currency: CurrencyCode;
   readonly pricingNote: string | null;
   readonly oopEstimate: OutOfPocketEstimate | null;
 }
@@ -115,6 +117,8 @@ export interface FeeRow {
   readonly startsOn: string | null;
   /** Null for a line with no price of its own — `pricingNote` says why. */
   readonly amount: Amount | null;
+  /** The group's or the line's own currency (0344): each row prints in it. */
+  readonly currency: CurrencyCode;
   readonly pricingNote: string | null;
   readonly paymentTerms: string | null;
 }
@@ -184,6 +188,7 @@ export function planAnnexure(input: PlanInput): AnnexurePlan {
         billingOn: group.billingOn,
         startsOn: commonStart(members, input.letterEffectiveFrom),
         amount: group.amount,
+        currency: group.currency,
         pricingNote: null,
         paymentTerms: group.paymentTerms,
       });
@@ -206,6 +211,7 @@ export function planAnnexure(input: PlanInput): AnnexurePlan {
           billingOn: line.billingOn ?? null,
           startsOn: line.effectiveFrom ?? input.letterEffectiveFrom,
           amount: line.net,
+          currency: line.currency,
           pricingNote: line.pricingNote,
           paymentTerms: null,
         });

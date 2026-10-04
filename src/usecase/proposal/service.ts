@@ -2131,6 +2131,7 @@ function planOf(record: ProposalRecord): ProposalPlan {
       terms: l.terms,
       billingFrequency: l.line.billingFrequency,
       net: l.net,
+      currency: l.line.currency,
       pricingNote: l.line.pricingNote,
       oopEstimate: l.line.oopEstimate,
     })),

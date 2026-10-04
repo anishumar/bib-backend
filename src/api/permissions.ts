@@ -492,6 +492,8 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   ],
   // T6.18 S6: a draft's head and its lines change in place, as a proposal's do.
   [routeKey("PATCH", "/api/v1/engagement-letters/{letterId}"), "party:write" as const],
+  [routeKey("PUT", "/api/v1/engagement-letters/{letterId}/rates/{currency}"), "party:write" as const],
+  [routeKey("DELETE", "/api/v1/engagement-letters/{letterId}/rates/{currency}"), "party:write" as const],
   [routeKey("PATCH", "/api/v1/engagement-letters/{letterId}/lines/{lineId}"), "party:write" as const],
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/lines"), "party:write" as const],
   [

@@ -130,7 +130,12 @@ export class AdvanceBiller {
         engagementLetterId: facts.letterId,
         partyId: facts.partyId,
         issuingEntityPartyId: facts.issuingEntityPartyId,
-        currency: facts.currency,
+        // The letter's own advance is in its main currency; a service's own
+        // advance in the service's currency (0344, Shrestha 2026-10-04).
+        currency:
+          advance.engagementId === null
+            ? facts.currency
+            : (live.find((l) => l.engagementId === advance.engagementId)?.currency ?? facts.currency),
         engagementId: advance.engagementId,
         feeGroupId: null,
         // Not a period: the day it fell due, counted as one whole day of one,

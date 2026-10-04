@@ -499,10 +499,14 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
           currency: string;
         }[]
       >`
-        SELECT e.party_id, l.issuing_entity_party_id, l.ref AS letter_ref, l.currency
+        -- The LINE's currency (0344): what this engagement was priced in, which
+        -- on a letter in several currencies need not be the letter's main one.
+        SELECT e.party_id, l.issuing_entity_party_id, l.ref AS letter_ref, ll.currency
           FROM crm.engagement e
           JOIN crm.engagement_letter l
             ON l.id = e.engagement_letter_id AND l.tenant_id = e.tenant_id
+          JOIN crm.engagement_letter_line ll
+            ON ll.id = e.engagement_letter_line_id AND ll.tenant_id = e.tenant_id
          WHERE e.id = ${engagementId}
       `;
       return row

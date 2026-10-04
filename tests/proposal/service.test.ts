@@ -599,11 +599,11 @@ describe("a line with no price — what a total MEANS then", () => {
     const s = setup();
     const id = await mixedProposal(s);
     const totals = (await s.service.describe(TENANT, id)).totals;
-    expect(totals.net).toBe("24000.0000");
-    expect(totals.gross).toBe("24000.0000");
+    expect(totals[0]?.net).toBe("24000.0000");
+    expect(totals[0]?.gross).toBe("24000.0000");
     // Non-zero means the figure above is a FLOOR, not the price of the
     // document.
-    expect(totals.unpricedLineCount).toBe(1);
+    expect(totals[0]?.unpricedLineCount).toBe(1);
   });
 
   it("counts a document that is ENTIRELY unpriced, where the total reads zero", async () => {
@@ -622,8 +622,8 @@ describe("a line with no price — what a total MEANS then", () => {
       discountPercent: "0",
     });
     const totals = (await s.service.describe(TENANT, id)).totals;
-    expect(totals.net).toBe("0.0000");
-    expect(totals.unpricedLineCount).toBe(1);
+    expect(totals[0]?.net).toBe("0.0000");
+    expect(totals[0]?.unpricedLineCount).toBe(1);
   });
 
   it("quotes a line with neither a fee nor a reason at the catalogue's list price (B09)", async () => {
@@ -856,8 +856,8 @@ describe("line detail — the wording, the frequency and the out-of-pockets", ()
       currency: "USD",
     });
     // And the INR total is untouched by the USD estimate beside it.
-    expect(record.totals.net).toBe("50000.0000");
-    expect(record.totals.currency).toBe("INR");
+    expect(record.totals[0]?.net).toBe("50000.0000");
+    expect(record.totals[0]?.currency).toBe("INR");
   });
 
   it("refuses a range whose ends are the wrong way round, and a bad code", async () => {

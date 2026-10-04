@@ -988,6 +988,7 @@ export function mapError(err: unknown): MappedError {
       case "CURRENCY_LOCKED_BY_LINES":
       case "CURRENCY_NEEDS_A_RATE":
       case "RATE_IN_USE":
+      case "LINE_CURRENCY_IS_SECTIONS":
       case "PROSE_EDITED":
       case "TERMS_ON_LETTER":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };

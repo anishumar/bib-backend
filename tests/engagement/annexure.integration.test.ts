@@ -322,15 +322,15 @@ describe("an Annexure letter and its fee groups, in the database (0083)", () => 
     expect(record?.feeGroups[0]?.lineIds).toEqual([lines["cleanup"], lines["tax2025"]]);
     expect(record?.feeGroups[1]?.lineIds).toHaveLength(6);
     // 40,000 + 5,000 + the one line priced on its own.
-    expect(Number(record?.totals.net)).toBe(45300);
-    expect(record?.totals.unpricedLineCount).toBe(0);
+    expect(Number(record?.totals[0]?.net)).toBe(45300);
+    expect(record?.totals[0]?.unpricedLineCount).toBe(0);
     // Grouped lines carry no price of their own.
     const grouped = record?.lines.filter((l) => l.line.feeGroupId !== null) ?? [];
     expect(grouped.every((l) => l.line.unitAmount === null && l.net === null)).toBe(true);
     expect(grouped.every((l) => l.line.feeGroupId === a || l.line.feeGroupId === b)).toBe(true);
 
     const [summary] = (await letters.listLetters(tenant, {})).filter((s) => s.letter.id === id);
-    expect(Number(summary?.totals.net)).toBe(45300);
+    expect(Number(summary?.totals[0]?.net)).toBe(45300);
   });
 
   it("re-letters the sections when one is struck off, and refuses to strike one that prices services", async () => {

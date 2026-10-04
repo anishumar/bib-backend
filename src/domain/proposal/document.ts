@@ -33,7 +33,7 @@
 // NOT merged, unlike the letter: a quote prices each company's work on its
 // own line, and two lines with two prices are two promises however alike their
 // words are.
-import type { Amount } from "../money/model";
+import type { Amount, CurrencyCode } from "../money/model";
 import type { BillingFrequency, DocumentTerms, OutOfPocketEstimate } from "../document/model";
 import { sectionCode } from "../engagement/model";
 
@@ -52,6 +52,8 @@ export interface ProposalPlanLine {
   readonly billingFrequency: BillingFrequency | null;
   /** What the line costs after its discount, or null when it has no price. */
   readonly net: Amount | null;
+  /** What it is priced in (0344): the proposal's main currency or another. */
+  readonly currency: CurrencyCode;
   readonly pricingNote: string | null;
   readonly oopEstimate: OutOfPocketEstimate | null;
 }
@@ -80,6 +82,8 @@ export interface ProposalItem {
   readonly terms: DocumentTerms;
   readonly billingFrequency: BillingFrequency | null;
   readonly net: Amount | null;
+  /** The line's own currency (0344): the fee prints in it. */
+  readonly currency: CurrencyCode;
   readonly pricingNote: string | null;
   readonly oopEstimate: OutOfPocketEstimate | null;
   readonly lineId: string;
@@ -149,6 +153,7 @@ export function planProposal(input: ProposalPlanInput): ProposalPlan {
           terms: l.terms,
           billingFrequency: l.billingFrequency,
           net: l.net,
+          currency: l.currency,
           pricingNote: l.pricingNote,
           oopEstimate: l.oopEstimate,
           lineId: l.id,

@@ -87,6 +87,7 @@ export type EngagementErrorCode =
   | "CURRENCY_LOCKED_BY_LINES"
   | "CURRENCY_NEEDS_A_RATE"
   | "RATE_IN_USE"
+  | "LINE_CURRENCY_IS_SECTIONS"
   | "RATE_FOR_MAIN_CURRENCY"
   | "PROSE_EDITED"
   | "TERMS_ON_LETTER"
@@ -1004,6 +1005,18 @@ export class RateInUse extends EngagementError {
       `${String(count)} ${count === 1 ? "fee is" : "fees are"} in ${currency}. Move ` +
         `${count === 1 ? "it" : "them"} to another currency or remove ${count === 1 ? "it" : "them"} ` +
         `first, then remove the rate.`,
+    );
+  }
+}
+
+/** A service in a section is priced by the section, in the section's currency
+ *  (0344): the key onto the section carries it. */
+export class LineCurrencyFollowsSection extends EngagementError {
+  constructor(section: string, currency: string) {
+    super(
+      "LINE_CURRENCY_IS_SECTIONS",
+      `This service is priced by the section "${section}", which is in ${currency}. Change the ` +
+        `section's currency, or take the service out of the section first.`,
     );
   }
 }

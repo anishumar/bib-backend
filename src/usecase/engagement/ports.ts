@@ -1299,6 +1299,8 @@ export interface QuotedLine {
   readonly quantity: string;
   readonly unitAmount: string | null;
   readonly discountPercent: string;
+  /** What the quote priced it in (0344); the letter keeps it, never converts. */
+  readonly currency: string;
   readonly jurisdiction: string | null;
   readonly billingFrequency: string | null;
   readonly scopeOverride: string | null;
@@ -1334,6 +1336,8 @@ export interface QuotedProposalHeader {
   readonly currency: string;
   readonly fxRate: string;
   readonly fxRateDate: string;
+  /** The other currencies' rates (0344), carried onto the letter as agreed. */
+  readonly rates: readonly CurrencyRate[];
   /** Set when the quote was deleted as made by mistake (0086): it was never
    *  offered, so no letter may be drafted from it or cite it. */
   readonly deletedAt: string | null;

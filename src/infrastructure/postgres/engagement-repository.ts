@@ -18,6 +18,7 @@ import { withTenant } from "../../db/tenant";
 // measurement.
 import { toDay } from "./day";
 import { insertDocumentBlocks, strikeDocumentBlocks } from "./block-repository";
+import type { CurrencyRate } from "../../domain/money/model";
 import type {
   Engagement,
   EngagementLetter,
@@ -47,6 +48,7 @@ import type {
   LetterRecord,
   LetterRevision,
   LetterSummary,
+  LetterTotals,
   LinePricing,
   NewEngagement,
   NewFeeGroup,
@@ -97,6 +99,8 @@ interface LetterRow {
   deleted_by_user_id: string | null;
   copied_from_id: string | null;
   chosen_signatory_id: string | null;
+  /** The other currencies' rates (0344), as `ratesOf` builds them. */
+  rates: CurrencyRate[] | null;
 }
 
 interface LineRow {
@@ -149,7 +153,99 @@ const LETTER_COLUMNS = `id, tenant_id, ref, party_id, issuing_entity_party_id, p
                         signed_by_title, withdrawn_at, background, addressed_to_party_id,
                         issued_on, supersedes_id, effective_from, firm_signatory_user_id,
                         firm_signatory_title, firm_signed_at, firm_signature_version_id,
-                        deleted_at, deleted_by_user_id, copied_from_id, chosen_signatory_id`;
+                        deleted_at, deleted_by_user_id, copied_from_id, chosen_signatory_id,
+                        ${ratesOf("engagement_letter")}`;
+
+/** A letter's other currencies' rates (0344), as JSON with every figure as
+ *  TEXT: postgres.js parses JSON numbers into floats, which is how a rate of
+ *  22.7012345678 would come back changed. The proposal's `ratesOf`, for the
+ *  letter's table. */
+function ratesOf(letter: string): string {
+  return `(SELECT coalesce(json_agg(json_build_object(
+                    'currency', r.currency, 'fxRate', r.fx_rate::text,
+                    'fxRateDate', r.fx_rate_date::text, 'source', r.source) ORDER BY r.currency), '[]'::json)
+             FROM crm.engagement_letter_fx_rate r WHERE r.engagement_letter_id = ${letter}.id) AS rates`;
+}
+
+/**
+ * The letter's arithmetic for ONE currency's live lines and sections, as a
+ * FROM item over `c.currency` (0344). Written once, used by the letter's own
+ * read and by the list, so the two cannot disagree; the same sums, in the same
+ * order, as before 0344, so a letter in one currency reads the same strings.
+ *
+ * A FEE GROUP'S fee is counted ONCE, beside the lines priced on their own, and
+ * its lines are not "unpriced": the group is their price (0083). Lines carry
+ * no amount of their own once grouped, so nothing is counted twice. `sum`
+ * skips an unpriced line and `unpriced_line_count` says how many it left out.
+ */
+function currencyArithmetic(letter: string): string {
+  return `
+    CROSS JOIN LATERAL (
+      SELECT coalesce(sum(round(unit_amount * quantity, 4)), 0) AS gross,
+             coalesce(sum(round(unit_amount * quantity, 4)
+                        - round(unit_amount * quantity * (1 - discount_percent / 100), 4)), 0)
+               AS discount,
+             coalesce(sum(round(unit_amount * quantity * (1 - discount_percent / 100), 4)), 0)
+               AS net,
+             count(*) FILTER (WHERE unit_amount IS NULL AND fee_group_id IS NULL)
+               AS unpriced_line_count
+      FROM crm.engagement_letter_line
+      WHERE engagement_letter_id = ${letter} AND removed_at IS NULL AND currency = c.currency
+    ) t
+    CROSS JOIN LATERAL (
+      SELECT coalesce(sum(amount), 0) AS fees
+      FROM crm.engagement_letter_fee_group
+      WHERE engagement_letter_id = ${letter} AND removed_at IS NULL AND currency = c.currency
+    ) g`;
+}
+
+/** Every currency a letter's live lines and sections are in, as `c`. */
+function currenciesOf(letter: string): string {
+  return `(SELECT currency FROM crm.engagement_letter_line
+            WHERE engagement_letter_id = ${letter} AND removed_at IS NULL
+           UNION
+           SELECT currency FROM crm.engagement_letter_fee_group
+            WHERE engagement_letter_id = ${letter} AND removed_at IS NULL) c`;
+}
+
+/** The list's per-letter totals: the same arithmetic, as JSON with TEXT figures. */
+function currencyTotalsOf(letter: string): string {
+  return `(SELECT coalesce(json_agg(json_build_object(
+                    'currency', c.currency, 'gross', (t.gross + g.fees)::text,
+                    'discount', t.discount::text, 'net', (t.net + g.fees)::text,
+                    'unpriced', t.unpriced_line_count) ORDER BY c.currency), '[]'::json)
+             FROM ${currenciesOf(letter)} ${currencyArithmetic(letter)}) AS currency_totals`;
+}
+
+interface CurrencyTotalsRow {
+  currency: string;
+  gross: string | null;
+  discount: string | null;
+  net: string | null;
+  unpriced: number | string;
+}
+
+/**
+ * Per-currency totals in the order every screen and the PDF read them: the
+ * main currency first, then by code. A letter with no live line or section has
+ * ONE row, its main currency at zero, which is what `totals` always said of it.
+ */
+function toLetterTotals(rows: readonly CurrencyTotalsRow[] | null, main: string): LetterTotals[] {
+  const list = [...(rows ?? [])].sort((a, b) =>
+    a.currency === main ? -1 : b.currency === main ? 1 : a.currency.localeCompare(b.currency),
+  );
+  if (list.length === 0) return [{ gross: "0", discount: "0", net: "0", currency: main, unpricedLineCount: 0 }];
+  return list.map((r) => ({
+    gross: r.gross ?? "0",
+    discount: r.discount ?? "0",
+    net: r.net ?? "0",
+    currency: r.currency,
+    unpricedLineCount: Number(r.unpriced),
+  }));
+}
+
+/** Thrown inside a transaction to roll it back and answer "not a draft". */
+class NoLongerADraft extends Error {}
 
 interface FeeGroupRow {
   id: string;
@@ -284,6 +380,7 @@ function toLetter(r: LetterRow): EngagementLetter {
     deletedByUserId: r.deleted_by_user_id,
     copiedFromId: r.copied_from_id,
     chosenSignatoryId: r.chosen_signatory_id,
+    rates: r.rates ?? [],
   };
 }
 
@@ -445,7 +542,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
                l.background, l.addressed_to_party_id, l.issued_on, l.supersedes_id,
                l.effective_from, l.firm_signatory_user_id, l.firm_signatory_title,
                l.firm_signed_at, l.firm_signature_version_id, l.deleted_at, l.deleted_by_user_id,
-               l.copied_from_id, l.chosen_signatory_id,
+               l.copied_from_id, l.chosen_signatory_id, ${db.unsafe(ratesOf("l"))},
                party.display_name AS party_display_name,
                issuer.display_name AS issuer_display_name,
                addressee.display_name AS addressee_display_name,
@@ -557,46 +654,15 @@ export class PostgresEngagementRepository implements EngagementRepository {
       `;
 
       // The letter's arithmetic is written here rather than in a view — the
-      // proposal's lives in crm.proposal_totals (0013) — and BOTH now answer the
-      // same question about an unpriced line the same way: `sum` skips it, and
-      // `unpriced_line_count` says how many the figures leave out. Without that
-      // count the three sums silently understate a letter and nothing on the row
-      // says so.
-      //
-      // A FEE GROUP'S fee is counted ONCE, beside the lines priced on their own,
-      // and its lines are not "unpriced": the group is their price (0083).
-      // Lines carry no amount of their own once grouped, so nothing is counted
-      // twice.
-      const [totals] = await db<
-        {
-          gross: string | null;
-          discount: string | null;
-          net: string | null;
-          unpriced_line_count: string;
-        }[]
-      >`
-        -- Two aggregates with no GROUP BY, so each is exactly one row even on a
-        -- letter with no lines or no groups — a group added before its services
-        -- still shows its fee.
-        SELECT t.gross + g.fees AS gross, t.discount, t.net + g.fees AS net,
-               t.unpriced_line_count
-        FROM (
-          SELECT coalesce(sum(round(unit_amount * quantity, 4)), 0) AS gross,
-                 coalesce(sum(round(unit_amount * quantity, 4)
-                            - round(unit_amount * quantity * (1 - discount_percent / 100), 4)), 0)
-                   AS discount,
-                 coalesce(sum(round(unit_amount * quantity * (1 - discount_percent / 100), 4)), 0)
-                   AS net,
-                 count(*) FILTER (WHERE unit_amount IS NULL AND fee_group_id IS NULL)
-                   AS unpriced_line_count
-          FROM crm.engagement_letter_line
-          WHERE engagement_letter_id = ${letterId} AND removed_at IS NULL
-        ) t
-        CROSS JOIN (
-          SELECT coalesce(sum(amount), 0) AS fees
-          FROM crm.engagement_letter_fee_group
-          WHERE engagement_letter_id = ${letterId} AND removed_at IS NULL
-        ) g
+      // proposal's lives in crm.proposal_totals (0013) — ONE ROW PER CURRENCY
+      // its live lines and sections are in (0344): two currencies are never
+      // added together. See `currencyArithmetic`.
+      const totals = await db<CurrencyTotalsRow[]>`
+        SELECT c.currency, t.gross + g.fees AS gross, t.discount, t.net + g.fees AS net,
+               t.unpriced_line_count AS unpriced
+        FROM (SELECT ${letterId}::uuid AS id) l0
+        CROSS JOIN LATERAL ${db.unsafe(currenciesOf("l0.id"))}
+        ${db.unsafe(currencyArithmetic("l0.id"))}
       `;
 
       const groups = await db<FeeGroupRow[]>`
@@ -611,30 +677,33 @@ export class PostgresEngagementRepository implements EngagementRepository {
       // ONCE at the section's, and its lines not at all (they carry no price of
       // their own, 0083) - the same rule the one-figure totals above follow.
       // `sum` skips an unpriced line's NULL and the count beside it says so.
+      // Per CURRENCY as well (0344), the main currency's rows first.
       const byFrequency = await db<
         {
+          currency: string;
           frequency: BillingFrequency | null;
           net: string | null;
           line_count: string;
           unpriced_line_count: string;
         }[]
       >`
-        SELECT x.frequency,
+        SELECT x.currency, x.frequency,
                sum(x.net)::text AS net,
                count(*) AS line_count,
                count(*) FILTER (WHERE x.net IS NULL) AS unpriced_line_count
         FROM (
-          SELECT billing_frequency AS frequency,
+          SELECT currency, billing_frequency AS frequency,
                  round(unit_amount * quantity * (1 - discount_percent / 100), 4) AS net
           FROM crm.engagement_letter_line
           WHERE engagement_letter_id = ${letterId} AND removed_at IS NULL AND fee_group_id IS NULL
           UNION ALL
-          SELECT billing_frequency, amount
+          SELECT currency, billing_frequency, amount
           FROM crm.engagement_letter_fee_group
           WHERE engagement_letter_id = ${letterId} AND removed_at IS NULL
         ) x
-        GROUP BY x.frequency
-        ORDER BY coalesce(array_position(
+        GROUP BY x.currency, x.frequency
+        ORDER BY (x.currency = ${head.currency}) DESC, x.currency,
+                 coalesce(array_position(
                    ARRAY['monthly', 'quarterly', 'annually', 'one_time', 'custom'],
                    x.frequency::text), 99)
       `;
@@ -650,6 +719,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
         issuerJurisdiction: head.issuer_jurisdiction,
         totalsByFrequency: byFrequency.map(
           (f): LetterFrequencyTotal => ({
+            currency: f.currency,
             frequency: f.frequency,
             net: f.net ?? "0",
             lineCount: Number(f.line_count),
@@ -742,13 +812,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
             courts: body.courts,
           };
         }),
-        totals: {
-          gross: totals?.gross ?? "0",
-          discount: totals?.discount ?? "0",
-          net: totals?.net ?? "0",
-          currency: head.currency,
-          unpricedLineCount: Number(totals?.unpriced_line_count ?? 0),
-        },
+        totals: toLetterTotals(totals, head.currency),
         engagements: engagements.map(toEngagement),
       };
     });
@@ -760,11 +824,8 @@ export class PostgresEngagementRepository implements EngagementRepository {
         (LetterRow & {
           party_display_name: string;
           issuer_display_name: string;
-          gross: string | null;
-          discount: string | null;
-          net: string | null;
+          currency_totals: CurrencyTotalsRow[] | null;
           line_count: string;
-          unpriced_line_count: string;
         })[]
       >`
         SELECT l.id, l.tenant_id, l.ref, l.party_id, l.issuing_entity_party_id,
@@ -776,37 +837,17 @@ export class PostgresEngagementRepository implements EngagementRepository {
                l.background, l.addressed_to_party_id, l.issued_on, l.supersedes_id,
                l.effective_from, l.firm_signatory_user_id, l.firm_signatory_title,
                l.firm_signed_at, l.firm_signature_version_id, l.deleted_at, l.deleted_by_user_id,
-               l.copied_from_id, l.chosen_signatory_id,
+               l.copied_from_id, l.chosen_signatory_id, ${db.unsafe(ratesOf("l"))},
                party.display_name AS party_display_name,
                issuer.display_name AS issuer_display_name,
-               t.gross + g.fees AS gross, t.discount, t.net + g.fees AS net,
-               coalesce(t.line_count, 0) AS line_count,
-               coalesce(t.unpriced_line_count, 0) AS unpriced_line_count
+               -- Per currency (0344), the letter's own read's arithmetic, so
+               -- the list and the page cannot disagree.
+               ${db.unsafe(currencyTotalsOf("l.id"))},
+               (SELECT count(*) FROM crm.engagement_letter_line x
+                 WHERE x.engagement_letter_id = l.id AND x.removed_at IS NULL) AS line_count
         FROM crm.engagement_letter l
         JOIN core.party party ON party.id = l.party_id
         JOIN core.party issuer ON issuer.id = l.issuing_entity_party_id
-        LEFT JOIN LATERAL (
-          SELECT coalesce(sum(round(unit_amount * quantity, 4)), 0) AS gross,
-                 coalesce(sum(round(unit_amount * quantity, 4)
-                            - round(unit_amount * quantity * (1 - discount_percent / 100), 4)), 0)
-                   AS discount,
-                 coalesce(sum(round(unit_amount * quantity * (1 - discount_percent / 100), 4)), 0)
-                   AS net,
-                 count(*) AS line_count,
-                 -- A grouped line is priced by its group (0083), so it is not
-                 -- one of the lines these figures leave out.
-                 count(*) FILTER (WHERE unit_amount IS NULL AND fee_group_id IS NULL)
-                   AS unpriced_line_count
-          FROM crm.engagement_letter_line
-          WHERE engagement_letter_id = l.id AND removed_at IS NULL
-        ) t ON true
-        -- Each live fee group's fee, once (0083) — the same arithmetic as the
-        -- letter's own read, so the list and the page cannot disagree.
-        LEFT JOIN LATERAL (
-          SELECT coalesce(sum(amount), 0) AS fees
-          FROM crm.engagement_letter_fee_group
-          WHERE engagement_letter_id = l.id AND removed_at IS NULL
-        ) g ON true
         WHERE (${filters.status ?? null}::text IS NULL OR l.status = ${filters.status ?? null})
           AND (${filters.partyId ?? null}::uuid IS NULL OR l.party_id = ${filters.partyId ?? null})
           -- A deleted draft was never on the table (0086): not in the list,
@@ -821,13 +862,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
           letter: toLetter(r),
           party: { id: r.party_id, displayName: r.party_display_name },
           issuingEntity: { id: r.issuing_entity_party_id, displayName: r.issuer_display_name },
-          totals: {
-            gross: r.gross ?? "0",
-            discount: r.discount ?? "0",
-            net: r.net ?? "0",
-            currency: r.currency,
-            unpricedLineCount: Number(r.unpriced_line_count),
-          },
+          totals: toLetterTotals(r.currency_totals, r.currency),
           lineCount: Number(r.line_count),
         }),
       );
@@ -924,6 +959,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
                description = ${edit.description},
                quantity = ${edit.quantity},
                unit_amount = ${edit.unitAmount}::numeric,
+               currency = ${edit.currency},
                discount_percent = ${edit.discountPercent},
                effective_from = ${edit.effectiveFrom}::date,
                jurisdiction = ${edit.jurisdiction},
@@ -954,11 +990,35 @@ export class PostgresEngagementRepository implements EngagementRepository {
     change: LetterRevision,
     prose: readonly LetterProseLine[] | null,
   ): Promise<EngagementLetter | null> {
+    try {
+      return await this.reviseOrRollBack(tenantId, letterId, change, prose);
+    } catch (e) {
+      if (e instanceof NoLongerADraft) return null;
+      throw e;
+    }
+  }
+
+  private async reviseOrRollBack(
+    tenantId: string,
+    letterId: string,
+    change: LetterRevision,
+    prose: readonly LetterProseLine[] | null,
+  ): Promise<EngagementLetter> {
     return withTenant(this.app, tenantId, async (db) => {
       // One statement, each column kept unless the change names it - the
       // proposal's `revise`, for the same reason: NULL is a real value here,
       // and clearing the Background is a change, not an absence of one.
       const has = (k: keyof LetterRevision): boolean => change[k] !== undefined;
+      // A NEW MAIN CURRENCY that had a rate row of its own (0344): its rate is
+      // the head's from now on, so the row goes, in this transaction, before
+      // the UPDATE so its RETURNING reads the rates as they end up. If the
+      // UPDATE then finds no draft, the throw below rolls the delete back.
+      if (change.currency !== undefined) {
+        await db`
+          DELETE FROM crm.engagement_letter_fx_rate
+           WHERE engagement_letter_id = ${letterId} AND currency = ${change.currency}
+        `;
+      }
       const [row] = await db<LetterRow[]>`
         UPDATE crm.engagement_letter
            SET title = CASE WHEN ${has("title")} THEN ${change.title ?? null} ELSE title END,
@@ -997,18 +1057,21 @@ export class PostgresEngagementRepository implements EngagementRepository {
          -- A live draft only, repeated here: a letter sent or deleted since the
          -- service read it is left exactly as it stands.
          WHERE id = ${letterId} AND status = 'draft' AND deleted_at IS NULL
-           -- A new currency over NO line or section row at all, live or pulled:
-           -- their keys to the letter's currency do not cascade (0017, 0083),
-           -- so the row a draft pulled a line off still holds the old one.
+           -- A new MAIN currency only while no LIVE line or section is priced
+           -- in the old one (0344): a fee agreed in it a moment ago is not
+           -- restated in another. Pulled rows no longer matter, since their
+           -- keys no longer carry the letter's currency.
            AND (${change.currency ?? null}::text IS NULL
                 OR currency = ${change.currency ?? null}
                 OR (NOT EXISTS (SELECT 1 FROM crm.engagement_letter_line x
-                                 WHERE x.engagement_letter_id = ${letterId})
+                                 WHERE x.engagement_letter_id = ${letterId} AND x.removed_at IS NULL
+                                   AND x.currency = crm.engagement_letter.currency)
                     AND NOT EXISTS (SELECT 1 FROM crm.engagement_letter_fee_group g
-                                     WHERE g.engagement_letter_id = ${letterId})))
+                                     WHERE g.engagement_letter_id = ${letterId} AND g.removed_at IS NULL
+                                       AND g.currency = crm.engagement_letter.currency)))
         RETURNING ${db.unsafe(LETTER_COLUMNS)}
       `;
-      if (!row) return null;
+      if (!row) throw new NoLongerADraft();
       // THE NEW COMPANY'S OR COUNTRY'S WORDING, in the same transaction (D9):
       // the old lines struck off, the standard set written in their place, so a
       // draft can never name one company in its head and carry another's prose.
@@ -1024,15 +1087,51 @@ export class PostgresEngagementRepository implements EngagementRepository {
     });
   }
 
-  async pricesAnything(tenantId: string, letterId: string): Promise<boolean> {
+  async pricesIn(tenantId: string, letterId: string, currency: string): Promise<number> {
     return withTenant(this.app, tenantId, async (db) => {
-      const [row] = await db<{ priced: boolean }[]>`
-        SELECT EXISTS (SELECT 1 FROM crm.engagement_letter_line
-                        WHERE engagement_letter_id = ${letterId})
-            OR EXISTS (SELECT 1 FROM crm.engagement_letter_fee_group
-                        WHERE engagement_letter_id = ${letterId}) AS priced
+      const [row] = await db<{ n: string }[]>`
+        SELECT (SELECT count(*) FROM crm.engagement_letter_line
+                 WHERE engagement_letter_id = ${letterId} AND removed_at IS NULL
+                   AND currency = ${currency})
+             + (SELECT count(*) FROM crm.engagement_letter_fee_group
+                 WHERE engagement_letter_id = ${letterId} AND removed_at IS NULL
+                   AND currency = ${currency}) AS n
       `;
-      return row?.priced ?? false;
+      return Number(row?.n ?? 0);
+    });
+  }
+
+  async setRate(tenantId: string, letterId: string, rate: CurrencyRate): Promise<CurrencyRate | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // Onto a live DRAFT only, the SELECT's WHERE saying so: a letter sent
+      // since the use case read it keeps the rates it went out with (and a
+      // signed one could not take a new one anyway, 0344's freeze).
+      const [row] = await db<{ currency: string; fx_rate: string; fx_rate_date: string; source: string }[]>`
+        INSERT INTO crm.engagement_letter_fx_rate
+          (tenant_id, engagement_letter_id, currency, fx_rate, fx_rate_date, source)
+        SELECT l.tenant_id, l.id, ${rate.currency}, ${rate.fxRate}::numeric, ${rate.fxRateDate}::date, ${rate.source}
+          FROM crm.engagement_letter l
+         WHERE l.id = ${letterId} AND l.status = 'draft' AND l.deleted_at IS NULL
+        ON CONFLICT (engagement_letter_id, currency) DO UPDATE
+           SET fx_rate = EXCLUDED.fx_rate, fx_rate_date = EXCLUDED.fx_rate_date, source = EXCLUDED.source
+        RETURNING currency, fx_rate::text AS fx_rate, fx_rate_date::text AS fx_rate_date, source
+      `;
+      return row
+        ? { currency: row.currency, fxRate: row.fx_rate, fxRateDate: row.fx_rate_date, source: row.source }
+        : null;
+    });
+  }
+
+  async removeRate(tenantId: string, letterId: string, currency: string): Promise<boolean> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db`
+        DELETE FROM crm.engagement_letter_fx_rate r
+         USING crm.engagement_letter l
+         WHERE r.engagement_letter_id = ${letterId} AND r.currency = ${currency}
+           AND l.id = r.engagement_letter_id AND l.status = 'draft' AND l.deleted_at IS NULL
+        RETURNING r.currency
+      `;
+      return rows.length > 0;
     });
   }
 
@@ -1053,6 +1152,8 @@ export class PostgresEngagementRepository implements EngagementRepository {
         `
         UPDATE crm.engagement_letter_line
            SET fee_group_id = $4, unit_amount = $5, discount_percent = $6, pricing_note = $7,
+               -- Into a section, the section's currency (its key says so).
+               currency = $8,
                -- A line moved into a group gives up its own advance with its
                -- price (0320): the group's advance is the letter's.
                advance_amount = CASE WHEN $4::uuid IS NULL THEN advance_amount END
@@ -1067,6 +1168,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
           pricing.unitAmount,
           pricing.discountPercent,
           pricing.pricingNote,
+          pricing.currency,
         ],
       );
       if (!row) throw new Error(`engagement letter line ${lineId} vanished while being repriced`);
@@ -1108,9 +1210,22 @@ export class PostgresEngagementRepository implements EngagementRepository {
       // carries it — `undefined` is "not mentioned", which is different from a
       // prose field the caller cleared to null.
       const keep = (v: unknown): boolean => v === undefined;
+      // A NEW CURRENCY (0344) takes the section's lines with it IN THE SAME
+      // STATEMENT: their key onto the group carries the currency and does not
+      // cascade, and a data-modifying CTE's key checks run when the whole
+      // statement ends, by which time both sides hold the new one. Every line
+      // that names the group moves, pulled ones too, or their key would break.
       const [row] = await db<FeeGroupRow[]>`
+        WITH moved AS (
+          UPDATE crm.engagement_letter_line
+             SET currency = ${edit.currency ?? null}
+           WHERE ${edit.currency ?? null}::text IS NOT NULL
+             AND fee_group_id = ${groupId} AND engagement_letter_id = ${letterId}
+          RETURNING id
+        )
         UPDATE crm.engagement_letter_fee_group
            SET title = CASE WHEN ${keep(edit.title)} THEN title ELSE ${edit.title ?? null} END,
+               currency = CASE WHEN ${keep(edit.currency)} THEN currency ELSE ${edit.currency ?? null} END,
                billing_frequency = CASE WHEN ${keep(edit.billingFrequency)} THEN billing_frequency
                                         ELSE ${edit.billingFrequency ?? null} END,
                billing_timing = CASE WHEN ${keep(edit.billingTiming)} THEN billing_timing

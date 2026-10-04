@@ -3,8 +3,8 @@
 // What only the database can prove: that the head's one UPDATE keeps what it
 // was not told about and clears what it was told to clear; that a new issuer's
 // wording is written in the SAME transaction as the issuer (the old lines struck
-// off, the company's own set in their place); that a new currency is refused in
-// SQL over a line a draft has pulled (its key does not cascade); that a line
+// off, the company's own set in their place); that a new main currency is
+// refused in SQL over a live line in the old one (0344); that a line
 // changes in place and reads back resolved; and that the money per frequency
 // counts a section's fee once.
 //
@@ -181,7 +181,7 @@ describe("a draft letter's head changes in place (T6.18 S6)", () => {
     expect(verbs.map((v) => v.verb)).toContain("engagement_letter.issuer_changed");
   });
 
-  it("refuses a new currency over a line the draft pulled, whose key does not cascade", async () => {
+  it("refuses a new main currency over a LIVE line in the old one, and not over a pulled one (0344)", async () => {
     const id = await draft();
     const line = await letters.addLine({
       tenantId: tenant,
@@ -193,7 +193,6 @@ describe("a draft letter's head changes in place (T6.18 S6)", () => {
       unitAmount: "5000",
       discountPercent: "0",
     });
-    await letters.removeLine(tenant, id, line.id);
     await expect(
       letters.revise(
         { tenantId: tenant, letterId: id, currency: "AED", fxRate: "22.75", fxRateDate: "2026-09-28" },
@@ -208,6 +207,14 @@ describe("a draft letter's head changes in place (T6.18 S6)", () => {
       null,
     );
     expect(written).toBeNull();
+    // Pulled, the line holds nothing back: its key no longer carries the
+    // letter's currency (0344).
+    await letters.removeLine(tenant, id, line.id);
+    const moved = await letters.revise(
+      { tenantId: tenant, letterId: id, currency: "AED", fxRate: "22.75", fxRateDate: "2026-09-28" },
+      SYSTEM_ACTOR,
+    );
+    expect(moved.currency).toBe("AED");
     // A letter that priced nothing moves.
     const bare = await draft();
     await letters.revise(
@@ -289,8 +296,8 @@ describe("a line changes in place, and the read carries the preview's plan and t
     });
     const view = await letters.describe(tenant, id);
     expect(view.totalsByFrequency).toEqual([
-      { frequency: "monthly", net: "4500.0000", lineCount: 2, unpricedLineCount: 1 },
-      { frequency: "annually", net: "150000.0000", lineCount: 1, unpricedLineCount: 0 },
+      { currency: "INR", frequency: "monthly", net: "4500.0000", lineCount: 2, unpricedLineCount: 1 },
+      { currency: "INR", frequency: "annually", net: "150000.0000", lineCount: 1, unpricedLineCount: 0 },
     ]);
     expect(view.document.sections.map((s) => `${s.code}. ${s.title}`)).toEqual([
       "A. Annual compliance",

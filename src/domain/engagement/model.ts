@@ -14,7 +14,7 @@
 //
 // Like the proposal domain, this file does not add up money — Postgres does,
 // exactly once — and it does not know what the firm's clause library contains.
-import type { Amount, CurrencyCode } from "../money/model";
+import type { Amount, CurrencyCode, CurrencyRate } from "../money/model";
 import type { BillingFrequency, OutOfPocketEstimate } from "../document/model";
 import { isCalendarDay } from "../day";
 
@@ -173,9 +173,13 @@ export interface EngagementLetter {
   /** Which layout it prints in — see `LetterLayout`. Frozen with the rest of a
    *  signed letter, so a re-render reproduces what the client holds. */
   readonly layout: LetterLayout;
+  /** The MAIN currency, and `fxRate` its rate to the firm's reporting
+   *  currency. Since 0344 a line or a section may be priced in another one the
+   *  letter holds a rate for, in `rates` (never one for the main currency). */
   readonly currency: CurrencyCode;
   readonly fxRate: Amount;
   readonly fxRateDate: string;
+  readonly rates: readonly CurrencyRate[];
   readonly advanceRequired: boolean;
   readonly advanceAmount: Amount | null;
   readonly advanceRecordedAt: string | null;
@@ -708,6 +712,13 @@ function timingField(x: {
  * function produces at signature, so a letter sent before 0083 and signed after
  * it must render to the same string at both moments. A letter with no groups
  * renders exactly as it did.
+ *
+ * CURRENCIES (0344) follow the same rule. A line or a section in the letter's
+ * own currency adds nothing (the head already says it), and only one priced in
+ * ANOTHER currency carries a `currency:` field; the other currencies' rates are
+ * one `rate` row each, after the sections, only when there are any. A letter in
+ * one currency hashes byte for byte as it did before 0344, which is what lets a
+ * letter in DocuSign today still verify.
  */
 export function canonicalContent(input: {
   readonly letter: Pick<
@@ -727,7 +738,8 @@ export function canonicalContent(input: {
     | "effectiveFrom"
     | "firmSignatoryUserId"
     | "firmSignatoryTitle"
-  >;
+  > &
+    Partial<Pick<EngagementLetter, "rates">>;
   readonly lines: readonly (Pick<
     LetterLine,
     | "position"
@@ -750,8 +762,8 @@ export function canonicalContent(input: {
     | "billingTiming"
     | "billingOn"
   > &
-    Partial<Pick<LetterLine, "advanceAmount">>)[];
-  readonly feeGroups: readonly Pick<
+    Partial<Pick<LetterLine, "advanceAmount" | "currency">>)[];
+  readonly feeGroups: readonly (Pick<
     FeeGroup,
     | "id"
     | "position"
@@ -765,7 +777,8 @@ export function canonicalContent(input: {
     | "clientObligations"
     | "billingTiming"
     | "billingOn"
-  >[];
+  > &
+    Partial<Pick<FeeGroup, "currency">>)[];
   readonly clauses: readonly Pick<LetterClause, "position" | "clauseVersionId">[];
 }): string {
   const head = [
@@ -845,6 +858,8 @@ export function canonicalContent(input: {
         ...timingField(l),
         // The service's own advance (0320), the same way: only when set.
         ...(l.advanceAmount === undefined || l.advanceAmount === null ? [] : [`advance:${l.advanceAmount}`]),
+        // Its own currency (0344), only when it is not the letter's.
+        ...otherCurrency(l.currency, input.letter.currency),
       ].join("\t"),
     );
 
@@ -871,6 +886,7 @@ export function canonicalContent(input: {
           .sort((a, b) => a - b)
           .join(","),
         ...timingField(g),
+        ...otherCurrency(g.currency, input.letter.currency),
       ].join("\t"),
     );
 
@@ -878,7 +894,15 @@ export function canonicalContent(input: {
     .sort((a, b) => a.position - b.position)
     .map((c) => ["clause", String(c.position), c.clauseVersionId].join("\t"));
 
-  return [head, ...lines, ...feeGroups, ...clauses].join("\n");
+  const rates = [...(input.letter.rates ?? [])]
+    .sort((a, b) => (a.currency < b.currency ? -1 : a.currency > b.currency ? 1 : 0))
+    .map((r) => ["rate", r.currency, r.fxRate].join("\t"));
+
+  return [head, ...lines, ...feeGroups, ...rates, ...clauses].join("\n");
+}
+
+function otherCurrency(currency: CurrencyCode | undefined, main: CurrencyCode): string[] {
+  return currency === undefined || currency === main ? [] : [`currency:${currency}`];
 }
 
 /** A jurisdiction code, as this product stores it: ISO 3166-1 alpha-2.

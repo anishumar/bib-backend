@@ -48,8 +48,15 @@ import {
 } from "../../domain/engagement/model";
 import type { ClauseBody } from "../../domain/config/model";
 import { readClauseBody, readServiceBody } from "../../domain/config/model";
-import { compareAmounts, isAmount, isExchangeRate, isCurrencyCode, normalizeCurrency } from "../../domain/money/model";
-import type { Amount } from "../../domain/money/model";
+import {
+  compareAmounts,
+  isAmount,
+  isExchangeRate,
+  isCurrencyCode,
+  normalizeCurrency,
+  rateFor,
+} from "../../domain/money/model";
+import type { Amount, CurrencyRate } from "../../domain/money/model";
 import {
   isBillingFrequency,
   outOfPocketProblem,
@@ -113,6 +120,10 @@ import {
   InvalidLetterLineDescription,
   LetterInvalidCurrencyChange,
   LetterCurrencyLocked,
+  CurrencyNeedsARate,
+  RateInUse,
+  RateIsMainCurrency,
+  LineCurrencyFollowsSection,
   LetterProseEdited,
   TermsOnLetter,
   QuoteDeleted,
@@ -361,12 +372,32 @@ export interface AddLetterLineInput {
    * group's fee already pays for it.
    */
   readonly feeGroupId?: string | undefined;
+  /**
+   * What THIS line is priced in (0344): the letter's main currency or one it
+   * holds a rate for. Absent: the section's, for a line in one; else the list
+   * price's currency when the fee comes from the list price and the letter
+   * holds its rate; else the main currency.
+   */
+  readonly currency?: string | undefined;
+}
+
+/** A rate for one OTHER currency on a draft letter (0344). */
+export interface SetLetterRateInput {
+  readonly tenantId: string;
+  readonly letterId: string;
+  readonly currency: string;
+  readonly fxRate: string;
+  readonly fxRateDate: string;
+  /** "typed" unless a rate service supplied it. */
+  readonly source?: string | undefined;
 }
 
 /** A fee group's terms as a caller states them (0083). Prose is optional and
  *  a blank clears it. */
 export interface FeeGroupInput {
   readonly title: string;
+  /** The section fee's currency (0344): the main one when absent. */
+  readonly currency?: string | undefined;
   readonly billingFrequency: string;
   readonly billingTiming?: string | undefined;
   readonly billingOn?: string | undefined;
@@ -382,6 +413,8 @@ export interface FeeGroupInput {
  *  blank string clears it. */
 export interface FeeGroupChange {
   readonly title?: string | undefined;
+  /** A new currency for the fee; its services move with it (0344). */
+  readonly currency?: string | undefined;
   readonly billingFrequency?: string | undefined;
   /** Null clears it (back to after each period). */
   readonly billingTiming?: string | null | undefined;
@@ -537,6 +570,9 @@ export interface UpdateLetterLineInput {
   readonly entityPartyId?: string | undefined;
   readonly quantity?: string | undefined;
   readonly unitAmount?: string | null | undefined;
+  /** Another currency the letter holds a rate for (0344). Not on a service
+   *  in a section, which is in the section's. */
+  readonly currency?: string | undefined;
   readonly discountPercent?: string | undefined;
   readonly billingFrequency?: string | null | undefined;
   readonly billingTiming?: string | null | undefined;
@@ -563,6 +599,7 @@ const LETTER_LINE_FIELDS = [
   "entityPartyId",
   "quantity",
   "unitAmount",
+  "currency",
   "discountPercent",
   "billingFrequency",
   "billingTiming",
@@ -703,11 +740,18 @@ export class EngagementService {
       source,
     );
 
+    // THE OTHER CURRENCIES' RATES (0344), as they stood on the withdrawn one,
+    // before anything priced in them goes on. A person can change any of them.
+    for (const rate of source.rates) {
+      await this.deps.letters.setRate(tenantId, letter.id, rate);
+    }
+
     // The fee sections first, in their order, so each line can name its new one.
     const groupIds = new Map<string, string>();
     for (const g of groups) {
       const made = await this.addFeeGroup(tenantId, letter.id, {
         title: g.title,
+        currency: g.currency,
         billingFrequency: g.billingFrequency,
         ...(g.billingTiming === null ? {} : { billingTiming: g.billingTiming }),
         ...(g.billingOn === null ? {} : { billingOn: g.billingOn }),
@@ -737,6 +781,7 @@ export class EngagementService {
           description: line.description,
           quantity: line.quantity,
           ...(line.unitAmount === null ? {} : { unitAmount: line.unitAmount }),
+          currency: line.currency,
           discountPercent: line.discountPercent,
           ...(lineStart === undefined ? {} : { effectiveFrom: lineStart }),
           ...(line.jurisdiction === null ? {} : { jurisdiction: line.jurisdiction }),
@@ -1115,6 +1160,12 @@ export class EngagementService {
       quote.id,
     );
 
+    // The quote's other currencies' rates (0344), carried as agreed: the
+    // letter inherits the main one with no override, and these the same way.
+    for (const rate of quote.rates) {
+      await this.deps.letters.setRate(input.tenantId, letter.id, rate);
+    }
+
     const lines: LetterLine[] = [];
     const skipped: SkippedQuoteLine[] = [];
     // IN ORDER, one at a time. `addLine` takes each line's `position` from what
@@ -1143,6 +1194,7 @@ export class EngagementService {
           description: line.description,
           quantity: line.quantity,
           ...(line.unitAmount === null ? {} : { unitAmount: line.unitAmount }),
+          currency: line.currency,
           discountPercent: line.discountPercent,
           ...(line.jurisdiction === null ? {} : { jurisdiction: line.jurisdiction }),
           ...(line.billingFrequency === null ? {} : { billingFrequency: line.billingFrequency }),
@@ -1325,9 +1377,8 @@ export class EngagementService {
     // for it. Checked before the pricing rules below, which a grouped line is
     // exempt from — "why is there no amount" is answered by the group.
     const feeGroupId = input.feeGroupId ?? null;
-    if (feeGroupId !== null) {
-      await this.liveFeeGroupOrThrow(input.tenantId, letter.id, feeGroupId);
-    }
+    const group =
+      feeGroupId === null ? null : await this.liveFeeGroupOrThrow(input.tenantId, letter.id, feeGroupId);
     const pinned = await this.deps.library.readPinnedVersion(
       input.tenantId,
       input.serviceVersionId,
@@ -1344,14 +1395,33 @@ export class EngagementService {
     }
 
     // NEITHER A FEE NOR A REASON, outside a section: quoted at the pinned
-    // version's list price in the letter's currency (B09, audit 2026-10-03), as
-    // ProposalService.addLine does and for its reason: a login that cannot see
-    // fees reads every list price as null.
+    // version's list price (B09, audit 2026-10-03), as ProposalService.addLine
+    // does and for its reason: a login that cannot see fees reads every list
+    // price as null.
+    //
+    // THE LINE'S CURRENCY (0344): a section's line is in the section's; else
+    // the caller's; else, when the fee comes from the list price, the list
+    // price's currency if the letter holds it; else the main currency.
+    // Whatever it is, the letter must hold its rate.
     let stated = input.unitAmount;
-    if (feeGroupId === null && stated === undefined && blankToNull(input.pricingNote) === null) {
-      const service = readServiceBody(pinned.body);
-      if (service.listPrice === null || service.listPrice.currency !== letter.currency) {
-        throw new ServiceHasNoListPrice(service.name === "" ? input.description : service.name, letter.currency);
+    const service = readServiceBody(pinned.body);
+    const fromList = feeGroupId === null && stated === undefined && blankToNull(input.pricingNote) === null;
+    const asked = input.currency === undefined ? null : this.lineCurrency(input.currency);
+    if (group !== null && asked !== null && asked !== group.currency) {
+      throw new LineCurrencyFollowsSection(group.title, group.currency);
+    }
+    const currency =
+      group !== null
+        ? group.currency
+        : asked !== null
+          ? asked
+          : fromList && service.listPrice !== null && rateFor(letter, service.listPrice.currency) !== null
+            ? service.listPrice.currency
+            : letter.currency;
+    if (rateFor(letter, currency) === null) throw new CurrencyNeedsARate(currency);
+    if (fromList) {
+      if (service.listPrice === null || service.listPrice.currency !== currency) {
+        throw new ServiceHasNoListPrice(service.name === "" ? input.description : service.name, currency);
       }
       stated = service.listPrice.amount;
     }
@@ -1379,7 +1449,7 @@ export class EngagementService {
       description: input.description,
       quantity: input.quantity,
       unitAmount,
-      currency: letter.currency,
+      currency,
       discountPercent: input.discountPercent,
       effectiveFrom: input.effectiveFrom ?? null,
       jurisdiction,
@@ -1454,12 +1524,14 @@ export class EngagementService {
     if (line === undefined) throw new LetterLineNotFound(input.lineId);
 
     if (input.feeGroupId !== null) {
-      await this.liveFeeGroupOrThrow(input.tenantId, letter.id, input.feeGroupId);
+      const group = await this.liveFeeGroupOrThrow(input.tenantId, letter.id, input.feeGroupId);
       if (input.unitAmount !== undefined || Number(input.discountPercent ?? "0") !== 0) {
         throw new GroupedLinePriced();
       }
       return this.deps.letters.setLinePricing(input.tenantId, letter.id, line.id, {
         feeGroupId: input.feeGroupId,
+        // Into a section, the section's currency (0344).
+        currency: group.currency,
         unitAmount: null,
         discountPercent: "0",
         pricingNote: null,
@@ -1477,6 +1549,8 @@ export class EngagementService {
     });
     return this.deps.letters.setLinePricing(input.tenantId, letter.id, line.id, {
       feeGroupId: null,
+      // Out of one, the line keeps the currency it had, which the letter holds.
+      currency: line.currency,
       unitAmount: priced.unitAmount,
       discountPercent: input.discountPercent ?? "0",
       pricingNote: priced.pricingNote,
@@ -1498,13 +1572,14 @@ export class EngagementService {
   ): Promise<FeeGroup> {
     const letter = await this.editableOrThrow(tenantId, letterId);
     const terms = this.feeGroupTermsOrThrow(input);
+    // The main currency, or another one the letter holds a rate for (0344).
+    const currency = input.currency === undefined ? letter.currency : this.lineCurrency(input.currency);
+    if (rateFor(letter, currency) === null) throw new CurrencyNeedsARate(currency);
     return this.deps.letters.addFeeGroup({
       id: this.deps.ids.newId(),
       tenantId,
       engagementLetterId: letter.id,
-      // THE LETTER'S currency, and only that: a group is held to it by a
-      // composite key (0083), so a fee in another currency cannot be written.
-      currency: letter.currency,
+      currency,
       title: terms.title,
       billingFrequency: terms.billingFrequency,
       ...this.timingOrThrow(terms.billingFrequency, input.billingTiming, input.billingOn),
@@ -1523,8 +1598,12 @@ export class EngagementService {
     groupId: string,
     change: FeeGroupChange,
   ): Promise<FeeGroup> {
-    await this.editableOrThrow(tenantId, letterId);
+    const letter = await this.editableOrThrow(tenantId, letterId);
     const current = await this.liveFeeGroupOrThrow(tenantId, letterId, groupId);
+    const currency = change.currency === undefined ? current.currency : this.lineCurrency(change.currency);
+    if (currency !== current.currency && rateFor(letter, currency) === null) {
+      throw new CurrencyNeedsARate(currency);
+    }
     const terms = this.feeGroupTermsOrThrow({
       title: change.title ?? current.title,
       billingFrequency: change.billingFrequency ?? current.billingFrequency,
@@ -1541,6 +1620,7 @@ export class EngagementService {
     );
     const edit: FeeGroupEdit = {
       title: terms.title,
+      ...(currency === current.currency ? {} : { currency }),
       billingFrequency: terms.billingFrequency,
       billingTiming: timing.billingTiming,
       billingOn: timing.billingOn,
@@ -1784,7 +1864,10 @@ export class EngagementService {
       }
       const fxRateDate = input.fxRateDate ?? "";
       if (!isDay(fxRateDate)) throw new InvalidDate("rate date", fxRateDate);
-      if (currency !== letter.currency && (await this.deps.letters.pricesAnything(input.tenantId, letter.id))) {
+      // Only while no LIVE fee is in the old main currency (0344): fees in the
+      // other rated currencies stay as they are, and a rate row for the new
+      // main currency becomes the head's (the repository drops it).
+      if (currency !== letter.currency && (await this.deps.letters.pricesIn(input.tenantId, letter.id, letter.currency)) > 0) {
         throw new LetterCurrencyLocked(letter.currency);
       }
       change.currency = currency;
@@ -1908,6 +1991,17 @@ export class EngagementService {
     const quantity = input.quantity ?? current.quantity;
     if (!isAmount(quantity) || Number(quantity) <= 0) throw new InvalidAmount("quantity", quantity);
 
+    // ITS CURRENCY (0344): one the letter holds a rate for; a service in a
+    // section follows the section's.
+    const currency = input.currency === undefined ? current.currency : this.lineCurrency(input.currency);
+    if (currency !== current.currency) {
+      if (current.feeGroupId !== null) {
+        const group = await this.liveFeeGroupOrThrow(input.tenantId, letter.id, current.feeGroupId);
+        throw new LineCurrencyFollowsSection(group.title, group.currency);
+      }
+      if (rateFor(letter, currency) === null) throw new CurrencyNeedsARate(currency);
+    }
+
     const unitAmount = input.unitAmount === undefined ? current.unitAmount : input.unitAmount;
     const pricingNote = input.pricingNote === undefined ? current.pricingNote : input.pricingNote;
     const discountPercent = input.discountPercent ?? current.discountPercent;
@@ -1968,6 +2062,7 @@ export class EngagementService {
       description,
       quantity,
       unitAmount: priced.unitAmount,
+      currency,
       discountPercent,
       effectiveFrom,
       jurisdiction,
@@ -1991,6 +2086,66 @@ export class EngagementService {
       throw new LetterLineNotFound(input.lineId);
     }
     return updated;
+  }
+
+  /**
+   * Set the rate of one OTHER currency on a draft (0344): what one unit of it
+   * is worth in the firm's reporting currency, on a day. The main currency's
+   * rate is the letter's own and moves only with the currency on step 1.
+   */
+  async setRate(input: SetLetterRateInput, actor: Actor): Promise<CurrencyRate> {
+    const letter = await this.editableOrThrow(input.tenantId, input.letterId);
+    const currency = this.lineCurrency(input.currency);
+    if (currency === letter.currency) throw new RateIsMainCurrency(currency);
+    if (!isExchangeRate(input.fxRate) || Number(input.fxRate) <= 0) {
+      throw new InvalidAmount("exchange rate", input.fxRate);
+    }
+    if (!isDay(input.fxRateDate)) throw new InvalidDate("rate date", input.fxRateDate);
+    const source = (input.source ?? "").trim() === "" ? "typed" : (input.source ?? "").trim();
+    const rate = await this.deps.letters.setRate(input.tenantId, letter.id, {
+      currency,
+      fxRate: input.fxRate,
+      fxRateDate: input.fxRateDate,
+      source,
+    });
+    if (rate === null) {
+      // Sent or deleted between the read above and the write.
+      await this.editableOrThrow(input.tenantId, letter.id);
+      throw new LetterNotFound(letter.id);
+    }
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "engagement_letter.rate_set",
+      objectId: letter.id,
+      actor,
+      payload: { currency, fxRate: rate.fxRate, fxRateDate: rate.fxRateDate, source: rate.source },
+    });
+    return rate;
+  }
+
+  /** Take a rate off a draft: only while no live service or section is in it. */
+  async removeRate(tenantId: string, letterId: string, raw: string, actor: Actor): Promise<void> {
+    const letter = await this.editableOrThrow(tenantId, letterId);
+    const currency = this.lineCurrency(raw);
+    if (currency === letter.currency) throw new RateIsMainCurrency(currency);
+    const using = await this.deps.letters.pricesIn(tenantId, letter.id, currency);
+    if (using > 0) throw new RateInUse(currency, using);
+    if (await this.deps.letters.removeRate(tenantId, letter.id, currency)) {
+      await this.deps.events.recordEvent({
+        tenantId,
+        verb: "engagement_letter.rate_removed",
+        objectId: letter.id,
+        actor,
+        payload: { currency },
+      });
+    }
+  }
+
+  /** A line's, a section's or a rate's currency: three letters, upper-cased. */
+  private lineCurrency(raw: string): string {
+    const currency = normalizeCurrency(raw);
+    if (!isCurrencyCode(currency)) throw new InvalidQuoteCurrency(raw);
+    return currency;
   }
 
   async removeLine(tenantId: string, letterId: string, lineId: string): Promise<void> {
@@ -2182,6 +2337,7 @@ export class EngagementService {
         billingFrequency: l.line.billingFrequency,
         effectiveFrom: l.line.effectiveFrom,
         net: l.net,
+        currency: l.line.currency,
         pricingNote: l.line.pricingNote,
         oopEstimate: l.line.oopEstimate,
       })),

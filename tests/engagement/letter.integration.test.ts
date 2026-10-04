@@ -900,8 +900,8 @@ describe("the pin", () => {
     // AND THE TOTALS SAY WHAT THEY DO NOT COVER. 12 × 12,000 is the whole of
     // the priced work; the second line is agreed and unpriced, and a figure
     // that did not admit it would be a number a partner acts on.
-    expect(Number(record.totals.net)).toBe(144000);
-    expect(record.totals.unpricedLineCount).toBe(1);
+    expect(Number(record.totals[0]?.net)).toBe(144000);
+    expect(record.totals[0]?.unpricedLineCount).toBe(1);
     expect(record.lines[1]?.line.unitAmount).toBeNull();
     expect(record.lines[1]?.net).toBeNull();
     expect(record.lines[1]?.line.pricingNote).toBe("As mutually agreed");

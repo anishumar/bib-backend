@@ -23,6 +23,7 @@ import { sectionCode } from "../domain/engagement/model";
 import { readClauseBody, readServiceBody } from "../domain/config/model";
 import { resolveTerms } from "../domain/document/model";
 import type { BillingFrequency } from "../domain/document/model";
+import type { CurrencyRate } from "../domain/money/model";
 import type {
   AcceptedQuoteDirectory,
   BillableEngagement,
@@ -183,6 +184,7 @@ export class FakeEngagementRepo implements EngagementRepository {
       deletedByUserId: null,
       copiedFromId: l.copiedFromId ?? null,
       chosenSignatoryId: null,
+      rates: [],
     };
     this.letters.push(row);
     return Promise.resolve(row);
@@ -246,6 +248,7 @@ export class FakeEngagementRepo implements EngagementRepository {
       ...pricing,
       advanceAmount: pricing.feeGroupId === null ? current.advanceAmount : null,
     };
+    // (`pricing.currency` comes along: into a group, the group's, 0344.)
     this.lines[index] = updated;
     return Promise.resolve(strip(updated));
   }
@@ -288,10 +291,20 @@ export class FakeEngagementRepo implements EngagementRepository {
     );
     const current = this.feeGroups[index];
     if (current === undefined) throw new Error(`fake: no live fee group ${groupId}`);
+    // A new currency takes every line that names the group with it (0344), in
+    // the same write, as the adapter's CTE does.
+    if (edit.currency !== undefined) {
+      this.lines.forEach((l, i) => {
+        if (l.feeGroupId === groupId && l.engagementLetterId === letterId) {
+          this.lines[i] = { ...l, currency: edit.currency ?? l.currency };
+        }
+      });
+    }
     // `undefined` is "not mentioned" — the adapter's CASE, spelled out.
     const updated = {
       ...current,
       ...(edit.title === undefined ? {} : { title: edit.title }),
+      ...(edit.currency === undefined ? {} : { currency: edit.currency }),
       ...(edit.billingFrequency === undefined ? {} : { billingFrequency: edit.billingFrequency }),
       ...(edit.amount === undefined ? {} : { amount: edit.amount }),
       ...(edit.paymentTerms === undefined ? {} : { paymentTerms: edit.paymentTerms }),
@@ -349,8 +362,9 @@ export class FakeEngagementRepo implements EngagementRepository {
     return Promise.resolve(strip(updated));
   }
 
-  /** The adapter's WHERE: a live draft, and a new currency over no line or
-   *  section row at all; the prose replaced beside it is the document fake's. */
+  /** The adapter's WHERE: a live draft, and a new main currency over no LIVE
+   *  line or section in the old one (0344), whose own rate row, if it had one,
+   *  goes; the prose replaced beside it is the document fake's. */
   revise(
     tenantId: string,
     letterId: string,
@@ -365,24 +379,54 @@ export class FakeEngagementRepo implements EngagementRepository {
     if (
       change.currency !== undefined &&
       change.currency !== current.currency &&
-      (this.lines.some((l) => l.engagementLetterId === letterId) ||
-        this.feeGroups.some((g) => g.engagementLetterId === letterId))
+      this.countIn(letterId, current.currency) > 0
     ) {
       return Promise.resolve(null);
     }
     const defined = Object.fromEntries(
       Object.entries(change).filter(([, v]) => v !== undefined),
     ) as Partial<EngagementLetter>;
-    const updated: EngagementLetter = { ...current, ...defined };
+    const rates =
+      change.currency === undefined ? current.rates : current.rates.filter((r) => r.currency !== change.currency);
+    const updated: EngagementLetter = { ...current, ...defined, rates };
     this.letters[index] = updated;
     return Promise.resolve(updated);
   }
 
-  pricesAnything(_tenantId: string, letterId: string): Promise<boolean> {
-    return Promise.resolve(
-      this.lines.some((l) => l.engagementLetterId === letterId) ||
-        this.feeGroups.some((g) => g.engagementLetterId === letterId),
+  pricesIn(_tenantId: string, letterId: string, currency: string): Promise<number> {
+    return Promise.resolve(this.countIn(letterId, currency));
+  }
+
+  private countIn(letterId: string, currency: string): number {
+    return (
+      this.lines.filter((l) => l.engagementLetterId === letterId && !l.removed && l.currency === currency).length +
+      this.feeGroups.filter((g) => g.engagementLetterId === letterId && !g.removed && g.currency === currency).length
     );
+  }
+
+  /** The adapter's INSERT ... SELECT: onto a live draft only, else null. */
+  setRate(tenantId: string, letterId: string, rate: CurrencyRate): Promise<CurrencyRate | null> {
+    const index = this.letters.findIndex((l) => l.tenantId === tenantId && l.id === letterId);
+    const current = this.letters[index];
+    if (current === undefined || current.status !== "draft" || current.deletedAt !== null) {
+      return Promise.resolve(null);
+    }
+    const rates = [...current.rates.filter((r) => r.currency !== rate.currency), { ...rate }].sort((a, b) =>
+      a.currency.localeCompare(b.currency),
+    );
+    this.letters[index] = { ...current, rates };
+    return Promise.resolve({ ...rate });
+  }
+
+  removeRate(tenantId: string, letterId: string, currency: string): Promise<boolean> {
+    const index = this.letters.findIndex((l) => l.tenantId === tenantId && l.id === letterId);
+    const current = this.letters[index];
+    if (current === undefined || current.status !== "draft" || current.deletedAt !== null) {
+      return Promise.resolve(false);
+    }
+    if (!current.rates.some((r) => r.currency === currency)) return Promise.resolve(false);
+    this.letters[index] = { ...current, rates: current.rates.filter((r) => r.currency !== currency) };
+    return Promise.resolve(true);
   }
 
   addClause(c: NewLetterClause): Promise<LetterClause> {
@@ -619,7 +663,7 @@ export class FakeEngagementRepo implements EngagementRepository {
         displayName: this.partyNames.get(letter.partyId) ?? letter.partyId,
       },
       issuerJurisdiction: this.issuerJurisdictions.get(letter.issuingEntityPartyId) ?? null,
-      totalsByFrequency: byFrequency(lines, groups),
+      totalsByFrequency: byFrequency(lines, groups, letter.currency),
       issuingEntity: {
         id: letter.issuingEntityPartyId,
         displayName: this.partyNames.get(letter.issuingEntityPartyId) ?? letter.issuingEntityPartyId,
@@ -1270,11 +1314,32 @@ function net(
   return value === null ? null : unscaled(value);
 }
 
+/** The adapter's per-currency totals (0344): one row per currency the live
+ *  lines and sections are in, the main currency first; a zero main row when
+ *  there are none. Two currencies are never added together. */
 function totals(
+  lines: readonly Pick<LetterLine, "unitAmount" | "quantity" | "discountPercent" | "feeGroupId" | "currency">[],
+  groups: readonly Pick<FeeGroup, "amount" | "currency">[],
+  main: string,
+): LetterRecord["totals"] {
+  const currencies = [...new Set([...lines.map((l) => l.currency), ...groups.map((g) => g.currency)])].sort((a, b) =>
+    a === main ? -1 : b === main ? 1 : a.localeCompare(b),
+  );
+  if (currencies.length === 0) return [totalsIn([], [], main)];
+  return currencies.map((c) =>
+    totalsIn(
+      lines.filter((l) => l.currency === c),
+      groups.filter((g) => g.currency === c),
+      c,
+    ),
+  );
+}
+
+function totalsIn(
   lines: readonly Pick<LetterLine, "unitAmount" | "quantity" | "discountPercent" | "feeGroupId">[],
   groups: readonly Pick<FeeGroup, "amount">[],
   currency: string,
-): LetterRecord["totals"] {
+): LetterRecord["totals"][number] {
   // Each group's fee once, as the adapter's cross join adds it (0083).
   let gross = groups.reduce((sum, g) => sum + scaled(g.amount), 0n);
   let n = gross;
@@ -1303,27 +1368,35 @@ function totals(
  *  their frequency, each section's fee once at the section's, in reading order. */
 function byFrequency(
   lines: readonly (LetterLine & { removed: boolean })[],
-  groups: readonly Pick<FeeGroup, "amount" | "billingFrequency">[],
+  groups: readonly Pick<FeeGroup, "amount" | "billingFrequency" | "currency">[],
+  main: string,
 ): LetterFrequencyTotal[] {
   const order = ["monthly", "quarterly", "annually", "one_time", "custom"];
-  const rows = new Map<string, { frequency: BillingFrequency | null; net: bigint; lines: number; unpriced: number }>();
-  const add = (frequency: BillingFrequency | null, amount: bigint | null): void => {
-    const key = frequency ?? "";
-    const row = rows.get(key) ?? { frequency, net: 0n, lines: 0, unpriced: 0 };
+  const rows = new Map<
+    string,
+    { currency: string; frequency: BillingFrequency | null; net: bigint; lines: number; unpriced: number }
+  >();
+  const add = (currency: string, frequency: BillingFrequency | null, amount: bigint | null): void => {
+    const key = `${currency}:${frequency ?? ""}`;
+    const row = rows.get(key) ?? { currency, frequency, net: 0n, lines: 0, unpriced: 0 };
     row.lines += 1;
     if (amount === null) row.unpriced += 1;
     else row.net += amount;
     rows.set(key, row);
   };
-  for (const l of lines) if (l.feeGroupId === null) add(l.billingFrequency, netScaled(l));
-  for (const g of groups) add(g.billingFrequency, scaled(g.amount));
+  for (const l of lines) if (l.feeGroupId === null) add(l.currency, l.billingFrequency, netScaled(l));
+  for (const g of groups) add(g.currency, g.billingFrequency, scaled(g.amount));
   return [...rows.values()]
     .sort((a, b) => {
+      if (a.currency !== b.currency) {
+        return a.currency === main ? -1 : b.currency === main ? 1 : a.currency.localeCompare(b.currency);
+      }
       const at = a.frequency === null ? 99 : order.indexOf(a.frequency);
       const bt = b.frequency === null ? 99 : order.indexOf(b.frequency);
       return at - bt;
     })
     .map((r) => ({
+      currency: r.currency,
       frequency: r.frequency,
       net: unscaled(r.net),
       lineCount: r.lines,
