@@ -209,19 +209,22 @@ const InvoiceLineSchema = z
   })
   .openapi("InvoiceLine");
 
-const BankAccountSchema = z
-  .object({
-    id: z.string().uuid(),
-    accountName: z.string(),
-    accountNumber: z.string(),
-    bankName: z.string(),
-    branch: z.string().nullable(),
-    ifsc: z.string().nullable(),
-    swift: z.string().nullable(),
-    iban: z.string().nullable(),
-    currency: z.string().nullable().openapi({ description: "The invoice currency it is for; null: the general account." }),
-  })
-  .openapi("CompanyBankAccount");
+/** A bank account's fields, unnamed: the record's nullable copy is inlined
+ *  from this, because `.nullable()` on the NAMED schema makes the shared
+ *  component itself nullable (and every array of it a list of maybe-nulls). */
+const BankAccountFields = z.object({
+  id: z.string().uuid(),
+  accountName: z.string(),
+  accountNumber: z.string(),
+  bankName: z.string(),
+  branch: z.string().nullable(),
+  ifsc: z.string().nullable(),
+  swift: z.string().nullable(),
+  iban: z.string().nullable(),
+  currency: z.string().nullable().openapi({ description: "The invoice currency it is for; null: the general account." }),
+});
+
+const BankAccountSchema = BankAccountFields.openapi("CompanyBankAccount");
 
 const PartyRefSchema = z.object({ id: z.string().uuid(), displayName: z.string() });
 
@@ -254,9 +257,9 @@ const InvoiceRecordSchema = z
       .object({ id: z.string().uuid(), reference: z.string(), financialYear: z.number().int() })
       .nullable()
       .openapi({ description: "The LUT an export under one names (Q056)." }),
-    bankAccount: BankAccountSchema.nullable().openapi({
-      description: "Where the client pays: the issuing company's account for this currency, else its general one.",
-    }),
+    /** Where the client pays: the issuing company's account for this
+     *  currency, else its general one. */
+    bankAccount: BankAccountFields.nullable(),
     issueBlocked: z
       .object({
         reason: z.enum(["INVOICE_NUMBER_OUT_OF_ORDER", "PLACE_OF_SUPPLY_UNKNOWN", "INVOICE_LINE_NEEDS_SAC"]),
