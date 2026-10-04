@@ -22,13 +22,18 @@ import {
   registeredAddressProblem,
 } from "../../domain/document/model";
 import {
+  CompanyNotRegistered,
   CountryAlreadyServed,
   FirmEntityNotFound,
+  InvalidCompanyTimeZone,
+  InvalidCompanyYearStart,
   InvalidFirmEntity,
   JurisdictionFixed,
   NotAFirmEntity,
   NothingToChangeOnEntity,
 } from "../../domain/document/errors";
+import { isYearStartMonth, yearEndOfStartMonth } from "../../domain/calendar/model";
+import { isTimeZone } from "../../domain/tenancy/model";
 import type {
   FirmEntityChange,
   FirmEntityNumberWrite,
@@ -51,7 +56,14 @@ export interface FirmEntityView extends FirmEntityRecord {
   readonly defaultCurrency: string;
 }
 
-export interface CreateFirmEntityInput {
+/** A company's own year and clock as a form sends them (0337): absent keeps
+ *  what is there, null goes back to the firm's. */
+interface CalendarInput {
+  readonly timeZone?: string | null | undefined;
+  readonly fiscalYearStartMonth?: number | null | undefined;
+}
+
+export interface CreateFirmEntityInput extends CalendarInput {
   readonly tenantId: string;
   readonly name: string;
   readonly jurisdiction: string;
@@ -103,7 +115,7 @@ const NUMBER_NAMES: Readonly<Record<string, string>> = {
   email: "email address",
 };
 
-export interface EditFirmEntityInput extends NumbersInput {
+export interface EditFirmEntityInput extends NumbersInput, CalendarInput {
   readonly tenantId: string;
   readonly partyId: string;
   readonly name?: string | undefined;
@@ -150,6 +162,7 @@ export class FirmEntityService {
     const jurisdiction = this.countryOrThrow(input.jurisdiction);
     const registeredAddress = this.addressOrThrow(input.registeredAddress ?? null);
     const numbers = this.numbersOrThrow(input, jurisdiction, name);
+    const calendar = this.calendarOrThrow(input);
 
     const serving = await this.deps.firmEntities.issuerForCountry(input.tenantId, jurisdiction);
     if (serving !== null) throw new CountryAlreadyServed(jurisdiction, serving.name);
@@ -165,6 +178,8 @@ export class FirmEntityService {
       registeredAddress,
       preferenceId,
       numbers,
+      timeZone: calendar.timeZone ?? null,
+      fiscalYearEnd: calendar.fiscalYearEnd ?? null,
     });
     if ("taken" in created) throw this.taken(created.taken);
     if (!created.created) {
@@ -266,9 +281,25 @@ export class FirmEntityService {
     // client's are, so one reading (`crm.print_identity`) prints both halves.
     const country = change.register?.jurisdiction ?? current.jurisdiction;
     const numbers = this.numbersOrThrow(input, country, current.name);
-    if (Object.keys(change).length === 0 && numbers.length === 0) throw new NothingToChangeOnEntity();
+    // ITS OWN YEAR AND CLOCK (0337), kept beside its registration: the firm's
+    // seeded company has none until its country is recorded, in this edit or
+    // an earlier one.
+    const calendar = this.calendarOrThrow(input);
+    const calendarSent = calendar.timeZone !== undefined || calendar.fiscalYearEnd !== undefined;
+    if (calendarSent && current.jurisdiction === null && change.register === undefined) {
+      throw new CompanyNotRegistered(current.name);
+    }
+    if (calendar.timeZone !== undefined) fields.push("timeZone");
+    if (calendar.fiscalYearEnd !== undefined) fields.push("fiscalYearStart");
+    if (Object.keys(change).length === 0 && numbers.length === 0 && !calendarSent) {
+      throw new NothingToChangeOnEntity();
+    }
 
-    const revised: FirmEntityChange = { ...change, ...(numbers.length === 0 ? {} : { numbers }) };
+    const revised: FirmEntityChange = {
+      ...change,
+      ...(numbers.length === 0 ? {} : { numbers }),
+      ...(calendarSent ? { calendar } : {}),
+    };
     const written = await this.deps.firmEntities.edit(input.tenantId, input.partyId, revised);
     if ("taken" in written) throw this.taken(written.taken);
     await this.recordNumbers(input.tenantId, input.partyId, written.numbers, actor);
@@ -365,6 +396,39 @@ export class FirmEntityService {
         payload: { partyId, identifierType: a.type },
       });
     }
+  }
+
+  /**
+   * A company's own zone and year as a form sent them (0337), checked and in
+   * the stored shape: the year as its last day (`financial_year_end`), because
+   * that column is the entity's year for clients too. Absent stays absent
+   * (keep), null is null (back to the firm's). A blank zone is not "the
+   * firm's": the form sends null for that, so a blank is a mistake.
+   */
+  private calendarOrThrow(input: CalendarInput): {
+    readonly timeZone?: string | null;
+    readonly fiscalYearEnd?: string | null;
+  } {
+    const out: { timeZone?: string | null; fiscalYearEnd?: string | null } = {};
+    if (input.timeZone !== undefined) {
+      if (input.timeZone !== null) {
+        const zone = input.timeZone.trim();
+        if (!isTimeZone(zone)) throw new InvalidCompanyTimeZone(input.timeZone);
+        out.timeZone = zone;
+      } else {
+        out.timeZone = null;
+      }
+    }
+    if (input.fiscalYearStartMonth !== undefined) {
+      if (input.fiscalYearStartMonth === null) {
+        out.fiscalYearEnd = null;
+      } else if (!isYearStartMonth(input.fiscalYearStartMonth)) {
+        throw new InvalidCompanyYearStart(input.fiscalYearStartMonth);
+      } else {
+        out.fiscalYearEnd = yearEndOfStartMonth(input.fiscalYearStartMonth);
+      }
+    }
+    return out;
   }
 
   private async findOrThrow(tenantId: string, partyId: string): Promise<FirmEntityView> {

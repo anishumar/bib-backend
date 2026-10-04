@@ -342,6 +342,8 @@ export class FakeRenderer implements DocumentRenderer {
   }
 }
 
+const FAKE_ISSUER = "00000000-0000-4000-8000-00000000e171";
+
 /** Describes whatever it was told to describe. `documents` maps a subjectRef to
  *  its description; anything absent resolves to null, which is the "no such
  *  record" path the service turns into a refusal. */
@@ -362,6 +364,13 @@ export class FakeRenderSource implements RenderSource {
 
   /** Every `asIfSentOn` it was asked with, in order — what a preview passed. */
   readonly asked: (string | undefined)[] = [];
+  /** The company each record is issued by (0337); absent is the fake's one company. */
+  readonly issuers = new Map<string, string>();
+
+  issuerOf(input: { subjectRef: string }): Promise<string | null> {
+    if (!this.documents.has(input.subjectRef)) return Promise.resolve(null);
+    return Promise.resolve(this.issuers.get(input.subjectRef) ?? FAKE_ISSUER);
+  }
 
   describe(input: { subjectRef: string; asIfSentOn?: string | undefined }): Promise<DescribedDocument | null> {
     this.asked.push(input.asIfSentOn);
@@ -371,7 +380,7 @@ export class FakeRenderSource implements RenderSource {
       document,
       partyId: this.parties.get(input.subjectRef) ?? null,
       isOut: !this.drafts.has(input.subjectRef),
-      issuingEntity: { partyId: "00000000-0000-4000-8000-00000000e171", name: document.issuer.name },
+      issuingEntity: { partyId: this.issuers.get(input.subjectRef) ?? FAKE_ISSUER, name: document.issuer.name },
       ...(input.asIfSentOn === undefined ? {} : { datedAsIfSent: input.asIfSentOn }),
     });
   }

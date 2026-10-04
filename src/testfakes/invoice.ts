@@ -21,6 +21,7 @@ import {
   DEFAULT_CREDIT_NOTE_PREFIX,
   DEFAULT_SERIES_PREFIX,
   formatInvoiceNumber,
+  INDIAN_FY_START_MONTH,
   preDrawnNumberOrder,
 } from "../domain/invoice/model";
 import type {
@@ -73,14 +74,28 @@ export class FakeInvoiceRepo implements InvoiceRepository {
   engagementOf(_tenantId: string, engagementId: string): Promise<EngagementBilling | null> {
     return Promise.resolve(this.engagements.get(engagementId) ?? null);
   }
-  private readonly series = new Map<string, { last: number; prefix: string }>();
+  private readonly series = new Map<string, { last: number; prefix: string; startMonth: number }>();
+
+  /** The company's series for the year, created as the adapter creates it
+   *  (0337): fixed to the year's start month, with the company's latest
+   *  prefix carried into a new year. */
+  private seriesRow(k: string, entityPartyId: string, startMonth: number): { last: number; prefix: string; startMonth: number } {
+    const found = this.series.get(k);
+    if (found) return found;
+    const prior = [...this.series.entries()]
+      .filter(([key]) => key.split("|")[1] === entityPartyId)
+      .sort(([a], [b]) => Number(b.split("|")[2]) - Number(a.split("|")[2]))[0];
+    const row = { last: 0, prefix: prior?.[1].prefix ?? DEFAULT_SERIES_PREFIX, startMonth };
+    this.series.set(k, row);
+    return row;
+  }
 
   /** A draft, unnumbered (0322), in its series for the year: the series row
    *  exists from here, as the adapter's does. */
   create(i: NewInvoice): Promise<Invoice> {
     const financialYear = i.financialYear;
     const k = keyOf({ tenantId: i.tenantId, entityPartyId: i.entityPartyId, financialYear });
-    if (!this.series.has(k)) this.series.set(k, { last: 0, prefix: DEFAULT_SERIES_PREFIX });
+    this.seriesRow(k, i.entityPartyId, i.fiscalYearStartMonth ?? INDIAN_FY_START_MONTH);
 
     const invoice: Invoice = {
       id: i.id,
@@ -197,7 +212,7 @@ export class FakeInvoiceRepo implements InvoiceRepository {
     readonly financialYear: number;
   }): Invoice {
     const k = keyOf(d);
-    const existing = this.series.get(k) ?? { last: 0, prefix: DEFAULT_SERIES_PREFIX };
+    const existing = this.series.get(k) ?? { last: 0, prefix: DEFAULT_SERIES_PREFIX, startMonth: INDIAN_FY_START_MONTH };
     const sequence = existing.last + 1;
     this.series.set(k, { ...existing, last: sequence });
     const invoice: Invoice = {
@@ -242,7 +257,7 @@ export class FakeInvoiceRepo implements InvoiceRepository {
     // The issue date's year (B03), as the adapter moves an unnumbered draft.
     const financialYear = on.financialYear;
     const k = keyOf({ tenantId, entityPartyId: draft.entityPartyId, financialYear });
-    const existing = this.series.get(k) ?? { last: 0, prefix: DEFAULT_SERIES_PREFIX };
+    const existing = this.seriesRow(k, draft.entityPartyId, on.fiscalYearStartMonth);
     const sequence = existing.last + 1;
     this.series.set(k, { ...existing, last: sequence });
     return {
@@ -251,7 +266,7 @@ export class FakeInvoiceRepo implements InvoiceRepository {
         issuedOn,
         dueOn,
         financialYear,
-        number: formatInvoiceNumber({ prefix: existing.prefix, financialYear, sequence, startMonth: on.fiscalYearStartMonth }),
+        number: formatInvoiceNumber({ prefix: existing.prefix, financialYear, sequence, startMonth: existing.startMonth }),
         sequenceNumber: sequence,
       }),
     };
@@ -313,6 +328,7 @@ export class FakeInvoiceRepo implements InvoiceRepository {
         entityPartyId,
         entityName: this.nameOf(entityPartyId),
         financialYear: Number(fy),
+        startMonth: v.startMonth,
         documentType: "invoice",
         prefix: v.prefix,
         lastNumber: v.last,
@@ -365,7 +381,13 @@ export class FakeInvoiceRepo implements InvoiceRepository {
     // 0027 shipped without a document type. A fake that shared the counter
     // would let a test pass on interleaved numbering the database refuses.
     const k = `${keyOf({ tenantId: c.tenantId, entityPartyId: c.entityPartyId, financialYear })}|credit_note`;
-    const existing = this.creditSeries.get(k) ?? { last: 0, prefix: DEFAULT_CREDIT_NOTE_PREFIX };
+    // Fixed to the year's start month when the series is made, as the
+    // adapter's row is (0337).
+    const existing = this.creditSeries.get(k) ?? {
+      last: 0,
+      prefix: DEFAULT_CREDIT_NOTE_PREFIX,
+      startMonth: c.fiscalYearStartMonth,
+    };
     const sequence = existing.last + 1;
     this.creditSeries.set(k, { ...existing, last: sequence });
 
@@ -374,7 +396,7 @@ export class FakeInvoiceRepo implements InvoiceRepository {
       tenantId: c.tenantId,
       invoiceId: c.invoiceId,
       entityPartyId: c.entityPartyId,
-      number: formatInvoiceNumber({ prefix: existing.prefix, financialYear, sequence, startMonth: c.fiscalYearStartMonth }),
+      number: formatInvoiceNumber({ prefix: existing.prefix, financialYear, sequence, startMonth: existing.startMonth }),
       financialYear,
       sequenceNumber: sequence,
       amount: c.amount,
@@ -433,7 +455,19 @@ export class FakeInvoiceRepo implements InvoiceRepository {
     };
   }
 
-  private readonly creditSeries = new Map<string, { last: number; prefix: string }>();
+  private readonly creditSeries = new Map<string, { last: number; prefix: string; startMonth: number }>();
+
+  newestNumberedYear(
+    tenantId: string,
+    entityPartyId: string,
+    documentType: "invoice" | "credit_note",
+  ): Promise<number | null> {
+    const rows = documentType === "invoice" ? this.series : this.creditSeries;
+    const years = [...rows.entries()]
+      .filter(([k, v]) => k.startsWith(`${tenantId}|${entityPartyId}|`) && v.last > 0)
+      .map(([k]) => Number(k.split("|")[2]));
+    return Promise.resolve(years.length === 0 ? null : Math.max(...years));
+  }
 
   private patch(tenantId: string, invoiceId: string, over: Partial<Invoice>): Promise<Invoice> {
     const at = this.invoices.findIndex((i) => i.tenantId === tenantId && i.id === invoiceId);

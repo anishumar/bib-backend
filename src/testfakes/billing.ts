@@ -513,11 +513,18 @@ export class FakeBillingSchedules implements BillingSchedules {
     return Promise.resolve(this.groups.get(feeGroupId) ?? []);
   }
 
-  set(_t: string, ids: readonly string[], billingFrom: string | null, firstInvoiceOn: string | null): Promise<void> {
+  set(
+    _t: string,
+    ids: readonly string[],
+    billingFrom: string | null,
+    firstInvoiceOn: string | null,
+    yearStartMonth: number | null = null,
+  ): Promise<void> {
     for (let i = 0; i < this.rows.length; i += 1) {
       const row = this.rows[i];
       if (row !== undefined && ids.includes(row.engagementId)) {
-        this.rows[i] = { ...row, billingFrom, firstInvoiceOn };
+        // The year is pinned once and never moved (0337), as the adapter's coalesce.
+        this.rows[i] = { ...row, billingFrom, firstInvoiceOn, yearStartMonth: row.yearStartMonth ?? yearStartMonth };
       }
     }
     return Promise.resolve();

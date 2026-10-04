@@ -1,6 +1,7 @@
 // The ports the engagement use case needs from the world. Interfaces are owned
 // by the use case that needs them; adapters in infrastructure/ implement them,
 // and two are satisfied by other use cases at the composition root.
+import type { CompanyCalendars } from "../../domain/calendar/model";
 import type { Actor } from "../../domain/ledger/model";
 import type { LetterBillingTiming } from "../../domain/engagement/model";
 import type { NewRecordedAcceptance, RecordedAcceptance } from "../../domain/acceptance/model";
@@ -123,6 +124,9 @@ export interface AdvanceBilling {
 
 export interface FirmTimeZone {
   timeZoneFor(tenantId: string): Promise<string>;
+  /** The companies that keep their own zone (0337): a letter is dated, and
+   *  its work starts, on its issuing company's day. */
+  companyCalendars(tenantId: string): Promise<CompanyCalendars>;
 }
 
 export interface DocumentIdentity {
@@ -1417,6 +1421,9 @@ export interface EndOutcome {
  */
 export interface EngagementLifecycle {
   find(tenantId: string, engagementId: string): Promise<Engagement | null>;
+  /** The company that issued the engagement's letter (0337): its ends,
+   *  pauses and resumes are dated on that company's day. Null for none. */
+  issuingEntityOf(tenantId: string, engagementLetterId: string): Promise<string | null>;
   /**
    * End it, and in the SAME transaction withdraw its untouched upcoming
    * filings for periods after `endsOn`: T6.16's withdrawal, reason

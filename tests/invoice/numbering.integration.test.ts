@@ -168,7 +168,16 @@ describe("the series is consecutive", () => {
     // the number and its year are drawn together, at issue, in the same write.
     // It used to keep the draft's year and go out as INV/2026-27/… dated in
     // FY 2027-28. The trigger admits the move only in the issuing write.
-    const d = await drafted({ seriesDate: "2027-03-28" });
+    // ITS OWN COMPANY (0337): an invoice dated April 2027 while this file's
+    // clock is in October 2026 is a state real issue dates never make, and on
+    // the shared company it would make 2027 the newest series every later
+    // issue here carries on in (`seriesYearFor`).
+    const own = await makeParty(tenant, "10x Global FZE");
+    await owner`
+      INSERT INTO crm.firm_entity_preference (tenant_id, client_jurisdiction, firm_entity_party_id)
+      VALUES (${tenant}, 'AE', ${own})
+    `;
+    const d = await drafted({ seriesDate: "2027-03-28", entityPartyId: own });
     expect(d.financialYear).toBe(2026);
     const next = await invoices.issue(tenant, d.id, {
       issuedOn: "2027-04-03",

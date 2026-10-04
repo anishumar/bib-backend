@@ -38,6 +38,7 @@ import {
   INDIAN_FY_START_MONTH,
   financialYearLabel,
   financialYearOf,
+  seriesYearFor,
   preDrawnNumberOrder,
   isCreditReason,
   isPaymentMethod,
@@ -87,6 +88,7 @@ import {
 } from "../../domain/invoice/errors";
 import { addDays } from "../../domain/scheduler/model";
 import { dayInZone, isCallersToday } from "../../domain/scheduler/zone";
+import { yearStartOfCompany, zoneOfCompany } from "../../domain/calendar/model";
 import type {
   FirmEntities,
   FirmTimeZone,
@@ -194,10 +196,11 @@ export class InvoiceService {
   async prepareDraft(input: RaiseInvoiceInput): Promise<NewInvoice> {
     const currency = normalizeCurrency(input.currency);
     if (!isCurrencyCode(currency)) throw new InvalidInvoiceCurrency(input.currency);
-    const today = await this.today(input.tenantId, input.asOf);
+    const today = await this.today(input.tenantId, input.entityPartyId, input.asOf);
     const seriesDate = input.seriesDate ?? today;
     this.dateOrThrow("seriesDate", seriesDate);
     const settings = await this.deps.settings.invoiceSettingsFor(input.tenantId);
+    const startMonth = await this.startMonthOf(input.tenantId, input.entityPartyId, settings.fiscalYearStartMonth);
     // THE RATE IS A PERSON'S, NEVER A DEFAULT (B07). In another currency than
     // the firm's reporting one it is required: a default of 1 counted USD
     // 10,000 as INR 10,000 everywhere money is added up. In the firm's own
@@ -253,7 +256,8 @@ export class InvoiceService {
       dueOn: input.dueOn ?? null,
       notes: input.notes ?? null,
       managerUserId: input.managerUserId ?? null,
-      financialYear: financialYearOf(seriesDate, settings.fiscalYearStartMonth ?? INDIAN_FY_START_MONTH),
+      financialYear: financialYearOf(seriesDate, startMonth),
+      fiscalYearStartMonth: startMonth,
     };
   }
 
@@ -324,7 +328,7 @@ export class InvoiceService {
     const invoice = await this.editableOrThrow(tenantId, invoiceId);
     if (dueOn !== null) {
       this.dateOrThrow("dueOn", dueOn);
-      const today = await this.today(tenantId, asOf);
+      const today = await this.today(tenantId, invoice.entityPartyId, asOf);
       if (dueOn < today) throw new DueDateInThePast(dueOn, today);
     }
     if (invoice.dueOn === dueOn) return invoice;
@@ -443,12 +447,13 @@ export class InvoiceService {
     // The DATE ON THE TAX INVOICE. The caller's today, or the firm's: never
     // Greenwich's, which dated an invoice issued at 02:00 in Delhi the day
     // before it was issued.
-    const issuedOn = await this.today(tenantId, asOf);
+    const issuedOn = await this.today(tenantId, invoice.entityPartyId, asOf);
     // AND ITS YEAR IS THAT DAY'S (B03). It was the draft's, so a March draft
     // issued in April took last year's series with an April date on it. The
-    // firm's own year when it has said when that starts, else 1 April.
+    // COMPANY's own year when it keeps one (0337), else the firm's when it has
+    // said when that starts, else 1 April.
     const settings = await this.deps.settings.invoiceSettingsFor(tenantId);
-    const startMonth = settings.fiscalYearStartMonth ?? INDIAN_FY_START_MONTH;
+    const startMonth = await this.startMonthOf(tenantId, invoice.entityPartyId, settings.fiscalYearStartMonth);
     // NOT ALREADY OVERDUE (B21): a draft that lingered past its due date would
     // go out late, and the next sweep fire every reminder at once. The person
     // changes the date on the draft; nothing guesses a new one.
@@ -459,7 +464,12 @@ export class InvoiceService {
     // THE NUMBER IS DRAWN HERE (0322), in the same transaction as the status.
     // A draft numbered before 0322 keeps its number, and is refused when that
     // number would now go out of order (B51): never renumbered.
-    const financialYear = financialYearOf(issuedOn, startMonth);
+    // Never an older series than the company last drew in (final review: a
+    // later year start reopened the one that had closed).
+    const financialYear = seriesYearFor(
+      financialYearOf(issuedOn, startMonth),
+      await this.deps.invoices.newestNumberedYear(tenantId, invoice.entityPartyId, "invoice"),
+    );
     const outcome = await this.deps.invoices.issue(tenantId, invoiceId, {
       issuedOn,
       financialYear,
@@ -564,7 +574,12 @@ export class InvoiceService {
   async describe(tenantId: string, invoiceId: string): Promise<InvoiceView> {
     const record = await this.deps.invoices.describe(tenantId, invoiceId);
     if (record === null) throw new InvoiceNotFound(invoiceId);
-    return { ...record, issueBlocked: await this.issueBlocked(tenantId, record.invoice) };
+    const draft = record.invoice.status === "draft";
+    return {
+      ...record,
+      issueBlocked: await this.issueBlocked(tenantId, record.invoice),
+      issuesOn: draft ? await this.today(tenantId, record.invoice.entityPartyId) : null,
+    };
   }
 
   /**
@@ -576,8 +591,8 @@ export class InvoiceService {
   private async issueBlocked(tenantId: string, invoice: Invoice): Promise<InvoiceView["issueBlocked"]> {
     if (invoice.status !== "draft" || invoice.number === null || invoice.sequenceNumber === null) return null;
     const settings = await this.deps.settings.invoiceSettingsFor(tenantId);
-    const startMonth = settings.fiscalYearStartMonth ?? INDIAN_FY_START_MONTH;
-    const issueFinancialYear = financialYearOf(await this.today(tenantId), startMonth);
+    const startMonth = await this.startMonthOf(tenantId, invoice.entityPartyId, settings.fiscalYearStartMonth);
+    const issueFinancialYear = financialYearOf(await this.today(tenantId, invoice.entityPartyId), startMonth);
     const order = preDrawnNumberOrder({
       draft: { financialYear: invoice.financialYear, sequenceNumber: invoice.sequenceNumber },
       issueFinancialYear,
@@ -768,7 +783,7 @@ export class InvoiceService {
     if (!isCreditReason(input.reason)) {
       throw new InvalidCreditReason(input.reason, CREDIT_REASONS);
     }
-    const today = await this.today(input.tenantId, input.asOf);
+    const today = await this.today(input.tenantId, invoice.entityPartyId, input.asOf);
     const issuedOn = input.issuedOn ?? today;
     this.dateOrThrow("issuedOn", issuedOn);
     // INSIDE THE INVOICE'S LIFE (B45). A caller-chosen date could predate the
@@ -778,7 +793,7 @@ export class InvoiceService {
       throw new CreditNoteDateOutOfRange(issuedOn, invoice.issuedOn, today);
     }
     const settings = await this.deps.settings.invoiceSettingsFor(input.tenantId);
-    const startMonth = settings.fiscalYearStartMonth ?? INDIAN_FY_START_MONTH;
+    const startMonth = await this.startMonthOf(input.tenantId, invoice.entityPartyId, settings.fiscalYearStartMonth);
 
     // A firm cannot credit more than it billed, nor give back an advance that
     // later bills already took (B06). Checked by the repository INSIDE the
@@ -796,8 +811,12 @@ export class InvoiceService {
       issuedOn,
       reason: input.reason,
       note: input.note ?? null,
-      // Its own date's series, never the invoice's (B45).
-      financialYear: financialYearOf(issuedOn, startMonth),
+      // Its own date's series, never the invoice's (B45), and never an older
+      // one than the company last drew a credit note in (0337).
+      financialYear: seriesYearFor(
+        financialYearOf(issuedOn, startMonth),
+        await this.deps.invoices.newestNumberedYear(input.tenantId, invoice.entityPartyId, "credit_note"),
+      ),
       fiscalYearStartMonth: startMonth,
     });
     if (!("credit" in outcome)) {
@@ -893,11 +912,26 @@ export class InvoiceService {
    * until 05:30. A caller's `asOf` is held to the firm's day or one either
    * side (`isCallersToday`): it says what day it is, it does not choose one.
    */
-  private async today(tenantId: string, asOf?: string): Promise<string> {
-    const zone = await this.deps.timeZones.timeZoneFor(tenantId);
-    const firmDay = dayInZone(this.deps.clock.now().toISOString(), zone);
-    if (asOf === undefined) return firmDay;
-    if (!isCallersToday(asOf, firmDay)) throw new NotCallersToday(asOf, firmDay);
+  private async today(tenantId: string, entityPartyId: string, asOf?: string): Promise<string> {
+    // THE ISSUING COMPANY'S DAY (0337): its own zone when it keeps one, else
+    // the firm's. A US company's invoice raised at 01:00 in India is dated on
+    // New York's 31 October, as a document of that company is (the ERP
+    // standard: a document date is a plain date in the issuer's zone).
+    const [firmZone, calendars] = await Promise.all([
+      this.deps.timeZones.timeZoneFor(tenantId),
+      this.deps.timeZones.companyCalendars(tenantId),
+    ]);
+    const zone = zoneOfCompany(calendars, entityPartyId, firmZone);
+    const companyDay = dayInZone(this.deps.clock.now().toISOString(), zone);
+    if (asOf === undefined) return companyDay;
+    if (!isCallersToday(asOf, companyDay)) throw new NotCallersToday(asOf, companyDay);
     return asOf;
+  }
+
+  /** The month the issuing company's year starts in (0337): its own, else the
+   *  firm's when it has said, else 1 April as every series did before. */
+  private async startMonthOf(tenantId: string, entityPartyId: string, firmStart: number | null): Promise<number> {
+    const calendars = await this.deps.timeZones.companyCalendars(tenantId);
+    return yearStartOfCompany(calendars, entityPartyId, firmStart) ?? INDIAN_FY_START_MONTH;
   }
 }

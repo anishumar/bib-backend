@@ -213,6 +213,12 @@ const FREQUENCY_LABELS: Readonly<Record<string, string>> = {
   custom: "Custom",
 };
 
+/** The zone each record's day is cut on: its issuing company's, else the
+ *  firm's (0337). Constant SQL, no input in it. */
+const PROPOSAL_ZONE = "crm.issuer_zone(p.tenant_id, p.issuing_entity_party_id)";
+const LETTER_ZONE = "crm.issuer_zone(el.tenant_id, el.issuing_entity_party_id)";
+const INVOICE_ZONE = "crm.issuer_zone(i.tenant_id, i.entity_party_id)";
+
 export class PostgresRenderSource implements RenderSource {
   constructor(
     private readonly app: Db,
@@ -245,6 +251,27 @@ export class PostgresRenderSource implements RenderSource {
     return null;
   }
 
+  async issuerOf(input: {
+    readonly tenantId: string;
+    readonly kind: DocumentKind;
+    readonly subjectRef: string;
+  }): Promise<string | null> {
+    return withTenant(this.app, input.tenantId, async (db) => {
+      const rows =
+        input.kind === "engagement_letter"
+          ? await db<{ issuer: string }[]>`
+              SELECT issuing_entity_party_id AS issuer FROM crm.engagement_letter WHERE id = ${input.subjectRef}`
+          : input.kind === "invoice"
+            ? await db<{ issuer: string }[]>`
+                SELECT entity_party_id AS issuer FROM crm.invoice WHERE id = ${input.subjectRef}`
+            : input.kind === "proposal"
+              ? await db<{ issuer: string }[]>`
+                  SELECT issuing_entity_party_id AS issuer FROM crm.proposal WHERE id = ${input.subjectRef}`
+              : [];
+      return rows[0]?.issuer ?? null;
+    });
+  }
+
   /**
    * THE FIRM'S "PROPOSAL FOR SERVICES" (0084): a cover, then Background, the
    * in-scope services, the work in sections by the firm's own Dept, the
@@ -264,10 +291,10 @@ export class PostgresRenderSource implements RenderSource {
       const [row] = await db<ProposalHeadRow[]>`
         SELECT p.party_id, p.ref, p.title, p.currency, p.valid_until::text, p.background,
                p.issuing_entity_party_id, p.status, p.addressed_to_party_id,
-               -- The FIRM's day (T6.18): a proposal sent at 02:15 in Delhi is
-               -- dated that day, not the UTC day before.
-               ${db.unsafe(zoneDayOf("p.sent_at", "firm.time_zone", "sent_on"))},
-               ${db.unsafe(zoneDayOf("p.created_at", "firm.time_zone", "created_on"))},
+               -- Its COMPANY's day (T6.18, 0337): a proposal sent at 02:15 in
+               -- Delhi is dated that day, not the UTC day before.
+               ${db.unsafe(zoneDayOf("p.sent_at", PROPOSAL_ZONE, "sent_on"))},
+               ${db.unsafe(zoneDayOf("p.created_at", PROPOSAL_ZONE, "created_on"))},
                client.display_name AS client_name,
                entity.display_name AS entity_name,
                addressee.display_name AS addressee_name,
@@ -278,7 +305,6 @@ export class PostgresRenderSource implements RenderSource {
         FROM crm.proposal p
         JOIN core.party client ON client.id = p.party_id
         JOIN core.party entity ON entity.id = p.issuing_entity_party_id
-        JOIN tenancy.tenant firm ON firm.id = p.tenant_id
         LEFT JOIN core.party addressee ON addressee.id = p.addressed_to_party_id
         LEFT JOIN tenancy.user_account preparer ON preparer.id = p.prepared_by_user_id
         WHERE p.id = ${proposalId}
@@ -386,8 +412,8 @@ export class PostgresRenderSource implements RenderSource {
       // proposal is read from its PDF of record, never redrawn.
       const [who] = await db<{ identity: unknown }[]>`
         SELECT crm.print_identity(${row.issuing_entity_party_id},
-                                  (now() AT TIME ZONE t.time_zone)::date) AS identity
-          FROM tenancy.tenant t WHERE t.id = ${tenantId}
+                                  (now() AT TIME ZONE crm.issuer_zone(${tenantId}, ${row.issuing_entity_party_id}))::date)
+               AS identity
       `;
       const issuerOnPaper = readPrintedParty(who?.identity ?? null);
 
@@ -512,18 +538,18 @@ export class PostgresRenderSource implements RenderSource {
                ${db.unsafe(isoInstant("el.signed_at", "signed_at"))},
                el.signed_by_name, el.signed_by_title, el.firm_signatory_title,
                el.firm_signature_version_id,
-               -- The FIRM's day (B42): a letter first saved at 01:00 in Delhi
-               -- was dated the UTC day before on a draft copy.
-               ${db.unsafe(zoneDayOf("el.created_at", "firm.time_zone", "created_on"))},
+               -- Its COMPANY's day (B42, 0337): a letter first saved at 01:00 in
+               -- Delhi was dated the UTC day before on a draft copy.
+               ${db.unsafe(zoneDayOf("el.created_at", LETTER_ZONE, "created_on"))},
                client.display_name AS client_name,
                entity.display_name AS entity_name,
                le.jurisdiction     AS entity_jurisdiction,
                -- WHO IT IS FROM (0334): frozen by Send; a draft reads its
-               -- issuing company live, as it stands today on the firm's
-               -- calendar, which is what Send will freeze.
+               -- issuing company live, as it stands today on that company's
+               -- calendar (0337), which is what Send will freeze.
                el.printed_parties,
                CASE WHEN el.status = 'draft' THEN crm.print_identity(el.issuing_entity_party_id,
-                 (now() AT TIME ZONE firm.time_zone)::date)
+                 (now() AT TIME ZONE ${db.unsafe(LETTER_ZONE)})::date)
                END AS live_issuer,
                -- The firm's signatory BY NAME, a read-time join like the
                -- ledger's actor: the letter snapshots the account and the
@@ -1024,24 +1050,23 @@ export class PostgresRenderSource implements RenderSource {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<InvoiceRow[]>`
         SELECT i.party_id, i.number, i.currency, i.issued_on::text, i.due_on::text,
-               -- The FIRM's day (B42), never the UTC day it was first saved.
-               ${db.unsafe(zoneDayOf("i.created_at", "firm.time_zone", "created_on"))}, i.irn,
+               -- Its COMPANY's day (B42, 0337), never the UTC day it was first saved.
+               ${db.unsafe(zoneDayOf("i.created_at", INVOICE_ZONE, "created_on"))}, i.irn,
                client.display_name AS client_name,
                entity.display_name AS entity_name,
                t.gross::text, t.discount::text, t.net::text, t.tax::text, t.total::text,
                -- WHO IT IS FROM AND TO (0334): frozen by Issue, or read live
-               -- for a draft as it stands TODAY on the firm's calendar, which
-               -- is what Issue will freeze. NULL frozen on an invoice issued
+               -- for a draft as it stands TODAY on its company's calendar
+               -- (0337), which is what Issue will freeze. NULL frozen on an invoice issued
                -- before 0334, which prints as it always did.
                i.printed_parties,
                CASE WHEN i.issued_on IS NULL THEN jsonb_build_object(
-                 'issuer', crm.print_identity(i.entity_party_id, (now() AT TIME ZONE firm.time_zone)::date),
-                 'recipient', crm.print_identity(i.party_id, (now() AT TIME ZONE firm.time_zone)::date))
+                 'issuer', crm.print_identity(i.entity_party_id, (now() AT TIME ZONE ${db.unsafe(INVOICE_ZONE)})::date),
+                 'recipient', crm.print_identity(i.party_id, (now() AT TIME ZONE ${db.unsafe(INVOICE_ZONE)})::date))
                END AS live_parties
         FROM crm.invoice i
         JOIN core.party client ON client.id = i.party_id
         JOIN core.party entity ON entity.id = i.entity_party_id
-        JOIN tenancy.tenant firm ON firm.id = i.tenant_id
         JOIN crm.invoice_totals t ON t.invoice_id = i.id AND t.tenant_id = i.tenant_id
         WHERE i.id = ${invoiceId}
       `;
@@ -1701,13 +1726,14 @@ function noteFlow(title: string, rows: readonly BlockRow[], kind: string): Flow[
   ];
 }
 
-/** "after each month", "at the start of each quarter", "first invoice on 15
+/** "at the end of each month" (Q042), "at the start of each quarter", "first invoice on 15
  *  November 2026": when the fee is invoiced (0319), or "" when the letter does
  *  not say, which prints nothing and leaves the document as it was. */
 function billedWhen(frequency: string | null, timing: string | null, on: string | null): string {
   const span = ({ monthly: "month", quarterly: "quarter", annually: "year" } as Record<string, string>)[frequency ?? ""];
   if (span === undefined || timing === null) return "";
-  if (timing === "arrears") return `billed after each ${span}`;
+  // Arrears is billed on the period's last day (Q042): "at the end of".
+  if (timing === "arrears") return `billed at the end of each ${span}`;
   if (timing === "advance") return `billed at the start of each ${span}`;
   return timing === "on_date" && on !== null ? `first invoice on ${longDate(on)}` : "";
 }

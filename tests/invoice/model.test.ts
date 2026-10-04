@@ -9,6 +9,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_SERIES_PREFIX,
+  financialYearLabelOfNumber,
   INVOICE_STATUSES,
   canTransition,
   financialYearLabel,
@@ -106,5 +107,19 @@ describe("the states an invoice has", () => {
     expect(canTransition("issued", "draft")).toBe(false);
     expect(canTransition("cancelled", "draft")).toBe(false);
     expect(canTransition("cancelled", "issued")).toBe(false);
+  });
+});
+
+describe("the year label an invoice number was drawn under (0337)", () => {
+  it("is the segment before the counter", () => {
+    expect(financialYearLabelOfNumber("INV/2026-27/0001")).toBe("2026-27");
+    expect(financialYearLabelOfNumber("INV/2027/0012")).toBe("2027");
+    expect(financialYearLabelOfNumber("10X/US/2026/0003")).toBe("2026");
+    expect(financialYearLabelOfNumber("CN/2026-27/00010")).toBe("2026-27");
+  });
+  it("is nothing for a draft or a number it cannot read", () => {
+    expect(financialYearLabelOfNumber(null)).toBeNull();
+    expect(financialYearLabelOfNumber("INV0001")).toBeNull();
+    expect(financialYearLabelOfNumber("INV/abc/0001")).toBeNull();
   });
 });

@@ -34,6 +34,7 @@ const ENGAGEMENT_2 = "00000000-0000-4000-8000-0000000000e2";
 const NOW = "2026-08-29T09:00:00.000Z";
 const LETTER_1 = "00000000-0000-4000-8000-0000000000L1".replace("L", "b");
 const ENTITY_1 = "00000000-0000-4000-8000-0000000000c1";
+const ISSUER_1 = "00000000-0000-4000-8000-0000000000d1";
 
 /** An activation with the grouping facts filled in (T2.7).
  *
@@ -433,6 +434,8 @@ function monthly(
     engagementId,
     engagementLetterId: LETTER_1,
     entityPartyId: ENTITY_1,
+    // A company that set no calendar of its own (0337): the firm's.
+    issuingEntityPartyId: ISSUER_1,
     deptCode: null,
     teamCode: null,
     workflowKey: null,

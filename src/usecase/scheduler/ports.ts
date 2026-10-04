@@ -9,6 +9,7 @@
 import type { Job, JobSource, JobStatus } from "../../domain/scheduler/model";
 import type { WorkSplitAxis } from "../../domain/serviceaxis/model";
 import type { Actor } from "../../domain/ledger/model";
+import type { CompanyCalendars } from "../../domain/calendar/model";
 
 export interface NewJob {
   readonly id: string;
@@ -329,6 +330,12 @@ export interface RecurringEngagement {
   readonly engagementId: string;
   readonly engagementLetterId: string;
   readonly entityPartyId: string;
+  /** The firm company its letter is issued by (0337): its periods are cut on
+   *  that company's year and opened on its clock. */
+  readonly issuingEntityPartyId: string;
+  /** The year start its periods were first cut on (0338), pinned and never
+   *  moved; absent or null = not cut yet: the company's year, else the firm's. */
+  readonly yearStartMonth?: number | null;
   readonly deptCode: string | null;
   readonly teamCode: string | null;
   readonly workflowKey: string | null;
@@ -351,6 +358,9 @@ export interface RecurringEngagementFeed {
   /** Active recurring engagements at this firm, oldest start first, and the
    *  ENDED ones that still owe periods up to their last day (V2.3). */
   activeRecurring(tenantId: string, limit: number): Promise<readonly RecurringEngagement[]>;
+  /** Pin the year each engagement's periods are cut on (0338), where none is
+   *  pinned yet; a pinned one is never moved. */
+  pinYearStarts(tenantId: string, pins: readonly { engagementId: string; month: number }[]): Promise<void>;
 }
 
 /**
@@ -378,6 +388,8 @@ export interface CompliancePolicySource {
  */
 export interface FirmTimeZone {
   timeZoneFor(tenantId: string): Promise<string>;
+  /** Each firm company's own calendar (0337); absent means the firm's. */
+  companyCalendars(tenantId: string): Promise<CompanyCalendars>;
 }
 
 /**

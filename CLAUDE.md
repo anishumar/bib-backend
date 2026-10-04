@@ -760,6 +760,7 @@ The third rule in this family, and the one that decides a PERIOD. Keep all three
 | When did this `timestamptz` happen, for a reader? | The READER's own zone, client-side | T6.9 |
 | Which MONTH or DAY does this instant belong to, for the FIRM? | **`tenancy.tenant.time_zone`** | 0071 |
 | What is TODAY for a SWEEP, which has no caller to send its day? | **the firm's zone** — `dayInZone(clock.now(), timeZoneFor(tenant))`, per firm, per pass | T6.14 |
+| Which DAY is a company's document dated on, and which YEAR is its number or period in? | **that company's own** zone and year, else the firm's — see "Each company's own year and clock" | 0337 |
 
 **IT WAS THE SERVER'S, AND NOBODY CHOSE THAT.** `x_at::date` uses the session's `TimeZone`,
 which `src/db/pool.ts` does not set. So `/portal/month` answered *"what did you do for me in
@@ -870,6 +871,57 @@ firms only, the weekly advance digest releases its claim when every send failed,
 report with nothing spawned). B54, measured: at 96 firms the slowest sweep (the nightly
 calendar) takes 2.8 s and the five-minute orchestrator walk 0.9 s, about 9 ms a firm; serial is
 fine at this size (see `bib/qa/audit-2026-10-03/fix-dates.md`).
+
+## Each company's own year and clock (0337, 2026-10-04)
+
+A firm with companies in India, the UAE, Singapore and the US cannot run all four on one
+calendar: a UAE company's year starts in January, and a New York company's 31 October is
+already 1 November in Delhi. Every multi-entity ERP (NetSuite, Business Central, Xero, Zoho,
+Odoo, Tally) keeps the year and the document date per legal entity; none of the
+practice-management tools do (`bib/reports/Per company fiscal year and timezone.md`).
+
+**Two axes, never mixed.** (A) What a firm COMPANY issues follows that company's year and zone,
+else the firm's: an invoice's date and its number's year, billing periods and bill dates,
+letters, proposals, engagement dates, recurring work periods, a draft's PDF date. (B) A
+CLIENT's filing follows the filing's country and, where its rule says so, the client's own year
+end: designed in `bib/prompts/company-calendar/SPEC.md` §5, **not built**. **Reminders to
+people stay on the firm's day**: To raise ages, advance Overdue, dunning, the digest, staff
+routing, the dashboard.
+
+**Storage.** `core.legal_entity.time_zone` (new, trigger-checked against `pg_timezone_names`)
+and `financial_year_end` (MM-DD, the last day; the start month is the month after). NULL means
+the firm's; nothing was backfilled, so every existing firm behaves exactly as before. The API
+speaks `timeZone` and `fiscalYearStartMonth` (1-12) on `/firm-entities`, and a company with no
+country recorded is refused both (`COMPANY_NOT_REGISTERED`).
+
+**Reading it.** In TypeScript, each use case's own `FirmTimeZone` port has
+`companyCalendars(tenantId)` (filtered by `crm.is_firm_entity`, so a CLIENT's year end is never
+read here) and `domain/calendar/model.ts` resolves `zoneOfCompany` / `yearStartOfCompany`. In
+SQL, `crm.issuer_zone(tenant, party)` is the company's zone, else the firm's: use it wherever a
+company document's instant becomes a day (`printed_parties`, `signed_on`, `done_on`, a
+company's own tax number's `valid_from`).
+
+**A series keeps its year.** `crm.invoice_series.start_month` is fixed when the series row is
+made, so changing a company's year mid-series keeps the label until the new year (a
+transition period, as Business Central does); a new series row carries the company's latest
+prefix. The invoice read's `financialYearLabel` is read off the frozen number, never rebuilt.
+**A number is never drawn in a series OLDER than the newest one the company has drawn in**
+(`seriesYearFor`): moving a year start later (January to April) would otherwise reopen the
+series that closed before it; the series in progress carries on until the new year catches up.
+
+**An engagement keeps the year it was first cut on (0338).** `crm.engagement.year_start_month`
+is pinned when billing is scheduled (go-live, or by hand) or the first recurring period is cut,
+and never moved; the billing sweep and the scheduler cut on it before the company's live year.
+A company's year change applies to engagements that start after it, never re-cutting months
+already billed or worked.
+
+**A recorded acceptance takes the RECORDER's day** (`asOf`, held to the company's day ±1, on
+letters and proposals): its date is a person's statement, and a partner in Delhi at 09:00 must
+be able to record "today" for a New York company still on yesterday.
+
+**`asOf` on a company document is held to the COMPANY's day** or one either side, and the
+screens no longer send it: the API dates the document on the company's day. The invoice read's
+`issuesOn` is the day Issue would date a draft, for the confirmation to say.
 
 ## Migrations
 
@@ -1816,6 +1868,9 @@ A proposal reference may gap: `PR-2026-0007` missing means somebody abandoned a 
 Indian GST a series must be consecutive, and an auditor who finds one missing is entitled to
 read it as a suppressed sale.
 
+**Each company numbers in its own year (0337):** `INV/2027/0001` for a company on a calendar
+year, `INV/2026-27/0001` on April's, and its series keeps the year it started with.
+
 **The number is drawn at ISSUE, not at the draft (0322).** It used to be drawn when the draft
 was created, so an automatic draft a firm then cancelled left a cancelled number in the series,
 which is why the billing desk only ever wrote bills. GST's consecutive-serial rule is about
@@ -1944,6 +1999,18 @@ currencies and cannot share an axis).
 - Proven in `tests/dashboard/revenue.integration.test.ts` (two companies, a credit note, a
   cancelled invoice, a draft, a USD invoice from the Gulf company, a second firm behind the wall)
   and `revenue.test.ts` (the month cut at 00:30 IST on 1 October, the assembly).
+
+## Arrears is billed on the period's LAST day (Q042, 0339, 2026-10-04)
+
+Ashish: "1st November ko na bana kar 31st October ko hi banao". `scheduleFor` sets an arrears
+schedule's first bill on its first period's last day, and `billingDues` bills every period of a
+schedule that starts that way on its own last day, read off the period, never "first plus N
+months" (30 November plus a month is 30 December). The sweep makes it on that day on the issuing
+company's calendar. The invoice raised from it is still dated and numbered at Issue (0322), so a
+bill made on 31 October and issued on 2 November is a 2 November invoice. 0339 moved arrears
+schedules already set to the 1st after their first period back one day; an advance, a letter's
+own date and a day a person typed are untouched, and bills already written keep their day. The
+letter prints "billed at the end of each month"; To raise ages count from the last day.
 
 ## The advance and the final bill (auto-invoice phase 2, 0320)
 

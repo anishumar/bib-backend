@@ -1,5 +1,6 @@
 // The seams invoicing needs from the world. Interfaces owned by this use case,
 // stated in its vocabulary; adapters in infrastructure/ implement them.
+import type { CompanyCalendars } from "../../domain/calendar/model";
 import type { DunningBody } from "../../domain/config/model";
 import type { Actor } from "../../domain/ledger/model";
 import type {
@@ -34,6 +35,11 @@ export interface NewInvoice {
    * issued in April is numbered in April's year.
    */
   readonly financialYear: number;
+  /** The month the issuing COMPANY's year starts in (0337): a series row the
+   *  draft creates is fixed to it, and its label is formatted from it. The
+   *  service always sends it; absent (a fixture writing straight to the
+   *  repository) is 1 April, as every series was before 0337. */
+  readonly fiscalYearStartMonth?: number | undefined;
 }
 
 /**
@@ -144,6 +150,9 @@ export interface InvoiceRecord {
  *  refused right now (B51). Null when nothing on the record stops it. */
 export interface InvoiceView extends InvoiceRecord {
   readonly issueBlocked: IssueBlocked | null;
+  /** The day Issue would date a draft today: its company's day (0337). Null
+   *  once it is out of draft. */
+  readonly issuesOn: string | null;
 }
 
 export interface InvoiceLineRecord {
@@ -191,11 +200,14 @@ export interface InvoiceFilters {
 
 /**
  * Which zone the firm keeps its calendar in (0071) — "today" for an invoice
- * nobody dated, when the caller did not say. Structural: satisfied by
- * `PostgresFirmTimeZone` and `FakeFirmTimeZone`.
+ * nobody dated, when the caller did not say — and, since 0337, the companies
+ * that keep their own zone and year: an invoice is dated and numbered on its
+ * COMPANY's. Structural: satisfied by `PostgresFirmTimeZone` and
+ * `FakeFirmTimeZone`.
  */
 export interface FirmTimeZone {
   timeZoneFor(tenantId: string): Promise<string>;
+  companyCalendars(tenantId: string): Promise<CompanyCalendars>;
 }
 
 /**
@@ -289,6 +301,14 @@ export interface InvoiceRepository {
     series: { readonly entityPartyId: string; readonly financialYear: number },
     exceptInvoiceId: string,
   ): Promise<{ readonly number: string; readonly sequenceNumber: number } | null>;
+  /** The newest year this company has drawn a number of this kind in (0337);
+   *  null when it has drawn none. `seriesYearFor` keeps a year change from
+   *  reopening an older series. */
+  newestNumberedYear(
+    tenantId: string,
+    entityPartyId: string,
+    documentType: "invoice" | "credit_note",
+  ): Promise<number | null>;
   /**
    * Cancel it, unless it is ISSUED and money was received against it (B05):
    * then nothing changes and the net paid comes back. Checked under the
@@ -376,6 +396,8 @@ export interface InvoiceSeriesRecord {
   readonly entityPartyId: string;
   readonly entityName: string;
   readonly financialYear: number;
+  /** The month the series' year starts in, fixed when it started (0337). */
+  readonly startMonth: number;
   /** `invoice` or `credit_note` — two legal series that must not interleave.
    *  0028 widened the key after 0027 shipped without it. */
   readonly documentType: string;

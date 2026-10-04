@@ -298,10 +298,10 @@ export interface EngagementLetter {
 }
 
 /**
- * WHEN A RECURRING FEE IS INVOICED, as the letter agrees it (0319): after each
- * period (the firm's default), at its start, or from a date the firm chose.
- * Null on a letter written before 0319 or a line nobody chose for; billing
- * reads that as after each period. The billing domain has the same three words
+ * WHEN A RECURRING FEE IS INVOICED, as the letter agrees it (0319): at the end
+ * of each period, on its last day (the firm's default; Q042), at its start, or
+ * from a date the firm chose. Null on a letter written before 0319 or a line
+ * nobody chose for; billing reads that as at the end of each period. The billing domain has the same three words
  * (`BillingTiming`); domains do not import each other, so it is stated twice.
  */
 export const LETTER_BILLING_TIMINGS = ["arrears", "advance", "on_date"] as const;
@@ -361,7 +361,7 @@ export interface LetterLine {
    *  `recurrence` and freely different from it: a monthly service billed
    *  quarterly is an arrangement the firm has today. */
   readonly billingFrequency: BillingFrequency | null;
-  /** When it is invoiced (0319); null = not chosen (after each period). Only
+  /** When it is invoiced (0319); null = not chosen (at each period's end). Only
    *  for a monthly, quarterly or yearly fee. A grouped line is billed with its
    *  group, whose timing is the one that counts. */
   readonly billingTiming: LetterBillingTiming | null;

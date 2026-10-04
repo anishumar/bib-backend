@@ -58,6 +58,7 @@ import {
 } from "../../domain/render/errors";
 import type { PlacedAnchor } from "../../domain/render/model";
 import { dayInZone, isCallersToday } from "../../domain/scheduler/zone";
+import { zoneOfCompany } from "../../domain/calendar/model";
 import type { Clock } from "../../platform/clock";
 
 export interface Deps {
@@ -85,8 +86,8 @@ export interface Deps {
    * uploads, and hardcoding it would make raising it a deploy.
    */
   readonly maxUploadBytes: number;
-  /** "Today" for a preview is the FIRM's day (T6.11): the day Send will date
-   *  a draft on. */
+  /** "Today" for a preview is the ISSUING COMPANY's day (0337), else the
+   *  firm's (T6.11): the day Send will date a draft on. */
   readonly timeZones: FirmTimeZone;
   readonly clock: Clock;
 }
@@ -577,15 +578,14 @@ export class FileStoreService {
       throw new NotRenderable(input.kind, ["engagement_letter", "invoice", "proposal"]);
     }
 
-    // A DRAFT IS DRAWN AS IT WILL GO OUT, on the firm's day (B42, audit
-    // 2026-10-03): dated today on the firm's calendar, as Send or Issue will
-    // date it, never the day it was first saved on Greenwich's. The same
-    // description the preview draws, so the draft copy on file and the pages
-    // on the screen agree. A record already out is described as it stands.
-    const asIfSentOn = dayInZone(
-      this.deps.clock.now().toISOString(),
-      await this.deps.timeZones.timeZoneFor(input.tenantId),
-    );
+    // A DRAFT IS DRAWN AS IT WILL GO OUT, on its company's day (B42, audit
+    // 2026-10-03; 0337): dated today on its issuing company's calendar, else
+    // the firm's, as Send or Issue will date it, never the day it was first
+    // saved on Greenwich's. The same description the preview draws, so the
+    // draft copy on file and the pages on the screen agree. A record already
+    // out is described as it stands.
+    const zone = await this.companyZone(input.tenantId, input.kind, input.subjectRef);
+    const asIfSentOn = dayInZone(this.deps.clock.now().toISOString(), zone);
     const source = await this.deps.renderSource.describe({
       tenantId: input.tenantId,
       kind: input.kind,
@@ -619,7 +619,6 @@ export class FileStoreService {
         });
         const ofRecord = filed.find((d) => d.role === RENDERED_ROLE.copyOfRecord);
         if (ofRecord !== undefined) {
-          const zone = await this.deps.timeZones.timeZoneFor(input.tenantId);
           throw new CopyAlreadyMade(
             input.kind,
             described.reference,
@@ -734,17 +733,18 @@ export class FileStoreService {
     if (!this.deps.renderSource.supports(input.kind)) {
       throw new NotRenderable(input.kind, ["engagement_letter", "invoice", "proposal"]);
     }
-    const firmDay = dayInZone(
+    const companyDay = dayInZone(
       this.deps.clock.now().toISOString(),
-      await this.deps.timeZones.timeZoneFor(input.tenantId),
+      await this.companyZone(input.tenantId, input.kind, input.subjectRef),
     );
-    if (input.asOf !== undefined && !isCallersToday(input.asOf, firmDay)) {
-      throw new PreviewNotCallersToday(input.asOf, firmDay);
+    if (input.asOf !== undefined && !isCallersToday(input.asOf, companyDay)) {
+      throw new PreviewNotCallersToday(input.asOf, companyDay);
     }
-    // A proposal is dated by Send on the FIRM's day (`zoneDayOf(sent_at)`); a
-    // letter on the caller's (`callersDay`); an invoice by Issue on the firm's
-    // (B42: a draft invoice printed the UTC day it was first saved).
-    const asIfSentOn = input.kind === "engagement_letter" ? (input.asOf ?? firmDay) : firmDay;
+    // A proposal is dated by Send on its COMPANY's day (0337); a letter on the
+    // caller's (`callersDay`), held to the company's day; an invoice by Issue
+    // on the company's (B42: a draft invoice printed the UTC day it was first
+    // saved).
+    const asIfSentOn = input.kind === "engagement_letter" ? (input.asOf ?? companyDay) : companyDay;
 
     const source = await this.deps.renderSource.describe({
       tenantId: input.tenantId,
@@ -772,6 +772,18 @@ export class FileStoreService {
       issuingEntity: source.issuingEntity ?? null,
       missingBrand,
     };
+  }
+
+  /** The zone a record's day is cut on: its issuing company's, else the
+   *  firm's (0337). A record that is not there gets the firm's; `describe`
+   *  refuses it next. */
+  private async companyZone(tenantId: string, kind: DocumentKind, subjectRef: string): Promise<string> {
+    const [firmZone, issuer, calendars] = await Promise.all([
+      this.deps.timeZones.timeZoneFor(tenantId),
+      this.deps.renderSource.issuerOf({ tenantId, kind, subjectRef }),
+      this.deps.timeZones.companyCalendars(tenantId),
+    ]);
+    return zoneOfCompany(calendars, issuer, firmZone);
   }
 
   /** Whether a document of this kind can be rendered — asked by a screen before

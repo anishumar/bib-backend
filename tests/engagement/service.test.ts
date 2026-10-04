@@ -2828,3 +2828,38 @@ describe("the advance bill and its release (0320)", () => {
     expect(s.asked).toEqual([id]);
   });
 });
+
+// ── A letter is dated on its COMPANY's day (0337) ───────────────────────────
+
+describe("the day on a letter is its company's (0337)", () => {
+  /** 01:00 on 29 September in Delhi; 15:30 on 28 September in New York. */
+  async function usLetter() {
+    const s = setup();
+    s.timeZones.set("Asia/Kolkata");
+    s.clock.set("2026-09-28T19:30:00.000Z");
+    const id = await draft(s);
+    const issuer = (await s.letters.findLetter(TENANT, id))?.issuingEntityPartyId ?? "";
+    s.timeZones.setCompany(issuer, { timeZone: "America/New_York" });
+    await completeTerms(s, id);
+    return { s, id };
+  }
+
+  it("dates a New York company's letter on New York's day", async () => {
+    const { s, id } = await usLetter();
+    expect((await s.service.send(TENANT, id, ACTOR)).issuedOn).toBe("2026-09-28");
+  });
+
+  it("starts its work on New York's day", async () => {
+    const { s, id } = await usLetter();
+    await s.service.send(TENANT, id, ACTOR);
+    const { engagements } = await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya Menon" }, ACTOR);
+    expect(engagements[0]?.engagement.effectiveFrom).toBe("2026-09-28");
+  });
+
+  it("holds a caller's day to the company's, one either side", async () => {
+    const { s, id } = await usLetter();
+    await expect(s.service.send(TENANT, id, ACTOR, { asOf: "2026-09-30" })).rejects.toBeInstanceOf(
+      LetterNotCallersToday,
+    );
+  });
+});

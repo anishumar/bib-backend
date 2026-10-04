@@ -25,6 +25,8 @@ import type {
 } from "../../domain/invoice/model";
 import {
   CREDIT_REASONS,
+  financialYearLabel,
+  financialYearLabelOfNumber,
   INVOICE_STATUSES,
   PAYMENT_METHODS,
 } from "../../domain/invoice/model";
@@ -82,6 +84,12 @@ const InvoiceSchema = z
       description:
         "The financial year whose series the number was drawn from. On a draft it is provisional: " +
         "issuing takes the year of the issue date, in the firm's own financial year (B03).",
+    }),
+    financialYearLabel: z.string().nullable().openapi({
+      description:
+        "The year as the number spells it, read off the number: `2026-27`, or `2027` for a company " +
+        "whose year starts in January (0337). Null on a draft. Show this, never a label worked " +
+        "out from financialYear.",
     }),
     sequenceNumber: z.number().int().nullable(),
     status: z.enum(STATUS_VALUES),
@@ -181,6 +189,11 @@ const InvoiceRecordSchema = z
           "sentence, for the screen to show where Issue is offered. Null when nothing on the record " +
           "stops it; the issue call still decides.",
       }),
+    issuesOn: z.string().nullable().openapi({
+      description:
+        "The day Issue would date this draft today: today on its issuing company's calendar, else " +
+        "the firm's (0337). What a confirmation says before Issue. Null once it is out of draft.",
+    }),
   })
   .openapi("InvoiceRecord");
 
@@ -274,6 +287,10 @@ const SeriesSchema = z
     entityPartyId: z.string().uuid(),
     entityName: z.string(),
     financialYear: z.number().int(),
+    /** The month its year starts in, fixed when the series started (0337). */
+    startMonth: z.number().int().min(1).max(12),
+    /** The year as its numbers spell it: `2026-27`, or `2027` for a January year. */
+    label: z.string(),
     /** `invoice` or `credit_note` — two legal series that must not interleave. */
     documentType: z.string(),
     prefix: z.string(),
@@ -1053,6 +1070,8 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
           entityPartyId: r.entityPartyId,
           entityName: r.entityName,
           financialYear: r.financialYear,
+          startMonth: r.startMonth,
+          label: financialYearLabel(r.financialYear, r.startMonth),
           documentType: r.documentType,
           prefix: r.prefix,
           lastNumber: r.lastNumber,
@@ -1244,6 +1263,7 @@ function toInvoiceBody(i: Invoice, fees: boolean): z.infer<typeof InvoiceSchema>
     entityPartyId: i.entityPartyId,
     number: i.number,
     financialYear: i.financialYear,
+    financialYearLabel: financialYearLabelOfNumber(i.number),
     sequenceNumber: i.sequenceNumber,
     status: i.status,
     currency: i.currency,
@@ -1305,5 +1325,6 @@ function toRecordBody(record: InvoiceView, fees: boolean): z.infer<typeof Invoic
       record.issueBlocked === null
         ? null
         : { reason: record.issueBlocked.reason, message: record.issueBlocked.message },
+    issuesOn: record.issuesOn,
   };
 }

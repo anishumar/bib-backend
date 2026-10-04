@@ -63,6 +63,8 @@ interface RecurringRow {
   engagement_id: string;
   engagement_letter_id: string;
   entity_party_id: string;
+  issuing_entity_party_id: string;
+  year_start_month: number | null;
   effective_from: string;
   recurrence: string;
   sla_days: string | null;
@@ -579,6 +581,20 @@ export class PostgresJobRepository
    * engagement, for the reason the port gives: this runs every hour over
    * every recurring engagement at the firm.
    */
+  async pinYearStarts(tenantId: string, pins: readonly { engagementId: string; month: number }[]): Promise<void> {
+    if (pins.length === 0) return;
+    await withTenant(this.app, tenantId, async (db) => {
+      // Once, never moved (0338): a pinned engagement is left as it is.
+      await db`
+        UPDATE crm.engagement e
+           SET year_start_month = p.month
+          FROM unnest(${db.array(pins.map((x) => x.engagementId))}::uuid[],
+                      ${db.array(pins.map((x) => x.month))}::smallint[]) AS p(id, month)
+         WHERE e.id = p.id AND e.year_start_month IS NULL
+      `;
+    });
+  }
+
   async activeRecurring(tenantId: string, limit: number): Promise<readonly RecurringEngagement[]> {
     return withTenant(this.app, tenantId, async (db) => {
       const rows = await db<RecurringRow[]>`
@@ -586,6 +602,10 @@ export class PostgresJobRepository
           e.id                         AS engagement_id,
           e.engagement_letter_id,
           e.entity_party_id,
+          -- WHOSE CALENDAR its periods are cut on (0337): the letter's company.
+          el.issuing_entity_party_id,
+          -- The year its periods were first cut on (0338), else NULL.
+          e.year_start_month,
           -- A DATE, read as text: the period arithmetic is calendar arithmetic.
           e.effective_from::text       AS effective_from,
           -- The end and the last resume (V2.3), dates too.
@@ -606,6 +626,8 @@ export class PostgresJobRepository
         FROM crm.engagement e
         JOIN crm.engagement_letter_line l
           ON l.id = e.engagement_letter_line_id AND l.tenant_id = e.tenant_id
+        JOIN crm.engagement_letter el
+          ON el.id = e.engagement_letter_id AND el.tenant_id = e.tenant_id
         JOIN config.version pinned
           ON pinned.id = l.service_version_id AND pinned.tenant_id = l.tenant_id
         LEFT JOIN config.version live
@@ -634,6 +656,8 @@ export class PostgresJobRepository
           engagementId: r.engagement_id,
           engagementLetterId: r.engagement_letter_id,
           entityPartyId: r.entity_party_id,
+          issuingEntityPartyId: r.issuing_entity_party_id,
+          yearStartMonth: r.year_start_month,
           deptCode: service?.module ?? null,
           teamCode: service?.group ?? null,
           workflowKey: service?.workflowTemplateKey ?? null,

@@ -1240,13 +1240,14 @@ export class PostgresEngagementRepository implements EngagementRepository {
                -- a brand asset somebody replaced in between.
                firm_signature_version_id = ${firm?.signatureVersionId ?? null},
                -- WHO IT IS FROM AND TO, FROZEN (0334): the firm's company and
-               -- the client as they stand today on the firm's calendar, in the
-               -- write that sends it (the only one the trigger lets set it).
-               printed_parties = (
-                 SELECT jsonb_build_object(
-                          'issuer', crm.print_identity(crm.engagement_letter.issuing_entity_party_id, (now() AT TIME ZONE t.time_zone)::date),
-                          'recipient', crm.print_identity(crm.engagement_letter.party_id, (now() AT TIME ZONE t.time_zone)::date))
-                   FROM tenancy.tenant t WHERE t.id = crm.engagement_letter.tenant_id)
+               -- the client as they stand today on that company's calendar
+               -- (0337), in the write that sends it (the only one the trigger
+               -- lets set it).
+               printed_parties = jsonb_build_object(
+                 'issuer', crm.print_identity(issuing_entity_party_id,
+                   (now() AT TIME ZONE crm.issuer_zone(tenant_id, issuing_entity_party_id))::date),
+                 'recipient', crm.print_identity(party_id,
+                   (now() AT TIME ZONE crm.issuer_zone(tenant_id, issuing_entity_party_id))::date))
          WHERE id = ${letterId} AND status = 'draft'
         RETURNING ${db.unsafe(LETTER_COLUMNS)}
       `;

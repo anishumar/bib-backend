@@ -292,8 +292,9 @@ export class PostgresProposalRepository implements ProposalRepository {
                issuer_le.jurisdiction AS issuer_jurisdiction,
                addressee_phone.value AS addressee_phone,
                -- The day the PDF's running header prints (0084): sent, else
-               -- drafted, as the FIRM's day — the render source's own expression.
-               ${db.unsafe(zoneDayOf("coalesce(p.sent_at, p.created_at)", "firm.time_zone", "issued_on"))}
+               -- drafted, as its COMPANY's day (0337) — the render source's own
+               -- expression.
+               ${db.unsafe(zoneDayOf("coalesce(p.sent_at, p.created_at)", "crm.issuer_zone(p.tenant_id, p.issuing_entity_party_id)", "issued_on"))}
         FROM crm.proposal p
         JOIN core.party party ON party.id = p.party_id
         -- WHICH OF OUR COMPANIES is offering, by name. An inner join: the

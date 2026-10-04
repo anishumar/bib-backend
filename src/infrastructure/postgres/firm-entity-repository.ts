@@ -24,6 +24,7 @@ import type {
   NewFirmEntity,
 } from "../../usecase/document/ports";
 import { insertLegalEntity, insertOrganization } from "./party-repository";
+import { startMonthOfYearEnd } from "../../domain/calendar/model";
 
 interface FirmEntityRow {
   party_id: string;
@@ -38,6 +39,8 @@ interface FirmEntityRow {
   pan: string | null;
   phone: string | null;
   email: string | null;
+  time_zone: string | null;
+  financial_year_end: string | null;
 }
 
 function toRecord(r: FirmEntityRow): FirmEntityRecord {
@@ -54,6 +57,8 @@ function toRecord(r: FirmEntityRow): FirmEntityRecord {
     pan: r.pan,
     phone: r.phone,
     email: r.email,
+    timeZone: r.time_zone,
+    fiscalYearStartMonth: startMonthOfYearEnd(r.financial_year_end),
   };
 }
 
@@ -97,10 +102,11 @@ async function writeNumbers(
     voided.push(...gone.map((g) => ({ id: g.id, type: g.type })));
     if (n.set !== null) {
       await db`
+        -- In force from today on the COMPANY's calendar (0337), the day its
+        -- documents are dated on, so one issued this minute prints it.
         INSERT INTO core.party_identifier (id, tenant_id, party_id, type, value, valid_from)
-        SELECT ${n.set.id}, ${tenantId}, ${partyId}, ${n.set.type}, ${n.set.value},
-               (now() AT TIME ZONE t.time_zone)::date
-          FROM tenancy.tenant t WHERE t.id = ${tenantId}
+        VALUES (${n.set.id}, ${tenantId}, ${partyId}, ${n.set.type}, ${n.set.value},
+                (now() AT TIME ZONE crm.issuer_zone(${tenantId}, ${partyId}))::date)
       `;
       added.push({ id: n.set.id, type: n.set.type });
     }
@@ -135,7 +141,7 @@ export class PostgresFirmEntityRepository implements FirmEntityRepository {
         -- A picker, so a company the firm put away is not offered.
         WHERE p.archived_at IS NULL
         GROUP BY p.id, p.display_name, o.is_firm_self, le.jurisdiction, le.entity_type,
-                 le.registered_address, m.id
+                 le.registered_address, le.time_zone, le.financial_year_end, m.id
         HAVING o.is_firm_self OR m.id IS NOT NULL
         ORDER BY o.is_firm_self DESC, p.display_name
       `;
@@ -148,7 +154,7 @@ export class PostgresFirmEntityRepository implements FirmEntityRepository {
       const [row] = await db<FirmEntityRow[]>`${this.select(db)}
         WHERE p.id = ${partyId}
         GROUP BY p.id, p.display_name, o.is_firm_self, le.jurisdiction, le.entity_type,
-                 le.registered_address, m.id
+                 le.registered_address, le.time_zone, le.financial_year_end, m.id
         HAVING o.is_firm_self OR m.id IS NOT NULL
       `;
       return row ? toRecord(row) : null;
@@ -213,9 +219,12 @@ export class PostgresFirmEntityRepository implements FirmEntityRepository {
           jurisdiction: e.jurisdiction,
           entityType: e.entityType,
           incorporatedOn: null,
-          financialYearEnd: null,
+          financialYearEnd: e.fiscalYearEnd,
           registeredAddress: e.registeredAddress === null ? null : addressBody(e.registeredAddress),
         });
+        if (e.timeZone !== null) {
+          await db`UPDATE core.legal_entity SET time_zone = ${e.timeZone} WHERE party_id = ${e.partyId}`;
+        }
         // MEMBERSHIP FIRST (0313): the company is the firm's whatever the
         // routing says afterwards, so moving its country away later cannot
         // make it vanish.
@@ -279,6 +288,16 @@ export class PostgresFirmEntityRepository implements FirmEntityRepository {
            WHERE party_id = ${partyId}
         `;
       }
+      // ITS OWN YEAR AND CLOCK (0337), after `register` above so the seeded
+      // company's first legal_entity row exists when both come in one edit.
+      if (change.calendar?.timeZone !== undefined) {
+        await db`UPDATE core.legal_entity SET time_zone = ${change.calendar.timeZone} WHERE party_id = ${partyId}`;
+      }
+      if (change.calendar?.fiscalYearEnd !== undefined) {
+        await db`
+          UPDATE core.legal_entity SET financial_year_end = ${change.calendar.fiscalYearEnd} WHERE party_id = ${partyId}
+        `;
+      }
       return { numbers: await writeNumbers(db, tenantId, partyId, change.numbers ?? []) };
       });
     } catch (err) {
@@ -294,6 +313,8 @@ export class PostgresFirmEntityRepository implements FirmEntityRepository {
     return db`
       SELECT p.id AS party_id, p.display_name AS name, o.is_firm_self,
              le.jurisdiction, le.entity_type, le.registered_address,
+             -- Its own year and clock (0337); NULL = the firm's.
+             le.time_zone, le.financial_year_end,
              coalesce(array_agg(fp.client_jurisdiction ORDER BY fp.client_jurisdiction)
                         FILTER (WHERE fp.client_jurisdiction <> '*'), '{}') AS routed,
              coalesce(bool_or(fp.client_jurisdiction = '*'), false) AS is_fallback,

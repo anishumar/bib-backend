@@ -28,12 +28,12 @@ export class PostgresAdvanceBillFacts implements AdvanceBillFacts {
         }[]
       >`
         SELECT l.id, l.party_id, l.issuing_entity_party_id, l.currency,
-               -- The FIRM's day it was signed: a calendar day is the caller's.
-               (l.signed_at AT TIME ZONE t.time_zone)::date::text AS signed_on,
+               -- The day it was signed on its ISSUING COMPANY's calendar (0337),
+               -- else the firm's: the advance bill is a document of that company.
+               (l.signed_at AT TIME ZONE crm.issuer_zone(l.tenant_id, l.issuing_entity_party_id))::date::text AS signed_on,
                l.advance_required, l.advance_amount::text AS advance_amount,
                l.advance_recorded_at IS NOT NULL AS advance_recorded
           FROM crm.engagement_letter l
-          JOIN tenancy.tenant t ON t.id = l.tenant_id
          WHERE l.id = ${letterId} AND l.status = 'signed'
       `;
       if (letter === undefined) return null;
@@ -187,7 +187,10 @@ export class PostgresFinalBillFacts implements FinalBillFacts {
              -- A job with no process written has no template: it waits for
              -- good and is never "done" (0046), which is what Bill it now is for.
              CASE WHEN j.id IS NULL THEN NULL ELSE j.template_version_id IS NOT NULL END AS has_process,
-             CASE WHEN j.status = 'done' THEN (j.finished_at AT TIME ZONE t.time_zone)::date::text END AS done_on,
+             -- The day the job finished on the letter's company's calendar (0337).
+             CASE WHEN j.status = 'done'
+                  THEN (j.finished_at AT TIME ZONE crm.issuer_zone(l.tenant_id, l.issuing_entity_party_id))::date::text
+             END AS done_on,
              EXISTS (SELECT 1 FROM crm.billing_due d
                       WHERE d.tenant_id = e.tenant_id AND d.kind = 'final'
                         AND (d.engagement_id = e.id OR (g.id IS NOT NULL AND d.fee_group_id = g.id))) AS has_final_bill,

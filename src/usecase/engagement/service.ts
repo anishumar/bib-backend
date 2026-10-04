@@ -122,6 +122,7 @@ import {
 } from "../../domain/engagement/errors";
 import { InvalidQuoteCurrency } from "../../domain/proposal/errors";
 import type { ClientStructure } from "../../domain/party/model";
+import { zoneOfCompany } from "../../domain/calendar/model";
 import { dayInZone, isCallersToday } from "../../domain/scheduler/zone";
 import { checkAcceptance } from "../../domain/acceptance/model";
 import type { AcceptanceStatement, NewRecordedAcceptance } from "../../domain/acceptance/model";
@@ -657,7 +658,8 @@ export class EngagementService {
       this.deps.letters.listFeeGroups(tenantId, source.id),
       this.deps.letters.listClauses(tenantId, source.id),
     ]);
-    const today = await this.firmDay(tenantId);
+    // The source letter's company's day (0337): its dates are that company's.
+    const today = await this.companyDay(tenantId, source.issuingEntityPartyId);
     const ahead = (day: string | null): string | undefined =>
       day !== null && day >= today ? day : undefined;
 
@@ -2286,7 +2288,7 @@ export class EngagementService {
     // today, or the firm's. It was Greenwich's, which dated a letter sent at
     // 01:00 in Delhi the day before it went out. Settled before anything is
     // written, so a refused asOf leaves nothing behind.
-    const issuedOn = await this.callersDay(tenantId, options.asOf);
+    const issuedOn = await this.callersDay(tenantId, letter.issuingEntityPartyId, options.asOf);
 
     // WHOM TO ASK, recorded BEFORE the letter is marked sent. The other order
     // could leave a letter `sent` through DocuSign with nobody on record to
@@ -2743,7 +2745,7 @@ export class EngagementService {
     // The signature's day, settled before the provider is asked anything. It
     // is the caller's today, or the firm's: never Greenwich's, which started
     // work signed at 01:00 in Delhi on the day before.
-    const signatureDay = await this.callersDay(input.tenantId, input.asOf);
+    const signatureDay = await this.callersDay(input.tenantId, letter.issuingEntityPartyId, input.asOf);
 
     const [lines, clauses, feeGroups] = await this.requireCompleteTerms(
       input.tenantId,
@@ -2956,8 +2958,8 @@ export class EngagementService {
     if (letter.deletedAt !== null) throw new LetterDeleted(letter.ref);
     if (letter.status !== "sent") throw new InvalidLetterTransition(letter.status, "signed");
 
-    const today = await this.callersDay(input.tenantId, input.asOf);
-    const zone = await this.deps.timeZones.timeZoneFor(input.tenantId);
+    const today = await this.callersDay(input.tenantId, letter.issuingEntityPartyId, input.asOf);
+    const zone = await this.companyZone(input.tenantId, letter.issuingEntityPartyId);
     const evidence = checkAcceptance(input.statement, {
       today,
       sentOn: letter.sentAt === null ? null : dayInZone(letter.sentAt, zone),
@@ -3108,11 +3110,27 @@ export class EngagementService {
    * either side (`isCallersToday`): it says what day it is, it does not choose
    * one. Invoices and proposals answer the same question the same way.
    */
-  private async callersDay(tenantId: string, asOf: string | undefined): Promise<string> {
-    const firmDay = await this.firmDay(tenantId);
-    if (asOf === undefined) return firmDay;
-    if (!isCallersToday(asOf, firmDay)) throw new LetterNotCallersToday(asOf, firmDay);
+  private async callersDay(tenantId: string, entityPartyId: string, asOf: string | undefined): Promise<string> {
+    // THE LETTER'S COMPANY'S DAY (0337), its own zone else the firm's: a New
+    // York company's letter sent at 01:00 in Delhi is dated New York's day.
+    const companyDay = await this.companyDay(tenantId, entityPartyId);
+    if (asOf === undefined) return companyDay;
+    if (!isCallersToday(asOf, companyDay)) throw new LetterNotCallersToday(asOf, companyDay);
     return asOf;
+  }
+
+  /** The zone a company's documents are dated in (0337): its own, else the firm's. */
+  private async companyZone(tenantId: string, entityPartyId: string): Promise<string> {
+    const [firmZone, calendars] = await Promise.all([
+      this.deps.timeZones.timeZoneFor(tenantId),
+      this.deps.timeZones.companyCalendars(tenantId),
+    ]);
+    return zoneOfCompany(calendars, entityPartyId, firmZone);
+  }
+
+  /** Today on a company's calendar (0337). */
+  private async companyDay(tenantId: string, entityPartyId: string): Promise<string> {
+    return dayInZone(this.deps.clock.now().toISOString(), await this.companyZone(tenantId, entityPartyId));
   }
 
   /**

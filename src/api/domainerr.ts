@@ -782,6 +782,7 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_BILLING_FREQUENCY":
       case "INVALID_LINE_JURISDICTION":
       case "INVALID_OOP_ESTIMATE":
+      case "NOT_CALLERS_TODAY":
       case "INVALID_DISCOUNT":
       case "INVALID_FX_RATE":
       case "INVALID_CURRENCY":
@@ -1093,13 +1094,15 @@ export function mapError(err: unknown): MappedError {
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       // T6.18's two about the firm's own companies are things the caller sent:
       // a name, type, country or address that cannot be stored, and a change
-      // naming nothing.
+      // naming nothing. 0337's two: a company's own zone or year that is not one.
       case "INVALID_BLOCK_KIND":
       case "LETTER_ONLY_BLOCK_KIND":
       case "BLANK_BLOCK_BODY":
       case "INVALID_SORT_ORDER":
       case "INVALID_FIRM_ENTITY":
       case "NOTHING_TO_CHANGE_ON_ENTITY":
+      case "INVALID_TIME_ZONE":
+      case "INVALID_FISCAL_YEAR_START":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       // NOT_A_FIRM_ENTITY (T6.18): a party of the firm's, but not one of its own
       // companies — from the Our companies route's side, not there.
@@ -1118,8 +1121,11 @@ export function mapError(err: unknown): MappedError {
       // (0087) is the same answer about a draft deleted as a mistake. T6.18's
       // two are the firm's own configuration answering: a country another of
       // its companies already issues for, and a company that does not move.
+      // COMPANY_NOT_REGISTERED (0337): a company's year and clock live beside
+      // a registration not recorded yet.
       case "COUNTRY_ALREADY_SERVED":
       case "JURISDICTION_FIXED":
+      case "COMPANY_NOT_REGISTERED":
       case "NO_ISSUING_ENTITY":
       case "BLOCKS_ALREADY_SEEDED":
       case "DOCUMENT_BLOCK_FROZEN":

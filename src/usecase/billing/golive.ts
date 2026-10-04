@@ -7,12 +7,16 @@ import type { Actor } from "../../domain/ledger/model";
 import type { EventSink } from "../ledger/ports";
 import { periodsFrom, recurrenceOfService } from "../../domain/scheduler/model";
 import { goesLiveFrom, scheduleFor } from "../../domain/billing/model";
-import type { AutoBillingSetting, BillingSchedules, FiscalYearSource } from "./ports";
+import { yearStartOfCompany } from "../../domain/calendar/model";
+import type { AutoBillingSetting, BillingSchedules, FirmTimeZone, FiscalYearSource } from "./ports";
 
 export interface GoLiveDeps {
   readonly schedules: BillingSchedules;
   readonly setting: AutoBillingSetting;
   readonly fiscalYears: FiscalYearSource;
+  /** The companies that keep their own year (0337): a letter's schedule is
+   *  cut on its issuing company's. */
+  readonly calendars: Pick<FirmTimeZone, "companyCalendars">;
   readonly events: EventSink;
 }
 
@@ -43,7 +47,8 @@ export class GoLiveScheduler {
     if (input.engagementIds.length === 0 || !(await this.deps.setting.isOn(input.tenantId))) {
       return { scheduled: [] };
     }
-    const fiscalYear = await this.deps.fiscalYears.fiscalYearStartMonth(input.tenantId);
+    const firmYear = await this.deps.fiscalYears.fiscalYearStartMonth(input.tenantId);
+    const calendars = await this.deps.calendars.companyCalendars(input.tenantId);
     const scheduled: string[] = [];
     const groupsDone = new Set<string>();
     for (const engagementId of input.engagementIds) {
@@ -51,6 +56,9 @@ export class GoLiveScheduler {
       if (current === null || current.billingFrom !== null) continue;
       if (current.feeGroup !== null && groupsDone.has(current.feeGroup.id)) continue;
       const recurrence = recurrenceOfService(current.billingFrequency);
+      // Its pinned year when it has one (0338), else its company's, else the firm's.
+      const fiscalYear =
+        current.yearStartMonth ?? yearStartOfCompany(calendars, current.issuingEntityPartyId, firmYear);
       if (recurrence === null || (recurrence !== "monthly" && fiscalYear === null)) continue;
       const [period] = periodsFrom(
         goesLiveFrom(current.effectiveFrom, input.liveOn),
@@ -65,7 +73,7 @@ export class GoLiveScheduler {
           ? [engagementId]
           : await this.deps.schedules.groupMembers(input.tenantId, current.feeGroup.id);
       if (current.feeGroup !== null) groupsDone.add(current.feeGroup.id);
-      await this.deps.schedules.set(input.tenantId, ids, billingFrom, firstInvoiceOn);
+      await this.deps.schedules.set(input.tenantId, ids, billingFrom, firstInvoiceOn, fiscalYear);
       for (const id of ids) {
         await this.deps.events.recordEvent({
           tenantId: input.tenantId,

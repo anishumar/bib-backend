@@ -19,6 +19,7 @@ export class ProposalError extends Error {
 }
 
 export type ProposalErrorCode =
+  | "NOT_CALLERS_TODAY"
   | "PROPOSAL_DELETED"
   | "PROPOSAL_NOT_DELETABLE"
   | "PROPOSAL_NOT_COPYABLE"
@@ -348,6 +349,19 @@ export class InvalidDecision extends ProposalError {
       "INVALID_DECISION",
       `${JSON.stringify(decision)} is not a decision a recipient can give. Valid: accepted, ` +
         `rejected. Expiry is something that happens to a proposal, not something anyone decides.`,
+    );
+  }
+}
+
+/** `asOf` is the recorder's TODAY, not a date to choose (see `isCallersToday`),
+ *  held to the issuing company's day or one either side (0337). */
+export class ProposalNotCallersToday extends ProposalError {
+  constructor(given: string, companyDay: string) {
+    super(
+      "NOT_CALLERS_TODAY",
+      `The day sent as asOf, ${JSON.stringify(given)}, cannot be today where you are: the issuing ` +
+        `company's day is ${companyDay}, and anywhere in the world today is that day or the one ` +
+        `either side.`,
     );
   }
 }

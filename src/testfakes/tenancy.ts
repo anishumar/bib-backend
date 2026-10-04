@@ -26,6 +26,7 @@ import {
   FakeObligationTenants,
   FakeWorkItemRaiser,
 } from "./obligation";
+import type { CompanyCalendar, CompanyCalendars } from "../domain/calendar/model";
 import type { Membership, Tenant, UserAccount } from "../domain/tenancy/model";
 import type {
   ObligationRuleSeeder,
@@ -417,13 +418,26 @@ export class FakeIssuingEntitySeeder implements IssuingEntitySeeder {
  * that does not care about zones behaves exactly as it did before 0071.
  */
 export class FakeFirmTimeZone {
+  /** The companies that keep their own zone or year (0337); none by default,
+   *  so every company is on the firm's exactly as before. */
+  private readonly companies = new Map<string, CompanyCalendar>();
+
   constructor(private zone = "UTC") {}
 
   set(zone: string): void {
     this.zone = zone;
   }
 
+  /** Give one company its own zone and/or year; null fields are the firm's. */
+  setCompany(partyId: string, calendar: Partial<CompanyCalendar>): void {
+    this.companies.set(partyId, { timeZone: null, fiscalYearStartMonth: null, ...calendar });
+  }
+
   timeZoneFor(): Promise<string> {
     return Promise.resolve(this.zone);
+  }
+
+  companyCalendars(): Promise<CompanyCalendars> {
+    return Promise.resolve(new Map(this.companies));
   }
 }

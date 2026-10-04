@@ -1267,6 +1267,18 @@ const recordAcceptanceRoute = createRoute({
     "the recorder is the session's user.",
   request: {
     params: z.object({ proposalId: z.string().uuid() }),
+    query: z.object({
+      asOf: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .optional()
+        .openapi({
+          description:
+            "Today where the recorder is (a browser sends its local date): the latest day the " +
+            "client can have accepted on. Defaults to the issuing company's day (0337), and must " +
+            "be that day or one either side (NOT_CALLERS_TODAY).",
+        }),
+    }),
     body: { content: { "application/json": { schema: RecordAcceptanceRequest } }, required: true },
   },
   responses: {
@@ -1864,6 +1876,7 @@ export function registerProposalRoutes(app: OpenAPIHono<AppEnv>, deps: ProposalD
     if (!s.ok) return c.json(s.deny, s.status);
     const principal = c.get("principal");
     const { proposalId } = c.req.valid("param");
+    const { asOf } = c.req.valid("query");
     const body = c.req.valid("json");
     // The recorder is the SESSION's user, never a field in the body.
     const accepted = await deps.service.recordAcceptance(
@@ -1872,6 +1885,7 @@ export function registerProposalRoutes(app: OpenAPIHono<AppEnv>, deps: ProposalD
       body,
       principal?.userId ?? "",
       s.actor,
+      asOf,
     );
     return c.json(toProposalBody(accepted, seesFees(principal)), 200);
   });

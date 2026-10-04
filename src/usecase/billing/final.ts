@@ -15,6 +15,7 @@ import type { Actor } from "../../domain/ledger/model";
 import { SYSTEM_ACTOR } from "../../domain/ledger/model";
 import type { EventSink } from "../ledger/ports";
 import { dayInZone } from "../../domain/scheduler/zone";
+import { zoneOfCompany } from "../../domain/calendar/model";
 import { finalBillReady, mayBillNow } from "../../domain/billing/advance";
 import { AutoBillingOff, BillingEngagementNotFound, BillNowRefused } from "../../domain/billing/errors";
 import { billingManagerFor, type ManagerCache } from "./manager";
@@ -95,7 +96,8 @@ export class FinalBiller {
     if (subject === undefined) throw new BillingEngagementNotFound(input.engagementId);
     const refusal = billNowRefusal(subject);
     if (refusal !== null) throw new BillNowRefused(refusal);
-    const today = await this.today(input.tenantId);
+    // Dated on the issuing company's day (0337).
+    const today = await this.today(input.tenantId, subject.issuingEntityPartyId);
     const ids: string[] = [];
     if ((await this.write(input.tenantId, [subject], actor, today, ids)) === 0) {
       throw new BillNowRefused("This service's final bill is already on the list.");
@@ -136,12 +138,15 @@ export class FinalBiller {
   ): Promise<number> {
     const fresh = subjects.filter((s) => !s.hasFinalBill);
     if (fresh.length === 0) return 0;
-    const firmToday = today ?? (await this.today(tenantId));
+    // Whose desk the bill lands on is staff routing: the FIRM's day.
+    const firmToday = await this.today(tenantId, null);
     const cache: ManagerCache = new Map();
     const planned: NewBillingDue[] = [];
     for (const s of fresh) {
       const doneDays = s.engagements.map((e) => e.job?.doneOn ?? null).filter((d): d is string => d !== null);
-      const billOn = today ?? (doneDays.length === 0 ? firmToday : doneDays.sort().at(-1) ?? firmToday);
+      // A bill with no finished job is dated on its COMPANY's day (0337).
+      const companyToday = today ?? (await this.today(tenantId, s.issuingEntityPartyId));
+      const billOn = today ?? (doneDays.length === 0 ? companyToday : doneDays.sort().at(-1) ?? companyToday);
       const manager = await billingManagerFor(
         this.deps.managers,
         { tenantId, partyId: s.partyId, deptCodes: s.engagements.map((e) => e.deptCode), today: firmToday },
@@ -194,8 +199,13 @@ export class FinalBiller {
     return inserted.size;
   }
 
-  private async today(tenantId: string): Promise<string> {
-    return dayInZone(this.deps.clock.now().toISOString(), await this.deps.timeZones.timeZoneFor(tenantId));
+  /** Today on a company's calendar (0337), or the firm's for `null`. */
+  private async today(tenantId: string, entityPartyId: string | null): Promise<string> {
+    const [firmZone, calendars] = await Promise.all([
+      this.deps.timeZones.timeZoneFor(tenantId),
+      this.deps.timeZones.companyCalendars(tenantId),
+    ]);
+    return dayInZone(this.deps.clock.now().toISOString(), zoneOfCompany(calendars, entityPartyId, firmZone));
   }
 }
 

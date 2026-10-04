@@ -227,8 +227,8 @@ export class PostgresDocumentStoreRepository implements DocumentStoreRepository 
       //     that was still a draft when it was drawn: the record is a draft
       //     now, or went out after the copy was made. That covers the copies
       //     filed before 2026-09-29, all `rendered`. An invoice has a DAY of
-      //     issue and no instant, so a copy drawn on an earlier day (the
-      //     firm's calendar) counts.
+      //     issue and no instant, so a copy drawn on an earlier day (its
+      //     company's calendar, the one it was issued on, 0337) counts.
       // Taking a document off the portal is never refused.
       if (input.visible) {
         const [draft] = await db<{ is_draft: boolean }[]>`
@@ -242,10 +242,10 @@ export class PostgresDocumentStoreRepository implements DocumentStoreRepository 
                  OR (d.origin = 'generated' AND (
                       (l.subject_kind = 'invoice' AND EXISTS (
                          SELECT 1 FROM crm.invoice i
-                           JOIN tenancy.tenant firm ON firm.id = i.tenant_id
                           WHERE i.id = l.subject_ref
                             AND (i.issued_on IS NULL
-                                 OR (d.created_at AT TIME ZONE firm.time_zone)::date < i.issued_on)))
+                                 OR (d.created_at AT TIME ZONE crm.issuer_zone(i.tenant_id, i.entity_party_id))::date
+                                    < i.issued_on)))
                    OR (l.subject_kind = 'engagement_letter' AND EXISTS (
                          SELECT 1 FROM crm.engagement_letter el
                           WHERE el.id = l.subject_ref

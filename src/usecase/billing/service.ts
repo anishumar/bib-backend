@@ -27,6 +27,7 @@ import type { Clock } from "../../platform/clock";
 import { SYSTEM_ACTOR } from "../../domain/ledger/model";
 import type { EventSink } from "../ledger/ports";
 import { dayInZone } from "../../domain/scheduler/zone";
+import { yearStartOfCompany, zoneOfCompany } from "../../domain/calendar/model";
 import { monthsPerPeriod, periodsFrom, recurrenceOfService } from "../../domain/scheduler/model";
 import { billingDues, serviceWindowOf } from "../../domain/billing/model";
 import { billingManagerFor, type ManagerCache } from "./manager";
@@ -96,8 +97,12 @@ export class BillingService {
   }
 
   async sweepTenant(tenantId: string): Promise<BillingSweepReport> {
-    const today = dayInZone(this.deps.clock.now().toISOString(), await this.deps.timeZones.timeZoneFor(tenantId));
-    const fiscalYearStartMonth = await this.deps.fiscalYears.fiscalYearStartMonth(tenantId);
+    const now = this.deps.clock.now().toISOString();
+    const firmZone = await this.deps.timeZones.timeZoneFor(tenantId);
+    // Whose desk a bill lands on is staff routing: the FIRM's day.
+    const firmToday = dayInZone(now, firmZone);
+    const firmYearStart = await this.deps.fiscalYears.fiscalYearStartMonth(tenantId);
+    const calendars = await this.deps.timeZones.companyCalendars(tenantId);
     const managers: ManagerCache = new Map();
 
     const planned: NewBillingDue[] = [];
@@ -105,6 +110,14 @@ export class BillingService {
     for (const subject of await this.deps.dues.subjectsFor(tenantId)) {
       const recurrence = recurrenceOfService(subject.billingFrequency);
       if (recurrence === null) continue;
+      // THE ISSUING COMPANY'S CALENDAR (0337): its periods are cut on its own
+      // year and fall due on its own day, else the firm's. A New York
+      // company's October is not billed while it is 31 October in New York.
+      // An engagement already cut keeps the year it was cut on (0338): a
+      // company's year change does not re-cut months already billed.
+      const fiscalYearStartMonth =
+        subject.yearStartMonth ?? yearStartOfCompany(calendars, subject.issuingEntityPartyId, firmYearStart);
+      const today = dayInZone(now, zoneOfCompany(calendars, subject.issuingEntityPartyId, firmZone));
       if (recurrence !== "monthly" && fiscalYearStartMonth === null) {
         awaitingFiscalYear += 1;
         continue;
@@ -130,7 +143,7 @@ export class BillingService {
         .slice(0, MAX_PERIODS_PER_SUBJECT);
       if (dues.length === 0) continue;
 
-      const manager = await this.managerFor(tenantId, subject, today, managers);
+      const manager = await this.managerFor(tenantId, subject, firmToday, managers);
       for (const due of dues) {
         planned.push({
           id: this.deps.ids.newId(),

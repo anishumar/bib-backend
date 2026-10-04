@@ -314,6 +314,14 @@ export class FakeActivationFeed implements ActivationFeed {
 export class FakeRecurringFeed implements RecurringEngagementFeed {
   readonly byTenant = new Map<string, Omit<RecurringEngagement, "linkedPeriods">[]>();
   jobs: FakeJobRepo | null = null;
+  /** Engagement id -> the year start pinned on it (0337), as the adapter's
+   *  `crm.engagement.year_start_month`: written once, never moved. */
+  readonly pins = new Map<string, number>();
+
+  pinYearStarts(_tenantId: string, pins: readonly { engagementId: string; month: number }[]): Promise<void> {
+    for (const p of pins) if (!this.pins.has(p.engagementId)) this.pins.set(p.engagementId, p.month);
+    return Promise.resolve();
+  }
 
   add(tenantId: string, row: Omit<RecurringEngagement, "linkedPeriods">): void {
     const list = this.byTenant.get(tenantId) ?? [];
@@ -328,6 +336,7 @@ export class FakeRecurringFeed implements RecurringEngagementFeed {
       .slice(0, limit)
       .map((r) => ({
         ...r,
+        yearStartMonth: r.yearStartMonth ?? this.pins.get(r.engagementId) ?? null,
         linkedPeriods: (this.jobs?.linksFor(tenantId, r.engagementId) ?? [])
           .map((l) => l.periodStart)
           .filter((p): p is string => p !== null),

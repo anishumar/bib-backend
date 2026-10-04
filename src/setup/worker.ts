@@ -744,6 +744,7 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
       schedules: new PostgresBillingSchedules(pools.app),
       setting: new PostgresAutoBillingSetting(pools.app),
       fiscalYears: configRepository,
+      calendars: new PostgresFirmTimeZone(pools.app),
       events: ledger,
     }),
     letters: new PostgresEngagementRepository(pools.app),

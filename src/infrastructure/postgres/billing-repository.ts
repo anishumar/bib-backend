@@ -39,6 +39,7 @@ interface SubjectRow {
   billing_frequency: string;
   billing_from: string;
   first_invoice_on: string;
+  year_start_month: number | null;
   full_amount: string | null;
   status: string;
   effective_from: string;
@@ -62,6 +63,7 @@ export class PostgresBillingDueWriter implements BillingDueWriter {
                coalesce(g.billing_frequency, ll.billing_frequency) AS billing_frequency,
                e.billing_from::text     AS billing_from,
                e.first_invoice_on::text AS first_invoice_on,
+               e.year_start_month,
                CASE
                  WHEN g.id IS NOT NULL THEN g.amount::text
                  WHEN ll.unit_amount IS NULL THEN NULL
@@ -131,6 +133,7 @@ export class PostgresBillingDueWriter implements BillingDueWriter {
             ...seen,
             billingFrom: r.billing_from < seen.billingFrom ? r.billing_from : seen.billingFrom,
             firstInvoiceOn: r.first_invoice_on < seen.firstInvoiceOn ? r.first_invoice_on : seen.firstInvoiceOn,
+            yearStartMonth: seen.yearStartMonth ?? r.year_start_month,
             engagements: [...seen.engagements, engagement],
           });
           continue;
@@ -144,6 +147,7 @@ export class PostgresBillingDueWriter implements BillingDueWriter {
           billingFrequency: r.billing_frequency,
           billingFrom: r.billing_from,
           firstInvoiceOn: r.first_invoice_on,
+          yearStartMonth: r.year_start_month,
           fullAmount: r.full_amount,
           engagements: [engagement],
           duePeriodStarts: starts.get(key) ?? [],

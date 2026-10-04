@@ -159,3 +159,45 @@ describe("pausing and resuming (V2.3)", () => {
     ).rejects.toMatchObject({ code: "ENGAGEMENT_ENDED" });
   });
 });
+
+// ── An engagement's days are its letter's company's (0337) ──────────────────
+
+describe("an engagement pauses and resumes on its company's day (0337)", () => {
+  const US_CO = "00000000-0000-4000-8000-0000000000f9";
+  /** 02:00 UTC on 1 November: 22:00 on 31 October in New York, 07:30 on
+   *  1 November in India. */
+  function usWorld(over: Partial<Engagement> = {}) {
+    const lifecycle = new FakeEngagementLifecycle();
+    const row = engagement(over);
+    lifecycle.rows.push(row);
+    lifecycle.issuers.set(row.engagementLetterId, US_CO);
+    const timeZones = new FakeFirmTimeZone("Asia/Kolkata");
+    timeZones.setCompany(US_CO, { timeZone: "America/New_York" });
+    const service = new EngagementLifecycleService({
+      lifecycle,
+      timeZones,
+      clock: new FakeClock(new Date("2026-11-01T02:00:00.000Z")),
+      events: new RecordingEventSink(),
+    });
+    return { lifecycle, service };
+  }
+
+  it("records a pause on New York's day", async () => {
+    const w = usWorld();
+    const paused = await w.service.pause({ tenantId: FIRM, engagementId: ENGAGEMENT }, PARTNER);
+    expect(paused.engagement.pausedOn).toBe("2026-10-31");
+  });
+
+  it("records a resume on New York's day", async () => {
+    const w = usWorld({ status: "paused", pausedOn: "2026-10-01", pausedAt: "2026-10-01T06:00:00.000Z" });
+    const resumed = await w.service.resume({ tenantId: FIRM, engagementId: ENGAGEMENT }, PARTNER);
+    expect(resumed.engagement.resumedOn).toBe("2026-10-31");
+  });
+
+  it("stays on the firm's day when the letter's company keeps none", async () => {
+    const w = usWorld();
+    w.lifecycle.issuers.clear();
+    const paused = await w.service.pause({ tenantId: FIRM, engagementId: ENGAGEMENT }, PARTNER);
+    expect(paused.engagement.pausedOn).toBe("2026-11-01");
+  });
+});

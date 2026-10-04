@@ -5,6 +5,7 @@ import type { BillingTiming, ManagerHow, SpocWithManager } from "../../domain/bi
 import type { AdvancePolicy, AdvanceStage, BillKind } from "../../domain/billing/advance";
 import type { Actor } from "../../domain/ledger/model";
 import type { Invoice } from "../../domain/invoice/model";
+import type { CompanyCalendars } from "../../domain/calendar/model";
 import type { NewInvoice, NewInvoiceLine } from "../invoice/ports";
 
 /**
@@ -28,6 +29,9 @@ export interface BillingSubject {
   readonly billingFrequency: string;
   readonly billingFrom: string;
   readonly firstInvoiceOn: string;
+  /** The year start its periods were first cut on (0338), pinned and never
+   *  moved; absent or null = not cut yet: the company's year, else the firm's. */
+  readonly yearStartMonth?: number | null;
   /** The letter's amount for ONE WHOLE period, as a decimal string, or null
    *  when the letter names no price ("as mutually agreed"). */
   readonly fullAmount: string | null;
@@ -106,9 +110,12 @@ export interface FiscalYearSource {
   fiscalYearStartMonth(tenantId: string): Promise<number | null>;
 }
 
-/** Which calendar "today" is cut on, for a sweep with no caller (T6.14). */
+/** Which calendar "today" is cut on, for a sweep with no caller (T6.14), and
+ *  the companies that keep their own zone and year (0337): a company's bill
+ *  dates and periods are cut on ITS calendar. */
 export interface FirmTimeZone {
   timeZoneFor(tenantId: string): Promise<string>;
+  companyCalendars(tenantId: string): Promise<CompanyCalendars>;
 }
 
 // ── The desk: what a person does with a due ────────────────────────────────
@@ -610,6 +617,8 @@ export interface FinalBillFacts {
 /** One engagement's billing schedule, and what a screen needs to set it. */
 export interface ScheduleRecord {
   readonly engagementId: string;
+  /** The letter's issuing company (0337): its year cuts the periods. */
+  readonly issuingEntityPartyId: string;
   readonly party: { readonly id: string; readonly displayName: string };
   readonly entityName: string;
   readonly serviceName: string;
@@ -626,6 +635,9 @@ export interface ScheduleRecord {
    *  line, else the line's. Null = the letter said nothing (arrears). */
   readonly billingTiming: BillingTiming | null;
   readonly billingOn: string | null;
+  /** The year start its periods were first cut on (0338), pinned and never
+   *  moved; absent or null = not cut yet: the company's year, else the firm's. */
+  readonly yearStartMonth?: number | null;
 }
 
 export interface BillingSchedules {
@@ -634,11 +646,14 @@ export interface BillingSchedules {
   find(tenantId: string, engagementId: string): Promise<ScheduleRecord | null>;
   /** Every engagement a fee group prices. */
   groupMembers(tenantId: string, feeGroupId: string): Promise<readonly string[]>;
+  /** `yearStartMonth` pins the year the schedule was cut on (0338) where
+   *  none is pinned yet; a pinned one is never moved. */
   set(
     tenantId: string,
     engagementIds: readonly string[],
     billingFrom: string | null,
     firstInvoiceOn: string | null,
+    yearStartMonth: number | null,
   ): Promise<void>;
 }
 

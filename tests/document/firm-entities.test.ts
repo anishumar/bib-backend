@@ -19,6 +19,9 @@ import {
   JurisdictionFixed,
   NotAFirmEntity,
   NothingToChangeOnEntity,
+  InvalidCompanyTimeZone,
+  InvalidCompanyYearStart,
+  CompanyNotRegistered,
 } from "../../src/domain/document/errors";
 
 const TENANT = "00000000-0000-0000-0000-0000000000aa";
@@ -272,5 +275,101 @@ describe("a company's identity on paper (audit 2026-10-03: B12 / CA#1, CA#18)", 
     await expect(f.service.edit({ tenantId: TENANT, partyId: firm.partyId, pan: "ABCDE1234F" }, ACTOR)).rejects.toThrow(
       /already recorded for another/,
     );
+  });
+});
+
+describe("a company's own financial year and time zone (0337)", () => {
+  async function gulf() {
+    const f = makeFirmEntityFakes();
+    const created = await f.service.create(
+      { tenantId: TENANT, name: "EPB Gulf FZE", jurisdiction: "AE", entityType: "FZE" },
+      ACTOR,
+    );
+    return { f, id: created.partyId };
+  }
+
+  it("starts on the firm's: neither is set on a new company that sends neither", async () => {
+    const { f, id } = await gulf();
+    const found = await f.firmEntities.find(TENANT, id);
+    expect(found).toMatchObject({ timeZone: null, fiscalYearStartMonth: null });
+  });
+
+  it("is set at creation when sent", async () => {
+    const f = makeFirmEntityFakes();
+    const created = await f.service.create(
+      {
+        tenantId: TENANT,
+        name: "EPB Gulf FZE",
+        jurisdiction: "AE",
+        entityType: "FZE",
+        timeZone: "Asia/Dubai",
+        fiscalYearStartMonth: 1,
+      },
+      ACTOR,
+    );
+    expect(created).toMatchObject({ timeZone: "Asia/Dubai", fiscalYearStartMonth: 1 });
+  });
+
+  it("is changed by an edit, and the event names the fields but never the values", async () => {
+    const { f, id } = await gulf();
+    const after = await f.service.edit(
+      { tenantId: TENANT, partyId: id, timeZone: "Asia/Dubai", fiscalYearStartMonth: 1 },
+      ACTOR,
+    );
+    expect(after).toMatchObject({ timeZone: "Asia/Dubai", fiscalYearStartMonth: 1 });
+    const edited = f.events.recorded.filter((e) => e.verb === "firm_entity.edited").at(-1);
+    expect(edited?.payload).toEqual({ fields: ["timeZone", "fiscalYearStart"] });
+    expect(JSON.stringify(edited?.payload)).not.toContain("Dubai");
+  });
+
+  it("goes back to the firm's when cleared", async () => {
+    const { f, id } = await gulf();
+    await f.service.edit({ tenantId: TENANT, partyId: id, timeZone: "Asia/Dubai", fiscalYearStartMonth: 1 }, ACTOR);
+    const after = await f.service.edit(
+      { tenantId: TENANT, partyId: id, timeZone: null, fiscalYearStartMonth: null },
+      ACTOR,
+    );
+    expect(after).toMatchObject({ timeZone: null, fiscalYearStartMonth: null });
+  });
+
+  it("refuses an offset or an invented zone, in the firm card's words", async () => {
+    const { f, id } = await gulf();
+    for (const bad of ["+04:00", "Mars/Olympus", ""]) {
+      await expect(f.service.edit({ tenantId: TENANT, partyId: id, timeZone: bad }, ACTOR)).rejects.toBeInstanceOf(
+        InvalidCompanyTimeZone,
+      );
+    }
+  });
+
+  it("refuses a month that is not one", async () => {
+    const { f, id } = await gulf();
+    for (const bad of [0, 13, 4.5]) {
+      await expect(
+        f.service.edit({ tenantId: TENANT, partyId: id, fiscalYearStartMonth: bad }, ACTOR),
+      ).rejects.toBeInstanceOf(InvalidCompanyYearStart);
+    }
+  });
+
+  it("needs the company registered first: the firm's own seeded one has no country yet", async () => {
+    const f = makeFirmEntityFakes();
+    await expect(
+      f.service.edit({ tenantId: TENANT, partyId: SEEDED_FIRM_ENTITY, timeZone: "Asia/Kolkata" }, ACTOR),
+    ).rejects.toBeInstanceOf(CompanyNotRegistered);
+  });
+
+  it("may be set in the same edit that records where it is registered", async () => {
+    const f = makeFirmEntityFakes();
+    const after = await f.service.edit(
+      {
+        tenantId: TENANT,
+        partyId: SEEDED_FIRM_ENTITY,
+        jurisdiction: "IN",
+        entityType: "Private Limited",
+        timeZone: "Asia/Kolkata",
+        fiscalYearStartMonth: 4,
+      },
+      ACTOR,
+    );
+    expect(after).toMatchObject({ jurisdiction: "IN", timeZone: "Asia/Kolkata", fiscalYearStartMonth: 4 });
   });
 });
