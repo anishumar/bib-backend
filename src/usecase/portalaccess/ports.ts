@@ -118,3 +118,19 @@ export interface PortalClientRow {
 export interface PortalClientDirectory {
   findParty(tenantId: string, partyId: string): Promise<PortalClientRow | null>;
 }
+
+/** One of the OTHER companies in a client's group (Q064). */
+export interface PortalGroupCompany {
+  readonly id: string;
+  readonly displayName: string;
+}
+
+/**
+ * A client's group, as portal access reads it (Q064): every company joined to
+ * it by ownership, both ways and to any depth, in force on the day, never a
+ * person, the firm's own company, an archived one or another tenant's.
+ * Satisfied by `PostgresPortalGroup`.
+ */
+export interface PortalGroupDirectory {
+  groupOf(tenantId: string, clientPartyId: string, onDay: string): Promise<readonly PortalGroupCompany[]>;
+}

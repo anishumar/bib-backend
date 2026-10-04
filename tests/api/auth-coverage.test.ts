@@ -131,6 +131,7 @@ import {
 import {
   FakePortalAccessRepo,
   FakePortalClients,
+  FakePortalGroup,
   FakePortalMemberships,
 } from "../../src/testfakes/portalaccess";
 import { FakePortalHomeRepo, FakePortalScope } from "../../src/testfakes/portalhome";
@@ -526,6 +527,7 @@ function deps(): RouterDeps {
         grants: new FakePortalAccessRepo(),
         memberships: new FakePortalMemberships(),
         clients: new FakePortalClients(),
+        groups: new FakePortalGroup(),
         ids: new FakeIds(),
         clock: new FakeClock(new Date("2026-09-01T00:00:00.000Z")),
         timeZones: new FakeFirmTimeZone(),
@@ -573,7 +575,10 @@ function deps(): RouterDeps {
           findMembership: () =>
             Promise.resolve({ id: "m", userId: "u", audience: "CLIENT_PORTAL", isActive: true }),
         },
-        access: { grant: () => Promise.resolve({ id: "g" }) },
+        access: {
+          grant: () => Promise.resolve({ id: "g" }),
+          grantGroupOf: () => Promise.resolve({ granted: [] }),
+        },
         firms: { tenantNames: () => Promise.resolve(new Map()) },
         events: new RecordingEventSink(),
       }),
@@ -724,6 +729,7 @@ function deps(): RouterDeps {
         grants: new FakePortalAccessRepo(),
         memberships: new FakePortalMemberships(),
         clients: new FakePortalClients(),
+        groups: new FakePortalGroup(),
         ids: new FakeIds(),
         clock: new FakeClock(new Date("2026-09-01T00:00:00.000Z")),
         timeZones: new FakeFirmTimeZone(),

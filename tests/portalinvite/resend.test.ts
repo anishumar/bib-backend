@@ -55,6 +55,10 @@ class Recorder {
   invitePortalContact(): Promise<string> {
     return Promise.reject(new Error("resend must go through resendPortalInvite"));
   }
+  grantGroupOf(): Promise<{ readonly granted: readonly never[] }> {
+    return Promise.resolve({ granted: [] });
+  }
+
   grant(): Promise<{ id: string }> {
     return Promise.resolve({ id: "g" });
   }

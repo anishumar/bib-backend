@@ -106,6 +106,7 @@ import { PostgresReadinessFacts } from "../infrastructure/postgres/readiness-fac
 import { ReadinessService } from "../usecase/readiness/service";
 import { ClientMailService } from "../usecase/clientmail/service";
 import { PostgresClientSenders } from "../infrastructure/postgres/client-senders";
+import { PostgresPortalGroup } from "../infrastructure/postgres/portal-group";
 import { InvoiceService } from "../usecase/invoice/service";
 import { BillingDeskService } from "../usecase/billing/desk";
 import { WorkBillingService } from "../usecase/billing/work-vs-billing";
@@ -981,6 +982,8 @@ export function wire(cfg: Config, log: Logger): Wired {
     grants: portalAccessRepository,
     memberships: portalAccessRepository,
     clients: portalAccessRepository,
+    // Q064: a client's whole group, for "also give access to the group".
+    groups: new PostgresPortalGroup(pools.app),
     ids: systemIds,
     clock: systemClock,
     events: ledger,

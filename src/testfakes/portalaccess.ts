@@ -14,6 +14,8 @@ import type {
   PortalAccessRepository,
   PortalClientDirectory,
   PortalClientRow,
+  PortalGroupCompany,
+  PortalGroupDirectory,
   PortalMembershipDirectory,
   PortalMembershipRow,
 } from "../usecase/portalaccess/ports";
@@ -138,5 +140,14 @@ export class FakePortalClients implements PortalClientDirectory {
 
   findParty(_tenantId: string, partyId: string): Promise<PortalClientRow | null> {
     return Promise.resolve(this.rows.get(partyId) ?? null);
+  }
+}
+
+/** A client's group (Q064): set per client by a test; nobody's by default. */
+export class FakePortalGroup implements PortalGroupDirectory {
+  readonly groups = new Map<string, PortalGroupCompany[]>();
+
+  groupOf(_tenantId: string, clientPartyId: string): Promise<readonly PortalGroupCompany[]> {
+    return Promise.resolve(this.groups.get(clientPartyId) ?? []);
   }
 }

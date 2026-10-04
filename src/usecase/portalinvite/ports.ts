@@ -103,6 +103,18 @@ export interface PortalContactAccess {
     },
     actor: Actor,
   ): Promise<{ readonly id: string }>;
+
+  /** The rest of the client's group, one grant per company (Q064). */
+  grantGroupOf(
+    input: {
+      readonly tenantId: string;
+      readonly membershipId: string;
+      readonly clientPartyId: string;
+      readonly validFrom?: string | undefined;
+      readonly grantedBy: string;
+    },
+    actor: Actor,
+  ): Promise<{ readonly granted: readonly { readonly id: string; readonly clientPartyId: string; readonly clientName: string }[] }>;
 }
 
 /** The firm's zone, so the letter's expiry reads on its clock (CA#50).

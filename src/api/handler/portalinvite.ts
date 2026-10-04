@@ -41,8 +41,13 @@ const InvitePortalContactRequest = z
       description:
         "The ONE company this contact may read. Required, because an invite with no grant is " +
         "a login that opens onto nothing — and the contact cannot tell that from a broken " +
-        "product. Somebody who should see four of a group's companies is granted the other " +
-        "three afterwards, one visible decision each.",
+        "product.",
+    }),
+    alsoGroup: z.boolean().optional().openapi({
+      description:
+        "Q064: also grant the rest of this company's group (ownership, both ways, any depth), " +
+        "ONE GRANT PER COMPANY, each with its own ledger event, before the letter goes. The " +
+        "list is the server's. Absent or false: this one company.",
     }),
     validFrom: IsoDate.optional().openapi({
       description: "The day the grant starts — send the BROWSER's calendar day.",
@@ -55,6 +60,9 @@ const PortalInvitationSchema = z
     membershipId: z.string().uuid(),
     userId: z.string().uuid(),
     grantId: z.string().uuid(),
+    alsoGranted: z
+      .array(z.object({ clientPartyId: z.string().uuid(), clientName: z.string() }))
+      .openapi({ description: "The group's other companies granted in the same act (Q064)." }),
     expiresAt: z.string().datetime().openapi({
       description:
         "When the emailed link stops working. THE TOKEN IS NOT HERE and never will be: a " +
@@ -208,6 +216,7 @@ export function registerPortalInviteRoutes(
         clientPartyId: body.clientPartyId,
         validFrom: body.validFrom,
         invitedBy: s.userId,
+        alsoGroup: body.alsoGroup,
       },
       s.actor,
     );
@@ -217,6 +226,7 @@ export function registerPortalInviteRoutes(
         membershipId: invitation.membershipId,
         userId: invitation.userId,
         grantId: invitation.grantId,
+        alsoGranted: invitation.alsoGranted.map((g) => ({ clientPartyId: g.clientPartyId, clientName: g.clientName })),
         expiresAt: invitation.expiresAt,
       },
       201,

@@ -52,6 +52,8 @@ import type {
   NewPortalAccess,
   PortalAccessRepository,
   PortalClientDirectory,
+  PortalGroupCompany,
+  PortalGroupDirectory,
   PortalMembershipDirectory,
 } from "./ports";
 
@@ -64,6 +66,25 @@ interface Deps {
   readonly clock: Clock;
   /** The firm's zone: whose "today" a grant is in force on (F-07-1). */
   readonly timeZones: FirmTimeZone;
+  /** A client's group (Q064). */
+  readonly groups: PortalGroupDirectory;
+}
+
+/** What granting a group's other companies did (Q064). */
+export interface GroupGrantOutcome {
+  /** One grant per company, each with its own `portal_access.granted`. */
+  readonly granted: readonly (PortalAccess & { readonly clientName: string })[];
+  /** Companies the login could already see on that day: left as they were. */
+  readonly alreadyHeld: readonly PortalGroupCompany[];
+}
+
+/** A contact who sees some of a client's group but not the client (Q064). */
+export interface GroupContactMissing {
+  readonly membershipId: string;
+  readonly contactEmail: string;
+  readonly contactDisplayName: string | null;
+  /** The group's companies they see today, by name. */
+  readonly sees: readonly string[];
 }
 
 export interface GrantPortalAccessInput {
@@ -178,6 +199,83 @@ export class PortalAccessService {
    * should see four companies is four deliberate rows, four events, four
    * answers.
    */
+  // ── a group (Q064) ───────────────────────────────────────────────────────
+
+  /** The OTHER companies in a client's group, on the firm's day. */
+  async groupOf(tenantId: string, clientPartyId: string): Promise<readonly PortalGroupCompany[]> {
+    return this.deps.groups.groupOf(tenantId, clientPartyId, await this.today(tenantId));
+  }
+
+  /**
+   * Give a login the rest of a client's group too (Q064, Sid: a group's contact
+   * "can see" its sister companies).
+   *
+   * STILL ONE GRANT PER COMPANY. Each company goes through `grant` on its own,
+   * so each is its own row and its own `portal_access.granted` event, with the
+   * same checks a single grant makes (a CLIENT_PORTAL login that works, a
+   * company not archived). The list is the SERVER's: the caller names the
+   * client and nothing else, so no company outside the group, and none of
+   * another firm, can be slipped into it. A company the login already sees on
+   * that day is left alone and reported, never refused: the act is "the whole
+   * group", and part of it being in place already is not an error.
+   */
+  async grantGroupOf(input: GrantPortalAccessInput, actor: Actor): Promise<GroupGrantOutcome> {
+    const validFrom = input.validFrom ?? (await this.today(input.tenantId));
+    const validTo = input.validTo ?? null;
+    const group = await this.deps.groups.groupOf(input.tenantId, input.clientPartyId, await this.today(input.tenantId));
+    const held = await this.deps.grants.listGrants(input.tenantId, input.membershipId);
+    const granted: (PortalAccess & { readonly clientName: string })[] = [];
+    const alreadyHeld: PortalGroupCompany[] = [];
+    for (const company of group) {
+      if (held.some((g) => g.clientPartyId === company.id && overlaps(g, validFrom, validTo))) {
+        alreadyHeld.push(company);
+        continue;
+      }
+      const row = await this.grant({ ...input, clientPartyId: company.id, validFrom, validTo }, actor);
+      granted.push({ ...row, clientName: company.displayName });
+    }
+    return { granted, alreadyHeld };
+  }
+
+  /**
+   * NEVER SILENT (Q064). A company added to a group later does not hand its
+   * records to the group's portal contacts: those contacts are listed here
+   * instead, so the firm user sees "N portal contacts of this group can see the
+   * other companies" and decides. A contact who sees at least one other company
+   * of the group today and not this one, with a login that still works.
+   */
+  async groupContactsMissing(tenantId: string, clientPartyId: string): Promise<readonly GroupContactMissing[]> {
+    const today = await this.today(tenantId);
+    const group = await this.deps.groups.groupOf(tenantId, clientPartyId, today);
+    if (group.length === 0) return [];
+    const here = new Set(
+      (await this.deps.grants.listForClient(tenantId, clientPartyId))
+        .filter((r) => isInForceOn(r.access, today))
+        .map((r) => r.access.membershipId),
+    );
+    const byContact = new Map<string, { record: PortalAccessRecord; sees: string[] }>();
+    for (const company of group) {
+      for (const r of await this.deps.grants.listForClient(tenantId, company.id)) {
+        if (!isInForceOn(r.access, today) || here.has(r.access.membershipId)) continue;
+        const seen = byContact.get(r.access.membershipId);
+        if (seen === undefined) byContact.set(r.access.membershipId, { record: r, sees: [company.displayName] });
+        else if (!seen.sees.includes(company.displayName)) seen.sees.push(company.displayName);
+      }
+    }
+    const out: GroupContactMissing[] = [];
+    for (const [membershipId, { record, sees }] of byContact) {
+      const membership = await this.deps.memberships.findMembership(tenantId, membershipId);
+      if (membership === null || !membership.isActive || membership.audience !== "CLIENT_PORTAL") continue;
+      out.push({
+        membershipId,
+        contactEmail: record.contactEmail,
+        contactDisplayName: record.contactDisplayName,
+        sees: [...sees].sort(),
+      });
+    }
+    return out.sort((a, b) => a.contactEmail.localeCompare(b.contactEmail));
+  }
+
   async grant(input: GrantPortalAccessInput, actor: Actor): Promise<PortalAccess> {
     const validFrom = input.validFrom ?? (await this.today(input.tenantId));
     const validTo = input.validTo ?? null;

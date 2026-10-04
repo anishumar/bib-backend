@@ -169,7 +169,7 @@ describe("tenancy.ts answers field by field", () => {
 });
 
 describe("portalinvite.ts answers field by field", () => {
-  const invitation = { membershipId: ID, userId: USER, grantId: ID, expiresAt: "2026-10-10T00:00:00.000Z", ...LEAK };
+  const invitation = { membershipId: ID, userId: USER, grantId: ID, alsoGranted: [], expiresAt: "2026-10-10T00:00:00.000Z", ...LEAK };
   const service = {
     invite: () => Promise.resolve(invitation),
     resend: () => Promise.resolve(invitation),

@@ -12,6 +12,7 @@ import { PortalAccessService } from "../../src/usecase/portalaccess/service";
 import {
   FakePortalAccessRepo,
   FakePortalClients,
+  FakePortalGroup,
   FakePortalMemberships,
 } from "../../src/testfakes/portalaccess";
 import { FakeIds } from "../../src/testfakes/ids";
@@ -37,6 +38,7 @@ function world() {
   const grants = new FakePortalAccessRepo();
   const memberships = new FakePortalMemberships();
   const clients = new FakePortalClients();
+  const groups = new FakePortalGroup();
   const events = new RecordingEventSink();
 
   memberships.rows.set(PORTAL_LOGIN, {
@@ -62,12 +64,13 @@ function world() {
     grants,
     memberships,
     clients,
+    groups,
     ids: new FakeIds(),
     clock: new FakeClock(NOW),
     timeZones: new FakeFirmTimeZone(),
     events,
   });
-  return { service, grants, memberships, clients, events };
+  return { service, grants, memberships, clients, events, groups };
 }
 
 describe("granting a client to a portal login", () => {
@@ -446,5 +449,88 @@ describe("reading who can see what", () => {
     const [row] = await w.service.listForClient(FIRM, COBALT);
     expect(row?.grantedByEmail).toBeNull();
     expect(row?.clientName).toBe("Cobalt Foods");
+  });
+});
+
+// ── Q064: a group's contact sees its sister companies ───────────────────────
+
+describe("granting the rest of a client's group", () => {
+  const ORBIT = "00000000-0000-4000-8000-00000000c004";
+  let w: ReturnType<typeof world>;
+  beforeEach(() => {
+    w = world();
+    w.clients.rows.set(ORBIT, { id: ORBIT, displayName: "Orbit Logistics", archivedAt: null });
+    w.grants.clientNames.set(ORBIT, "Orbit Logistics");
+    // Cobalt's group, as the server reads it: Kaveri and Orbit.
+    w.groups.groups.set(COBALT, [
+      { id: KAVERI, displayName: "Kaveri Foods" },
+      { id: ORBIT, displayName: "Orbit Logistics" },
+    ]);
+  });
+
+  it("grants each OTHER company on its own: one row and one event per company", async () => {
+    await w.service.grant({ tenantId: FIRM, membershipId: PORTAL_LOGIN, clientPartyId: COBALT, grantedBy: PARTNER }, SYSTEM_ACTOR);
+    const out = await w.service.grantGroupOf(
+      { tenantId: FIRM, membershipId: PORTAL_LOGIN, clientPartyId: COBALT, grantedBy: PARTNER },
+      SYSTEM_ACTOR,
+    );
+    expect(out.granted.map((g) => g.clientName)).toEqual(["Kaveri Foods", "Orbit Logistics"]);
+    expect(out.alreadyHeld).toEqual([]);
+    expect(w.grants.rows.map((r) => r.clientPartyId).sort()).toEqual([COBALT, KAVERI, ORBIT].sort());
+    expect(w.events.verbs().filter((v) => v === "portal_access.granted")).toHaveLength(3);
+  });
+
+  it("leaves a company the login already sees alone, and says so", async () => {
+    await w.service.grant({ tenantId: FIRM, membershipId: PORTAL_LOGIN, clientPartyId: KAVERI, grantedBy: PARTNER }, SYSTEM_ACTOR);
+    const out = await w.service.grantGroupOf(
+      { tenantId: FIRM, membershipId: PORTAL_LOGIN, clientPartyId: COBALT, grantedBy: PARTNER },
+      SYSTEM_ACTOR,
+    );
+    expect(out.granted.map((g) => g.clientPartyId)).toEqual([ORBIT]);
+    expect(out.alreadyHeld.map((g) => g.id)).toEqual([KAVERI]);
+  });
+
+  it("makes the same refusals as one grant: no group for a revoked or a staff login", async () => {
+    await expect(
+      w.service.grantGroupOf({ tenantId: FIRM, membershipId: REVOKED_LOGIN, clientPartyId: COBALT, grantedBy: PARTNER }, SYSTEM_ACTOR),
+    ).rejects.toThrow();
+    await expect(
+      w.service.grantGroupOf({ tenantId: FIRM, membershipId: STAFF_LOGIN, clientPartyId: COBALT, grantedBy: PARTNER }, SYSTEM_ACTOR),
+    ).rejects.toThrow();
+    expect(w.grants.rows).toEqual([]);
+  });
+
+  it("grants nothing for a client in no group", async () => {
+    const out = await w.service.grantGroupOf(
+      { tenantId: FIRM, membershipId: PORTAL_LOGIN, clientPartyId: KAVERI, grantedBy: PARTNER },
+      SYSTEM_ACTOR,
+    );
+    expect(out).toEqual({ granted: [], alreadyHeld: [] });
+  });
+
+  it("names the group's contacts who cannot see a company that joined later, never granting them", async () => {
+    // The contact sees Kaveri; Cobalt joins the group. They are listed, not granted.
+    await w.service.grant({ tenantId: FIRM, membershipId: PORTAL_LOGIN, clientPartyId: KAVERI, grantedBy: PARTNER }, SYSTEM_ACTOR);
+    const missing = await w.service.groupContactsMissing(FIRM, COBALT);
+    expect(missing).toEqual([
+      { membershipId: PORTAL_LOGIN, contactEmail: "cfo@cobalt.test", contactDisplayName: "Meera Rao", sees: ["Kaveri Foods"] },
+    ]);
+    expect(w.grants.rows.some((r) => r.clientPartyId === COBALT)).toBe(false);
+    // Once granted, nobody is missing.
+    await w.service.grant({ tenantId: FIRM, membershipId: PORTAL_LOGIN, clientPartyId: COBALT, grantedBy: PARTNER }, SYSTEM_ACTOR);
+    expect(await w.service.groupContactsMissing(FIRM, COBALT)).toEqual([]);
+  });
+
+  it("does not offer a contact whose login was revoked", async () => {
+    w.grants.rows.push({
+      id: "g-revoked",
+      tenantId: FIRM,
+      membershipId: REVOKED_LOGIN,
+      clientPartyId: KAVERI,
+      validFrom: "2026-08-01",
+      validTo: null,
+      grantedBy: PARTNER,
+    });
+    expect(await w.service.groupContactsMissing(FIRM, COBALT)).toEqual([]);
   });
 });
