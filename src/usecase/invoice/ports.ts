@@ -47,6 +47,13 @@ export type CreditNoteOutcome =
   | { readonly credit: CreditNote }
   | { readonly maxCredit: string; readonly takenByBills: string | null };
 
+/**
+ * A payment, or what stopped it (audit 2026-10-03): `paid` when a reversal
+ * would take back more than was received. Decided under the invoice's row
+ * lock. A payment above what is owed is recorded (a credit; see the error).
+ */
+export type PaymentOutcome = { readonly payment: Payment } | { readonly paid: string };
+
 /** A cancellation, or the money that stopped it (B05). */
 export type CancelOutcome = { readonly cancelled: Invoice } | { readonly paid: string };
 
@@ -301,7 +308,9 @@ export interface InvoiceRepository {
 
   // ── Money against an invoice (T3.5) ───────────────────────────────────────
 
-  recordPayment(p: NewPayment): Promise<Payment>;
+  /** Records it, unless it is a reversal of more than was paid (read under
+   *  the invoice's row lock). More than is owed is recorded: a credit. */
+  recordPayment(p: NewPayment): Promise<PaymentOutcome>;
   listPayments(tenantId: string, invoiceId: string): Promise<readonly Payment[]>;
 
   /**

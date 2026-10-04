@@ -70,6 +70,7 @@ import type {
   InvoiceSummary,
   CancelOutcome,
   CreditNoteOutcome,
+  PaymentOutcome,
   IssueOn,
   IssueOutcome,
   NewCreditNote,
@@ -799,8 +800,19 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
   }
   // ── Money against an invoice (T3.5) ──────────────────────────────────────
 
-  async recordPayment(p: NewPayment): Promise<Payment> {
-    return withTenant(this.app, p.tenantId, async (db) => {
+  async recordPayment(p: NewPayment): Promise<PaymentOutcome> {
+    return withTenant(this.app, p.tenantId, async (db): Promise<PaymentOutcome> => {
+      // A REVERSAL NO LARGER THAN WHAT WAS PAID (audit 2026-10-03), decided in
+      // this transaction: the invoice row first, so a second payment on it
+      // waits for this one and reads the balance this one leaves. More than is
+      // owed is recorded on purpose (a credit).
+      await db`SELECT 1 FROM crm.invoice WHERE id = ${p.invoiceId} FOR UPDATE`;
+      const [b] = await db<{ paid: string; reversesTooMuch: boolean }[]>`
+        SELECT paid::text AS paid,
+               (${p.amount}::numeric < 0 AND -${p.amount}::numeric > paid) AS "reversesTooMuch"
+          FROM crm.invoice_balance WHERE invoice_id = ${p.invoiceId}
+      `;
+      if (b?.reversesTooMuch === true) return { paid: b.paid };
       const [row] = await db<PaymentRow[]>`
         INSERT INTO crm.payment
           (id, tenant_id, invoice_id, amount, currency, received_on, method, reference, note)
@@ -809,7 +821,7 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
         RETURNING ${db.unsafe(PAYMENT_COLUMNS)}
       `;
       if (!row) throw new Error("payment insert returned no row");
-      return toPayment(row);
+      return { payment: toPayment(row) };
     });
   }
 

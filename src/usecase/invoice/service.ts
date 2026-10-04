@@ -64,6 +64,7 @@ import {
   InvalidCreditReason,
   InvalidPaymentMethod,
   CreditExceedsInvoice,
+  ReversalExceedsPaid,
   IrnAlreadyRegistered,
   NotCallersToday,
   EngagementOfAnotherClient,
@@ -693,7 +694,7 @@ export class InvoiceService {
     }
     this.dateOrThrow("receivedOn", input.receivedOn);
 
-    const payment = await this.deps.invoices.recordPayment({
+    const outcome = await this.deps.invoices.recordPayment({
       id: this.deps.ids.newId(),
       tenantId: input.tenantId,
       invoiceId: input.invoiceId,
@@ -707,6 +708,10 @@ export class InvoiceService {
       reference: input.reference ?? null,
       note: input.note ?? null,
     });
+    if ("paid" in outcome) {
+      throw new ReversalExceedsPaid(invoice.number, input.amount.replace(/^-/, ""), outcome.paid, invoice.currency);
+    }
+    const payment = outcome.payment;
 
     // The payload is ids and machine facts. NOT the reference (B26, audit
     // 2026-10-03): it is free text up to 200 characters, and a UPI reference is

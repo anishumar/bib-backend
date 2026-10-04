@@ -33,6 +33,7 @@ import type {
   InvoiceSummary,
   CancelOutcome,
   CreditNoteOutcome,
+  PaymentOutcome,
   IssueOn,
   IssueOutcome,
   IssuedCopies,
@@ -332,9 +333,17 @@ export class FakeInvoiceRepo implements InvoiceRepository {
   readonly payments: Payment[] = [];
   readonly creditNotes: CreditNote[] = [];
 
-  recordPayment(p: NewPayment): Promise<Payment> {
+  async recordPayment(p: NewPayment): Promise<PaymentOutcome> {
+    // The adapter's rule (audit 2026-10-03): a reversal takes back no more
+    // than was paid. More than is owed is recorded (a credit).
+    const invoice = await this.find(p.tenantId, p.invoiceId);
+    if (invoice !== null) {
+      const amount = scaled(p.amount);
+      const paid = this.balance(invoice).paid;
+      if (amount < 0n && -amount > scaled(paid)) return { paid };
+    }
     this.payments.push(p);
-    return Promise.resolve(p);
+    return { payment: p };
   }
 
   listPayments(_tenantId: string, invoiceId: string): Promise<readonly Payment[]> {
@@ -469,13 +478,19 @@ export class FakeInvoiceRepo implements InvoiceRepository {
 
 const UNIT = 10000n;
 
+// SIGNED, both ways: a reversal is a negative payment, and "-3000.01" read as
+// -3000 + 0.01 summed the paid amount wrong.
 function scaled(v: string): bigint {
-  const [whole = "0", fraction = ""] = v.split(".");
-  return BigInt(whole) * UNIT + BigInt((fraction + "0000").slice(0, 4));
+  const negative = v.startsWith("-");
+  const [whole = "0", fraction = ""] = (negative ? v.slice(1) : v).split(".");
+  const magnitude = BigInt(whole) * UNIT + BigInt((fraction + "0000").slice(0, 4));
+  return negative ? -magnitude : magnitude;
 }
 
 function unscaled(v: bigint): string {
-  return `${(v / UNIT).toString()}.${(v % UNIT).toString().padStart(4, "0")}`;
+  const magnitude = v < 0n ? -v : v;
+  const text = `${(magnitude / UNIT).toString()}.${(magnitude % UNIT).toString().padStart(4, "0")}`;
+  return v < 0n ? `-${text}` : text;
 }
 
 function scaledNet(l: InvoiceLine): bigint {

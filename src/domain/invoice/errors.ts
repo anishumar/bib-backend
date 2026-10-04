@@ -29,6 +29,7 @@ export type InvoiceErrorCode =
   | "INVALID_CREDIT_REASON"
   | "INVOICE_NOT_ISSUED"
   | "CREDIT_EXCEEDS_INVOICE"
+  | "REVERSAL_EXCEEDS_PAID"
   | "DUNNING_ACTION_NOT_FOUND"
   | "DUNNING_NOT_AWAITING_APPROVAL"
   | "DUNNING_ALREADY_DECIDED"
@@ -334,6 +335,23 @@ export class CreditExceedsInvoice extends InvoiceError {
       `A credit of ${requested} is more than is left on invoice ${JSON.stringify(id)}: only ` +
         `${remaining} of it has not been credited already. Credit at most that, or check whether ` +
         `this belongs against a different invoice.`,
+    );
+  }
+}
+
+/**
+ * A REVERSAL TAKES BACK NO MORE THAN WAS RECEIVED (audit 2026-10-03). A
+ * payment above what is owed stays allowed on purpose: a client rounds up or
+ * settles two invoices with one transfer, and the firm records what arrived;
+ * the screens call the difference a credit. A reversal beyond what was paid
+ * records money that never came in.
+ */
+export class ReversalExceedsPaid extends InvoiceError {
+  constructor(number: string | null, requested: string, paid: string, currency: string) {
+    super(
+      "REVERSAL_EXCEEDS_PAID",
+      `${number ?? "This invoice"} has ${moneyInWords(paid, currency)} received on it, so a reversal of ` +
+        `${moneyInWords(requested, currency)} would take back more than was paid. Reverse at most that.`,
     );
   }
 }

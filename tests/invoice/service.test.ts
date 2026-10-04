@@ -489,6 +489,40 @@ describe("the tenant wall, at the use case", () => {
 });
 
 
+describe("money received beyond what is owed, and reversals (audit 2026-10-03, the user's decision)", () => {
+  // Kept on purpose: a client rounds up, or settles two invoices with one
+  // transfer, and the firm records what arrived (a credit, shown as one). A
+  // reversal, though, takes back no more than was paid.
+  async function issued(h: ReturnType<typeof setup>) {
+    const invoice = await h.service.raise(raise(), ACTOR);
+    await h.service.addLine({ tenantId: TENANT, invoiceId: invoice.id, description: "Audit", quantity: "1", unitAmount: "10000.00" });
+    await h.service.issue(TENANT, invoice.id, ACTOR);
+    return invoice;
+  }
+  const pay = (invoiceId: string, amount: string) => ({
+    tenantId: TENANT, invoiceId, amount, receivedOn: "2026-07-10", method: "bank_transfer",
+  });
+
+  it("records a payment beyond what is owed, as a credit on the balance", async () => {
+    const h = setup();
+    const invoice = await issued(h);
+    await h.service.recordPayment(pay(invoice.id, "10000.00"), ACTOR);
+    await h.service.recordPayment(pay(invoice.id, "500.00"), ACTOR);
+    expect((await h.service.balanceOf(TENANT, invoice.id)).outstanding).toBe("-500.0000");
+  });
+
+  it("lets a reversal take back what was paid and no more", async () => {
+    const h = setup();
+    const invoice = await issued(h);
+    await h.service.recordPayment(pay(invoice.id, "3000.00"), ACTOR);
+    await expect(h.service.recordPayment(pay(invoice.id, "-3000.01"), ACTOR)).rejects.toMatchObject({
+      code: "REVERSAL_EXCEEDS_PAID",
+    });
+    expect(h.events.recorded.filter((e) => e.verb === "payment.recorded")).toHaveLength(1);
+    await h.service.recordPayment(pay(invoice.id, "-3000.00"), ACTOR);
+  });
+});
+
 describe("the list says what is still OWED, not just what was billed", () => {
   // Walked: a fully-settled invoice sat beside one seventy-five days overdue,
   // both reading `issued` and both showing their full value. `status` is about
