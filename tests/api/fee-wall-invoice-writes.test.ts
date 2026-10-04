@@ -18,6 +18,7 @@ import { registerBillingRoutes } from "../../src/api/handler/billing";
 import { InvoiceService } from "../../src/usecase/invoice/service";
 import { DunningService } from "../../src/usecase/dunning/service";
 import { BillingDeskService } from "../../src/usecase/billing/desk";
+import { WorkBillingService } from "../../src/usecase/billing/work-vs-billing";
 import { AdvanceDesk } from "../../src/usecase/billing/advance";
 import { FinalBiller } from "../../src/usecase/billing/final";
 import { AuthzService } from "../../src/usecase/authz/service";
@@ -36,6 +37,7 @@ import {
   FakeBillingSchedules,
   FakeFinalBillFacts,
   FakeFiscalYearSource,
+  FakeWorkBillingFacts,
   FakeInvoiceDrafter,
   FakeIssuerTaxDefaults,
 } from "../../src/testfakes/billing";
@@ -103,6 +105,12 @@ function world() {
       policy: new FakeAdvancePolicy(),
       people: new FakeAdvanceReminderFacts(),
       taxDefaults: new FakeIssuerTaxDefaults(),
+      timeZones: new FakeFirmTimeZone(),
+      clock: new FakeClock(),
+    }),
+    workBilling: new WorkBillingService({
+      facts: new FakeWorkBillingFacts(),
+      fiscalYears: new FakeFiscalYearSource(),
       timeZones: new FakeFirmTimeZone(),
       clock: new FakeClock(),
     }),

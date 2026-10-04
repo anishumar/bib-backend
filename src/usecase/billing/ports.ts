@@ -653,3 +653,137 @@ export interface AutoBillingSetting {
   dueInDays(tenantId: string): Promise<number | null>;
   setDueInDays(tenantId: string, days: number | null): Promise<void>;
 }
+
+// ── Work vs Billing (Q041, 2026-10-04) ──────────────────────────────────────
+//
+// One read: for each client, service and period, the work (jobs and the
+// filings under them), the bill, its invoice and the money. The facts come
+// raw; `work-vs-billing.ts` pairs them and decides what is a problem.
+
+export interface WbPerson {
+  readonly userId: string;
+  readonly displayName: string | null;
+}
+
+export interface WbEngagement {
+  readonly engagementId: string;
+  readonly status: string;
+  readonly effectiveFrom: string;
+  readonly endsOn: string | null;
+  readonly pausedOn: string | null;
+  readonly resumedOn: string | null;
+}
+
+/** What is billed: one engagement priced on its own (`e:<id>`), or one fee
+ *  group (`g:<id>`) whose one fee covers several. The sweep's own subject. */
+export interface WbSubject {
+  readonly key: string;
+  readonly engagementId: string | null;
+  readonly feeGroupId: string | null;
+  readonly party: { readonly id: string; readonly displayName: string };
+  /** The letter line's wording, or the fee group's title. */
+  readonly serviceName: string;
+  /** Null when a fee group covers several companies. */
+  readonly entityName: string | null;
+  readonly letter: { readonly id: string; readonly ref: string };
+  /** The line's, or its group's: `one_time`, `monthly`, `quarterly`,
+   *  `annually`, `custom`, or null. */
+  readonly frequency: string | null;
+  readonly billingFrom: string | null;
+  readonly firstInvoiceOn: string | null;
+  readonly engagements: readonly WbEngagement[];
+  /** The client's Key Manager in force today, active staff. */
+  readonly keyManager: WbPerson | null;
+  /** Invoices raised by hand for this work, on no bill and not cancelled: a
+   *  hint, since an invoice line has no period. */
+  readonly handInvoices: {
+    readonly count: number;
+    readonly last: { readonly invoiceId: string; readonly number: string | null; readonly issuedOn: string | null } | null;
+  };
+}
+
+export interface WbInvoice {
+  readonly id: string;
+  /** Null while a draft (0322). */
+  readonly number: string | null;
+  readonly status: string;
+  readonly issuedOn: string | null;
+  readonly dueOn: string | null;
+  /** `crm.invoice_balance`, decimal strings. */
+  readonly invoiced: string;
+  readonly paid: string;
+  readonly outstanding: string;
+  readonly manager: WbPerson | null;
+}
+
+export interface WbBill {
+  readonly id: string;
+  readonly kind: string;
+  /** `e:<engagement>` or `g:<fee group>`; `l:<letter>` for a letter-wide advance. */
+  readonly subjectKey: string;
+  readonly party: { readonly id: string; readonly displayName: string };
+  readonly serviceName: string;
+  readonly entityName: string | null;
+  readonly letter: { readonly id: string; readonly ref: string };
+  readonly engagementIds: readonly string[];
+  readonly periodStart: string;
+  readonly periodEnd: string;
+  readonly periodLabel: string;
+  readonly billOn: string;
+  readonly status: DueStatus;
+  readonly currency: string;
+  readonly amount: string | null;
+  readonly fullAmount: string | null;
+  readonly manager: WbPerson | null;
+  readonly skipped: { readonly at: string; readonly by: WbPerson | null; readonly reason: string } | null;
+  readonly invoice: WbInvoice | null;
+  /** The advance invoice that paid a covered bill. */
+  readonly coveredBy: { readonly invoiceId: string; readonly number: string | null } | null;
+}
+
+/** One job's link to one subject (a job may cover several engagements). */
+export interface WbJob {
+  readonly jobId: string;
+  readonly subjectKey: string;
+  readonly sourceKind: string;
+  readonly status: string;
+  readonly periodStart: string | null;
+  readonly periodEnd: string | null;
+  readonly periodLabel: string | null;
+  /** The firm's day it finished; null until done. */
+  readonly doneOn: string | null;
+}
+
+/** A statutory filing, with the subjects whose service it belongs to. */
+export interface WbFiling {
+  readonly id: string;
+  readonly subjectKeys: readonly string[];
+  readonly name: string;
+  readonly periodStart: string;
+  readonly periodEnd: string;
+  readonly periodLabel: string;
+  readonly dueOn: string;
+  readonly filedOn: string | null;
+  readonly stateName: string;
+  readonly filed: boolean;
+  readonly closed: boolean;
+  readonly jobStatus: string | null;
+}
+
+export interface WbFacts {
+  readonly autoBilling: boolean;
+  readonly autoBillingSince: string | null;
+  readonly subjects: readonly WbSubject[];
+  readonly bills: readonly WbBill[];
+  readonly jobs: readonly WbJob[];
+  readonly filings: readonly WbFiling[];
+}
+
+export interface WorkBillingFacts {
+  /** Everything whose period touches [from, to] (one-time work finished in it
+   *  or still open), for one client when asked. `today` is the firm's day. */
+  read(
+    tenantId: string,
+    query: { readonly from: string; readonly to: string; readonly partyId?: string | undefined; readonly today: string },
+  ): Promise<WbFacts>;
+}

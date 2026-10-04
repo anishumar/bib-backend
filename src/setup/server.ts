@@ -104,6 +104,8 @@ import { PostgresReadinessFacts } from "../infrastructure/postgres/readiness-fac
 import { ReadinessService } from "../usecase/readiness/service";
 import { InvoiceService } from "../usecase/invoice/service";
 import { BillingDeskService } from "../usecase/billing/desk";
+import { WorkBillingService } from "../usecase/billing/work-vs-billing";
+import { PostgresWorkBillingFacts } from "../infrastructure/postgres/work-billing";
 import { GoLiveScheduler } from "../usecase/billing/golive";
 import { AdvanceBiller, AdvanceDesk } from "../usecase/billing/advance";
 import {
@@ -634,6 +636,16 @@ export function wire(cfg: Config, log: Logger): Wired {
     policy: advancePolicy,
     // A default tax rate is for one of the firm's own companies.
     firmEntities: documents,
+  });
+
+  // WORK VS BILLING (Q041). Read-only: the work, its bill, the invoice and the
+  // money per client, service and period, on the firm's day, with the sweep's
+  // own financial year so an expected bill date is the sweep's.
+  const workBilling = new WorkBillingService({
+    facts: new PostgresWorkBillingFacts(pools.app),
+    fiscalYears: configRepository,
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    clock: systemClock,
   });
 
   // THE LEADERSHIP FIGURES (T3.7). No writes: every number is derived from
@@ -1404,7 +1416,7 @@ export function wire(cfg: Config, log: Logger): Wired {
           }),
         },
         invoice: { service: invoices, dunning, authz },
-        billing: { service: billing, authz, advances: advanceDesk, finals: finalBills },
+        billing: { service: billing, authz, advances: advanceDesk, finals: finalBills, workBilling },
         notifications: { service: notifications, authz },
         filestore: { service: fileStore, authz },
         dashboard: { service: dashboards, authz },

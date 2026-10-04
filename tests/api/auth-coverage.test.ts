@@ -167,6 +167,7 @@ import {
 import { DunningService } from "../../src/usecase/dunning/service";
 import { InvoiceService } from "../../src/usecase/invoice/service";
 import { BillingDeskService } from "../../src/usecase/billing/desk";
+import { WorkBillingService } from "../../src/usecase/billing/work-vs-billing";
 import { AdvanceDesk } from "../../src/usecase/billing/advance";
 import { FinalBiller } from "../../src/usecase/billing/final";
 import {
@@ -181,6 +182,7 @@ import {
   FakeAdvanceReminderFacts,
   FakeBillingSchedules,
   FakeFiscalYearSource,
+  FakeWorkBillingFacts,
   FakeInvoiceDrafter,
 } from "../../src/testfakes/billing";
 import {
@@ -669,6 +671,12 @@ function deps(): RouterDeps {
         policy: new FakeAdvancePolicy(),
         people: new FakeAdvanceReminderFacts(),
         taxDefaults: new FakeIssuerTaxDefaults(),
+        timeZones: new FakeFirmTimeZone(),
+        clock: new FakeClock(),
+      }),
+      workBilling: new WorkBillingService({
+        facts: new FakeWorkBillingFacts(),
+        fiscalYears: new FakeFiscalYearSource(),
         timeZones: new FakeFirmTimeZone(),
         clock: new FakeClock(),
       }),
