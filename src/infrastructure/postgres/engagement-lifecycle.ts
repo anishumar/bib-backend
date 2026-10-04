@@ -34,6 +34,15 @@ export class PostgresEngagementLifecycle implements EngagementLifecycle {
     });
   }
 
+  async issuingEntityOf(tenantId: string, engagementLetterId: string): Promise<string | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ issuing_entity_party_id: string }[]>`
+        SELECT issuing_entity_party_id FROM crm.engagement_letter WHERE id = ${engagementLetterId}
+      `;
+      return row?.issuing_entity_party_id ?? null;
+    });
+  }
+
   async end(
     tenantId: string,
     input: {

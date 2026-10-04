@@ -24,6 +24,7 @@
 import type { Clock } from "../../platform/clock";
 import type { Actor } from "../../domain/ledger/model";
 import type { EventSink } from "../ledger/ports";
+import { zoneOfCompany } from "../../domain/calendar/model";
 import { dayInZone } from "../../domain/scheduler/zone";
 import {
   END_REASON_MAX,
@@ -76,7 +77,7 @@ export class EngagementLifecycleService {
 
     const current = await this.live(input.tenantId, input.engagementId);
     const status = endStatusFor(current, input.endsOn);
-    const today = await this.firmToday(input.tenantId);
+    const today = await this.companyToday(input.tenantId, current);
     const out = await this.deps.lifecycle.end(input.tenantId, {
       engagementId: current.id,
       expect: current.status,
@@ -111,7 +112,7 @@ export class EngagementLifecycleService {
   async pause(input: { readonly tenantId: string; readonly engagementId: string }, actor: Actor): Promise<EngagementRecord> {
     const current = await this.live(input.tenantId, input.engagementId);
     if (current.status !== "active") throw new EngagementNotActive(current.status);
-    const today = await this.firmToday(input.tenantId);
+    const today = await this.companyToday(input.tenantId, current);
     const paused = await this.deps.lifecycle.pause(input.tenantId, {
       engagementId: current.id,
       byUserId: actor.type === "human" ? actor.id : null,
@@ -134,7 +135,7 @@ export class EngagementLifecycleService {
   async resume(input: { readonly tenantId: string; readonly engagementId: string }, actor: Actor): Promise<EngagementRecord> {
     const current = await this.live(input.tenantId, input.engagementId);
     if (current.status !== "paused") throw new EngagementNotPaused();
-    const resumedOn = await this.firmToday(input.tenantId);
+    const resumedOn = await this.companyToday(input.tenantId, current);
     const resumed = await this.deps.lifecycle.resume(input.tenantId, {
       engagementId: current.id,
       resumedOn,
@@ -166,7 +167,15 @@ export class EngagementLifecycleService {
     return now.status === "paused" ? new EngagementNotActive("paused") : new EngagementNotPaused();
   }
 
-  private async firmToday(tenantId: string): Promise<string> {
-    return dayInZone(this.deps.clock.now().toISOString(), await this.deps.timeZones.timeZoneFor(tenantId));
+  /** Today on the calendar of the company that issued the engagement's letter
+   *  (0337), its own zone else the firm's: a pause or an end is a date in that
+   *  company's books, and billing pro-rates by it. */
+  private async companyToday(tenantId: string, engagement: Engagement): Promise<string> {
+    const [firmZone, calendars, issuer] = await Promise.all([
+      this.deps.timeZones.timeZoneFor(tenantId),
+      this.deps.timeZones.companyCalendars(tenantId),
+      this.deps.lifecycle.issuingEntityOf(tenantId, engagement.engagementLetterId),
+    ]);
+    return dayInZone(this.deps.clock.now().toISOString(), zoneOfCompany(calendars, issuer, firmZone));
   }
 }

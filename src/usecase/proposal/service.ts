@@ -108,6 +108,7 @@ import {
   ProposalLeadDeleted,
   proposalDeletionRefusal,
 } from "../../domain/proposal/errors";
+import { zoneOfCompany } from "../../domain/calendar/model";
 import { dayInZone } from "../../domain/scheduler/zone";
 import { checkAcceptance } from "../../domain/acceptance/model";
 import type { AcceptanceStatement } from "../../domain/acceptance/model";
@@ -464,7 +465,7 @@ export class ProposalService {
     let source = await this.deps.proposals.findById(tenantId, proposalId);
     if (source === null) throw new ProposalNotFound(proposalId);
     if (source.deletedAt !== null) throw new ProposalDeleted(source.ref);
-    const today = await this.firmToday(tenantId);
+    const today = await this.companyToday(tenantId, source.issuingEntityPartyId);
     if (source.status === "sent" && isPastValidity(source.validUntil, today)) {
       await this.expire(source, actor);
       source = { ...source, status: "expired" };
@@ -1176,7 +1177,7 @@ export class ProposalService {
     // proposal past its date counting as the expired one it is about to become.
     const lapsed =
       proposal.status === "sent" &&
-      isPastValidity(proposal.validUntil, await this.firmToday(tenantId));
+      isPastValidity(proposal.validUntil, await this.companyToday(tenantId, proposal.issuingEntityPartyId));
     const copyRefusal =
       proposal.deletedAt !== null
         ? new ProposalDeleted(proposal.ref)
@@ -1407,7 +1408,7 @@ export class ProposalService {
     const request = email === undefined ? null : this.checkEmail(email);
 
     const now = this.deps.clock.now().toISOString();
-    if (proposal.status === "sent" && isPastValidity(proposal.validUntil, await this.firmToday(tenantId))) {
+    if (proposal.status === "sent" && isPastValidity(proposal.validUntil, await this.companyToday(tenantId, proposal.issuingEntityPartyId))) {
       await this.expire(proposal, actor);
       throw new ProposalExpired(proposal.validUntil ?? now.slice(0, 10));
     }
@@ -1455,7 +1456,13 @@ export class ProposalService {
     if (shared === null) throw new ShareLinkUnknown();
 
     const now = this.deps.clock.now().toISOString();
-    if (shared.status === "sent" && isPastValidity(shared.validUntil, await this.firmToday(parsed.tenantId))) {
+    if (shared.status === "sent" && isPastValidity(
+        shared.validUntil,
+        await this.companyToday(
+          parsed.tenantId,
+          (await this.deps.proposals.findById(parsed.tenantId, shared.id))?.issuingEntityPartyId ?? null,
+        ),
+      )) {
       // Lazy expiry, the same rule the staff path uses — the link is simply the
       // other place somebody first touches a lapsed proposal.
       const proposal = await this.deps.proposals.findById(parsed.tenantId, shared.id);
@@ -1512,7 +1519,7 @@ export class ProposalService {
       throw new AlreadyAnswered(proposal.status);
     }
     const now = this.deps.clock.now().toISOString();
-    if (proposal.status === "sent" && isPastValidity(proposal.validUntil, await this.firmToday(tenantId))) {
+    if (proposal.status === "sent" && isPastValidity(proposal.validUntil, await this.companyToday(tenantId, proposal.issuingEntityPartyId))) {
       await this.expire(proposal, actor);
       throw new ProposalExpired(proposal.validUntil ?? now.slice(0, 10));
     }
@@ -1592,7 +1599,7 @@ export class ProposalService {
   ): Promise<{ readonly filename: string; readonly bytes: Uint8Array }> {
     const { tenantId, proposal } = await this.openLink(token);
     const now = this.deps.clock.now().toISOString();
-    if (proposal.status === "sent" && isPastValidity(proposal.validUntil, await this.firmToday(tenantId))) {
+    if (proposal.status === "sent" && isPastValidity(proposal.validUntil, await this.companyToday(tenantId, proposal.issuingEntityPartyId))) {
       await this.expire(proposal, actor);
       throw new ProposalExpired(proposal.validUntil ?? now.slice(0, 10));
     }
@@ -1625,7 +1632,7 @@ export class ProposalService {
     const proposal = await this.findOrThrow(tenantId, proposalId);
     if (proposal.deletedAt !== null) throw new ProposalDeleted(proposal.ref);
 
-    const today = await this.firmToday(tenantId);
+    const today = await this.companyToday(tenantId, proposal.issuingEntityPartyId);
     if (proposal.status === "sent" && isPastValidity(proposal.validUntil, today)) {
       await this.expire(proposal, actor);
       // validUntil is non-null whenever isPastValidity is true.
@@ -1683,13 +1690,13 @@ export class ProposalService {
     const proposal = await this.findOrThrow(tenantId, proposalId);
     if (proposal.deletedAt !== null) throw new ProposalDeleted(proposal.ref);
     const now = this.deps.clock.now().toISOString();
-    if (proposal.status === "sent" && isPastValidity(proposal.validUntil, await this.firmToday(tenantId))) {
+    if (proposal.status === "sent" && isPastValidity(proposal.validUntil, await this.companyToday(tenantId, proposal.issuingEntityPartyId))) {
       await this.expire(proposal, actor);
       throw new ProposalExpired(proposal.validUntil ?? now.slice(0, 10));
     }
     if (proposal.status !== "sent") throw new InvalidTransition(proposal.status, "accepted");
 
-    const zone = await this.deps.timeZones.timeZoneFor(tenantId);
+    const zone = await this.companyZone(tenantId, proposal.issuingEntityPartyId);
     const evidence = checkAcceptance(statement, {
       today: dayInZone(now, zone),
       sentOn: proposal.sentAt === null ? null : dayInZone(proposal.sentAt, zone),
@@ -1859,13 +1866,23 @@ export class ProposalService {
   /** A share token, resolved the way `viewShared` resolves one: malformed,
    *  unknown and withdrawn are one answer. */
   /**
-   * The firm's calendar day (audit 2026-10-03, B24). A proposal's `validUntil`
-   * is a date the FIRM wrote, so it lapses when that day ends where the firm
-   * is: on the UTC day an Indian firm's quote stayed acceptable until 05:30
-   * the next morning, and a US firm's lapsed on the evening of its last day.
+   * The issuing COMPANY's calendar day (0337; the firm's before it, B24). A
+   * proposal's `validUntil` is a date the company wrote, so it lapses when
+   * that day ends where the company is: on the UTC day an Indian firm's quote
+   * stayed acceptable until 05:30 the next morning, and on India's day a New
+   * York company's lapsed on the evening of its last day.
    */
-  private async firmToday(tenantId: string): Promise<string> {
-    return dayInZone(this.deps.clock.now().toISOString(), await this.deps.timeZones.timeZoneFor(tenantId));
+  private async companyToday(tenantId: string, entityPartyId: string | null): Promise<string> {
+    return dayInZone(this.deps.clock.now().toISOString(), await this.companyZone(tenantId, entityPartyId));
+  }
+
+  /** The zone a company's proposal is dated in (0337): its own, else the firm's. */
+  private async companyZone(tenantId: string, entityPartyId: string | null): Promise<string> {
+    const [firmZone, calendars] = await Promise.all([
+      this.deps.timeZones.timeZoneFor(tenantId),
+      this.deps.timeZones.companyCalendars(tenantId),
+    ]);
+    return zoneOfCompany(calendars, entityPartyId, firmZone);
   }
 
   private async openLink(

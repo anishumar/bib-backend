@@ -1374,9 +1374,15 @@ export class FakeEngagementLifecycle implements EngagementLifecycle {
     repointed: 0,
   };
   openJobsAfterEnd: JobAfterEnd[] = [];
+  /** letter id -> its issuing company (0337); absent is null. */
+  readonly issuers = new Map<string, string>();
 
   find(tenantId: string, engagementId: string): Promise<Engagement | null> {
     return Promise.resolve(this.rows.find((r) => r.tenantId === tenantId && r.id === engagementId) ?? null);
+  }
+
+  issuingEntityOf(_tenantId: string, engagementLetterId: string): Promise<string | null> {
+    return Promise.resolve(this.issuers.get(engagementLetterId) ?? null);
   }
 
   private swap(tenantId: string, id: string, expect: Engagement["status"], next: (e: Engagement) => Engagement): Engagement | null {

@@ -2,6 +2,7 @@
 // are owned by the use case that needs them, stated in our vocabulary; adapters
 // in infrastructure/ implement them, and two of them are satisfied by other use
 // cases at the composition root.
+import type { CompanyCalendars } from "../../domain/calendar/model";
 import type { NewRecordedAcceptance, RecordedAcceptance } from "../../domain/acceptance/model";
 import type { ProposalErrorCode } from "../../domain/proposal/errors";
 import type { Amount, CurrencyCode, Money } from "../../domain/money/model";
@@ -997,6 +998,9 @@ export interface ClientStructureDirectory {
  *  structure is read on. `PostgresFirmTimeZone` satisfies it. */
 export interface FirmTimeZone {
   timeZoneFor(tenantId: string): Promise<string>;
+  /** The companies that keep their own zone (0337): a proposal lapses at the
+   *  end of its last day on its issuing company's calendar. */
+  companyCalendars(tenantId: string): Promise<CompanyCalendars>;
 }
 
 /**
