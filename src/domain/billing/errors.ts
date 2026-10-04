@@ -13,6 +13,7 @@ export class BillingError extends Error {
 }
 
 export type BillingErrorCode =
+  | "BILL_EARLY_REFUSED"
   | "BILLING_DUE_NOT_FOUND"
   | "BILLING_DUE_NOT_OPEN"
   | "DUES_DO_NOT_SHARE_AN_INVOICE"
@@ -69,6 +70,14 @@ export class StartNotApprovable extends BillingError {
 export class BillNowRefused extends BillingError {
   constructor(reason: string) {
     super("BILL_NOW_REFUSED", reason);
+  }
+}
+
+/** "Raise invoice now" (Q071 b) refused: the period is billed already, its
+ *  work is not done, or there is no such period to bill. */
+export class BillEarlyRefused extends BillingError {
+  constructor(reason: string) {
+    super("BILL_EARLY_REFUSED", reason);
   }
 }
 

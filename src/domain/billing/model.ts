@@ -56,6 +56,62 @@ export interface BillingDuePlan {
   /** Days of the period inside the service window. Always at least 1. */
   readonly servedDays: number;
   readonly periodDays: number;
+  /** The yearly filing whose due date `billOn` is (Q071), or null when the
+   *  schedule dated it. */
+  readonly datedBy: StatutoryFiling | null;
+}
+
+// ── A yearly bill on its filing's due date (Q071, 0354) ──────────────────────
+
+/**
+ * A statutory filing of the billed client company whose rule the billed
+ * service carries (T6.16: linked on the rule's lineage, or generated for the
+ * engagement itself). Its due date is already the client's: the filing's
+ * country clock and, where its rule says so, the client's own year end.
+ */
+export interface StatutoryFiling {
+  readonly id: string;
+  readonly name: string;
+  readonly dueOn: string;
+  readonly periodStart: string;
+  readonly periodEnd: string;
+  /** "FY2025-26": what the bill is FOR, and what the invoice line says. */
+  readonly periodLabel: string;
+}
+
+/** A filing for a whole year (an annual rule's period), not a month or a
+ *  quarter: only those date a yearly bill. */
+export function isYearlyFiling(f: Pick<StatutoryFiling, "periodStart" | "periodEnd">): boolean {
+  return spanMonths({ start: f.periodStart, end: f.periodEnd, label: "" }) >= 12;
+}
+
+/**
+ * The filing a yearly period's bill is made on (Q071), or null.
+ *
+ * Ashish, 4 Oct 2026: yearly statutory work is billed ON its due date (audit
+ * 30 September, GSTR-9 31 December, UAE corporate tax nine months after the
+ * client's year end). The filing is the yearly one whose due date falls
+ * INSIDE the billing year, on or after the first day the work was served: the
+ * audit due 30 September 2026 dates the bill of the year April 2026 to March
+ * 2027, because that is the year the firm does it. Several such filings (audit,
+ * ITR, AOC-4) bill on the EARLIEST (the user, 2026-10-05: the first
+ * deliverable). Ties go to the lower id, so two passes agree.
+ *
+ * A filing due before the work began was somebody else's (or a takeover's
+ * one-time fee, CA#35) and never dates the bill.
+ */
+export function statutoryBillDay(
+  period: BillingPeriod,
+  filings: readonly StatutoryFiling[],
+  firstServedDay: string,
+): StatutoryFiling | null {
+  const from = later(period.start, firstServedDay);
+  let best: StatutoryFiling | null = null;
+  for (const f of filings) {
+    if (!isYearlyFiling(f) || f.dueOn < from || f.dueOn > period.end) continue;
+    if (best === null || f.dueOn < best.dueOn || (f.dueOn === best.dueOn && f.id < best.id)) best = f;
+  }
+  return best;
 }
 
 /**
@@ -199,23 +255,42 @@ export function billingDues(input: {
   readonly firstInvoiceOn: string;
   readonly today: string;
   readonly windows: readonly ServiceWindow[];
+  /** The client's filings under this service (Q071). Read only for a YEARLY
+   *  schedule on the period's last day: a letter that chose the year's start
+   *  or its own date keeps it, because a person's choice beats a derived one. */
+  readonly filings?: readonly StatutoryFiling[];
 }): readonly BillingDuePlan[] {
   const dues: BillingDuePlan[] = [];
   // ON EACH PERIOD'S LAST DAY (Q042) when the first bill is the first
   // period's last day: read off each period, never "first plus N months",
   // which drifts at month ends (30 November plus a month is 30 December).
   const onLastDay = input.periods[0]?.end === input.firstInvoiceOn;
+  const filings = onLastDay && input.spanMonths === 12 ? (input.filings ?? []) : [];
+  const firstServedDay = input.windows.map((w) => w.from).sort()[0] ?? "0000-01-01";
   input.periods.forEach((period, k) => {
     // A period that has not begun is never billed, whatever the schedule says
     // (0321): there is nothing served in it yet to bill.
     if (period.start > input.today) return;
-    const billOn = onLastDay ? period.end : addMonthsClamped(input.firstInvoiceOn, k * input.spanMonths);
+    const datedBy = filings.length === 0 ? null : statutoryBillDay(period, filings, firstServedDay);
+    const billOn =
+      datedBy !== null
+        ? datedBy.dueOn
+        : onLastDay
+          ? period.end
+          : addMonthsClamped(input.firstInvoiceOn, k * input.spanMonths);
     if (billOn > input.today) return;
     const served = Math.max(0, ...input.windows.map((w) => servedDays(period, w)));
     if (served === 0) return;
-    dues.push({ period, billOn, servedDays: served, periodDays: dayCount(period.start, period.end) });
+    dues.push({ period, billOn, servedDays: served, periodDays: dayCount(period.start, period.end), datedBy });
   });
   return dues;
+}
+
+/** What a bill is called: the filing's year when a filing dated it (the audit
+ *  billed in September 2026 is the audit of FY2025-26, Q071), else the
+ *  period's own label. The invoice line reads it. */
+export function billLabel(plan: Pick<BillingDuePlan, "period" | "datedBy">): string {
+  return plan.datedBy?.periodLabel ?? plan.period.label;
 }
 
 // ── Whose kitty ─────────────────────────────────────────────────────────────

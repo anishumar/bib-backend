@@ -1077,6 +1077,7 @@ export function mapError(err: unknown): MappedError {
       case "ADVANCE_NOT_SKIPPABLE":
       case "START_NOT_APPROVABLE":
       case "BILL_NOW_REFUSED":
+      case "BILL_EARLY_REFUSED":
       case "AUTO_BILLING_OFF":
       case "NOTHING_TO_REFUND":
       case "BILL_BUSY":

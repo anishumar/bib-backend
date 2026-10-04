@@ -21,6 +21,7 @@ import { BillingDeskService } from "../../src/usecase/billing/desk";
 import { WorkBillingService } from "../../src/usecase/billing/work-vs-billing";
 import { AdvanceDesk } from "../../src/usecase/billing/advance";
 import { FinalBiller } from "../../src/usecase/billing/final";
+import { EarlyBiller } from "../../src/usecase/billing/early";
 import { AuthzService } from "../../src/usecase/authz/service";
 import { withDefaultRoles } from "../../src/testfakes/config";
 import { FakeFirmEntities, makeInvoiceFakes } from "../../src/testfakes/invoice";
@@ -35,6 +36,7 @@ import {
   FakeBillingDueWriter,
   FakeBillingManagerFacts,
   FakeBillingSchedules,
+  FakeDoneWorkFacts,
   FakeFinalBillFacts,
   FakeFiscalYearSource,
   FakeWorkBillingFacts,
@@ -120,6 +122,17 @@ function world() {
       managers: new FakeBillingManagerFacts(),
       setting: new FakeAutoBillingSetting(),
       firms: new FakeAutoBillingFirms(),
+      timeZones: new FakeFirmTimeZone(),
+      clock: new FakeClock(),
+      ids: new FakeIds(),
+      events: new RecordingEventSink(),
+    }),
+    early: new EarlyBiller({
+      dues: new FakeBillingDueWriter(),
+      work: new FakeDoneWorkFacts(),
+      managers: new FakeBillingManagerFacts(),
+      setting: new FakeAutoBillingSetting(),
+      fiscalYears: new FakeFiscalYearSource(),
       timeZones: new FakeFirmTimeZone(),
       clock: new FakeClock(),
       ids: new FakeIds(),

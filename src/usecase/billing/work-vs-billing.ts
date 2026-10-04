@@ -29,7 +29,13 @@
 // still open (Ashish, 1 Oct 2026: the work on a retainer is not complete
 // before the invoice is raised), a bill whose date has not come, and a period
 // before the client's billing began (billed the old way).
-import { addMonthsClamped, billingDues, serviceWindowOf } from "../../domain/billing/model";
+import {
+  addMonthsClamped,
+  billLabel,
+  billingDues,
+  serviceWindowOf,
+  type StatutoryFiling,
+} from "../../domain/billing/model";
 import { yearStartOfCompany } from "../../domain/calendar/model";
 import type { CompanyCalendars } from "../../domain/calendar/model";
 import { daysBetween } from "../../domain/obligation/model";
@@ -265,6 +271,18 @@ function isRecurring(frequency: string | null): boolean {
 /** Puts every row together and decides its flags. Exported for the tests. */
 export function assembleRows(facts: WbFacts, ctx: Ctx): WorkBillingRow[] {
   const subjects = new Map(facts.subjects.map((s) => [s.key, s]));
+  // A subject's filings, as the sweep reads them to date a yearly bill (Q071).
+  const filingsOf = (key: string): readonly StatutoryFiling[] =>
+    facts.filings
+      .filter((f) => f.subjectKeys.includes(key))
+      .map((f) => ({
+        id: f.id,
+        name: f.name,
+        dueOn: f.dueOn,
+        periodStart: f.periodStart,
+        periodEnd: f.periodEnd,
+        periodLabel: f.periodLabel,
+      }));
   const rows = new Map<string, Draft>();
   // The rows of each subject, so a job or a filing finds its own in one look.
   const bySubject = new Map<string, Draft[]>();
@@ -343,7 +361,7 @@ export function assembleRows(facts: WbFacts, ctx: Ctx): WorkBillingRow[] {
         (r) => r.kind === "period" && r.period !== null && r.period.start <= start && start <= r.period.end,
       );
       if (draft === undefined) {
-        const expected = expectedBill(s, start, yearStartOf(s, ctx));
+        const expected = expectedBill(s, start, yearStartOf(s, ctx), filingsOf(s.key));
         const period =
           expected !== null && expected !== "not_served"
             ? expected.period
@@ -373,12 +391,15 @@ export function assembleRows(facts: WbFacts, ctx: Ctx): WorkBillingRow[] {
     draft.jobs.set(j.jobId, j);
   }
 
-  // 3. Filings sit under their service's row: the one whose period holds the
-  //    filing's last day, else any it overlaps, else the one-time row.
+  // 3. Filings sit under their service's row: the bill the filing dated
+  //    (Q071: the audit due 30 September 2026 dates the bill of the year it
+  //    falls in), else the one whose period holds the filing's last day, else
+  //    any it overlaps, else the one-time row.
   for (const f of facts.filings) {
     for (const sk of f.subjectKeys) {
       const own = (bySubject.get(sk) ?? []).filter((r) => r.kind !== "advance");
       const target =
+        own.find((r) => r.bill?.datedByFilingId === f.id) ??
         own.find((r) => r.period !== null && r.period.start <= f.periodEnd && f.periodEnd <= r.period.end) ??
         own.find((r) => r.period !== null && r.period.start <= f.periodEnd && f.periodStart <= r.period.end) ??
         own.find((r) => r.kind === "one_time");
@@ -411,6 +432,7 @@ export function expectedBill(
   s: WbSubject,
   day: string,
   fiscalYearStartMonth: number | null,
+  filings: readonly StatutoryFiling[] = [],
 ):
   | {
       readonly period: { start: string; end: string; label: string };
@@ -434,10 +456,11 @@ export function expectedBill(
     firstInvoiceOn: s.firstInvoiceOn,
     today: "9999-12-31",
     windows: s.engagements.map(serviceWindowOf),
+    filings,
   }).find((p) => p.period.start === period.start);
   if (planned === undefined) return "not_served";
   return {
-    period: { start: period.start, end: period.end, label: period.label },
+    period: { start: period.start, end: period.end, label: billLabel(planned) },
     billOn: planned.billOn,
   };
 }

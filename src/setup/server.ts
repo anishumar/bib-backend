@@ -127,6 +127,8 @@ import {
   PostgresBillingManagerFacts,
 } from "../infrastructure/postgres/billing-repository";
 import { PostgresAdvanceBillFacts, PostgresFinalBillFacts } from "../infrastructure/postgres/billing-facts";
+import { PostgresDoneWorkFacts } from "../infrastructure/postgres/done-work";
+import { EarlyBiller } from "../usecase/billing/early";
 import { DunningService } from "../usecase/dunning/service";
 import { EscalationService } from "../usecase/escalation/service";
 import { NotificationService } from "../usecase/notify/service";
@@ -452,6 +454,19 @@ export function wire(cfg: Config, log: Logger): Wired {
     managers: new PostgresBillingManagerFacts(pools.app),
     setting: new PostgresAutoBillingSetting(pools.app),
     firms: new PostgresAutoBillingFirms(pools.app),
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    clock: systemClock,
+    ids: systemIds,
+    events: ledger,
+  });
+  // RAISE INVOICE NOW (Q071 b): a period whose work is done before its bill
+  // date may be billed today; the sweep's own bill, written sooner.
+  const earlyBills = new EarlyBiller({
+    dues: new PostgresBillingDueWriter(pools.app),
+    work: new PostgresDoneWorkFacts(pools.app),
+    managers: new PostgresBillingManagerFacts(pools.app),
+    setting: new PostgresAutoBillingSetting(pools.app),
+    fiscalYears: configRepository,
     timeZones: new PostgresFirmTimeZone(pools.app),
     clock: systemClock,
     ids: systemIds,
@@ -1429,7 +1444,7 @@ export function wire(cfg: Config, log: Logger): Wired {
           }),
         },
         invoice: { service: invoices, dunning, authz },
-        billing: { service: billing, authz, advances: advanceDesk, finals: finalBills, workBilling },
+        billing: { service: billing, authz, advances: advanceDesk, finals: finalBills, workBilling, early: earlyBills },
         notifications: { service: notifications, authz },
         filestore: { service: fileStore, authz },
         dashboard: { service: dashboards, authz },
