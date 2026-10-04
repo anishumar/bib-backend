@@ -730,6 +730,9 @@ SVCV1=$(curl -s -b $J/partner.txt $API/api/v1/config/service/gst-filing | python
 import sys, json
 print(next(v["id"] for v in json.load(sys.stdin)["versions"] if v["version"] == 1))')
 PID=$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["lead"]["partyId"])' "$(cat $J/lead1.json)")
+# Q076: a lead's prospect has no registration, and no proposal is drafted for
+# a company with no country. The firm records it first, as on the client page.
+curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/parties/organizations/$PID/legal-entities -H "$H" -d '{"jurisdiction":"IN","entityType":"private_limited"}'
 
 # NOTE ON QUOTING: every JSON body below is built into a variable FIRST. A
 # backslash-escaped body written inline — -d "{\"a\":\"b\"}" — is unescaped by
