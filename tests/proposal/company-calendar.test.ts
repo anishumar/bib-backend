@@ -25,7 +25,7 @@ function setup() {
 }
 
 /** Sent, valid until 31 October; its company on New York's clock when asked. */
-async function sent(s: ReturnType<typeof setup>, newYork: boolean): Promise<string> {
+async function sent(s: ReturnType<typeof setup>, newYork: boolean, validUntil = "2026-10-31"): Promise<string> {
   const p = await s.service.draft(
     {
       tenantId: TENANT,
@@ -34,7 +34,7 @@ async function sent(s: ReturnType<typeof setup>, newYork: boolean): Promise<stri
       currency: "INR",
       fxRate: "1",
       fxRateDate: "2026-10-01",
-      validUntil: "2026-10-31",
+      validUntil,
     },
     ACTOR,
   );
@@ -82,5 +82,33 @@ describe("a proposal lapses on its company's calendar (0337)", () => {
     await expect(s.service.recordAcceptance(TENANT, id, statement, PARTNER, ACTOR)).rejects.toBeInstanceOf(
       ProposalExpired,
     );
+  });
+});
+
+// FINAL REVIEW #4: a recorded acceptance's date is the RECORDER's statement of
+// a day. Their screen sends its own today (asOf), held to the company's day or
+// one either side, so a partner in Delhi at 09:00 on 1 November can record a
+// New York company's quote as accepted "today" while New York is still on
+// 31 October.
+describe("a recorded acceptance takes the recorder's day, held to the company's (0337)", () => {
+  // 03:30 UTC on 1 November: 09:00 on 1 November in India, 23:30 on 31 October in New York.
+  const AT = "2026-11-01T03:30:00Z";
+  const today = { ...statement, acceptedOn: "2026-11-01" };
+
+  it("records India's 1 November for a New York company when the recorder says it is today", async () => {
+    const s = setup();
+    const id = await sent(s, true, "2026-11-30");
+    s.clock.set(AT);
+    await s.service.recordAcceptance(TENANT, id, today, PARTNER, ACTOR, "2026-11-01");
+    expect((await s.proposals.findById(TENANT, id))?.status).toBe("accepted");
+  });
+
+  it("refuses a recorder's day two days off the company's", async () => {
+    const s = setup();
+    const id = await sent(s, true, "2026-11-30");
+    s.clock.set(AT);
+    await expect(
+      s.service.recordAcceptance(TENANT, id, { ...statement, acceptedOn: "2026-11-02" }, PARTNER, ACTOR, "2026-11-02"),
+    ).rejects.toThrow(/cannot be today where you are/);
   });
 });

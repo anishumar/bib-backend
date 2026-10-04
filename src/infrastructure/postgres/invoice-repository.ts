@@ -697,6 +697,20 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
     );
   }
 
+  async newestNumberedYear(
+    tenantId: string,
+    entityPartyId: string,
+    documentType: "invoice" | "credit_note",
+  ): Promise<number | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ year: number | null }[]>`
+        SELECT max(financial_year) AS year FROM crm.invoice_series
+         WHERE entity_party_id = ${entityPartyId} AND document_type = ${documentType} AND last_number > 0
+      `;
+      return row?.year ?? null;
+    });
+  }
+
   async cancel(tenantId: string, invoiceId: string): Promise<CancelOutcome> {
     return withTenant(this.app, tenantId, async (db) => {
       // The row first, so a payment recorded at this moment waits for us (its

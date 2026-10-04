@@ -38,6 +38,7 @@ import {
   INDIAN_FY_START_MONTH,
   financialYearLabel,
   financialYearOf,
+  seriesYearFor,
   preDrawnNumberOrder,
   isCreditReason,
   isPaymentMethod,
@@ -463,7 +464,12 @@ export class InvoiceService {
     // THE NUMBER IS DRAWN HERE (0322), in the same transaction as the status.
     // A draft numbered before 0322 keeps its number, and is refused when that
     // number would now go out of order (B51): never renumbered.
-    const financialYear = financialYearOf(issuedOn, startMonth);
+    // Never an older series than the company last drew in (final review: a
+    // later year start reopened the one that had closed).
+    const financialYear = seriesYearFor(
+      financialYearOf(issuedOn, startMonth),
+      await this.deps.invoices.newestNumberedYear(tenantId, invoice.entityPartyId, "invoice"),
+    );
     const outcome = await this.deps.invoices.issue(tenantId, invoiceId, {
       issuedOn,
       financialYear,
@@ -805,8 +811,12 @@ export class InvoiceService {
       issuedOn,
       reason: input.reason,
       note: input.note ?? null,
-      // Its own date's series, never the invoice's (B45).
-      financialYear: financialYearOf(issuedOn, startMonth),
+      // Its own date's series, never the invoice's (B45), and never an older
+      // one than the company last drew a credit note in (0337).
+      financialYear: seriesYearFor(
+        financialYearOf(issuedOn, startMonth),
+        await this.deps.invoices.newestNumberedYear(input.tenantId, invoice.entityPartyId, "credit_note"),
+      ),
       fiscalYearStartMonth: startMonth,
     });
     if (!("credit" in outcome)) {

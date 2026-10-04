@@ -157,6 +157,22 @@ export function financialYearLabel(startYear: number, startMonth: number = INDIA
 }
 
 /**
+ * The series year a number is drawn in (0337, final review): the year of its
+ * date on the company's calendar, but never one OLDER than the newest series
+ * the company has already drawn a number in.
+ *
+ * Moving a company's year start later (January to April, April to July)
+ * would otherwise put the weeks after the change back into the series that
+ * closed before it: `INV/2026/0101` dated February 2027 after
+ * `INV/2027/0005`. Numbers are frozen and gapless, so that cannot be undone.
+ * Instead the series in progress carries on, a transition period, until the
+ * company's own year reaches a newer one.
+ */
+export function seriesYearFor(dateYear: number, newestNumbered: number | null): number {
+  return newestNumbered !== null && newestNumbered > dateYear ? newestNumbered : dateYear;
+}
+
+/**
  * The year label a number was drawn under (0337): `INV/2026-27/0001` ->
  * `2026-27`, `INV/2027/0001` -> `2027`. Read OFF the number because the number
  * is frozen and was formatted from its series' own start month; working the

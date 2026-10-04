@@ -111,3 +111,47 @@ describe("an invoice's number is in its company's own year (0337)", () => {
     expect(inr.financialYear).toBe(2026);
   });
 });
+
+// FINAL REVIEW #1: moving a company's year start LATER must never reopen the
+// series that closed before it. Numbers are frozen and gapless, so a wrong
+// series cannot be undone: the series in progress carries on (a transition
+// period) until the company's own year has caught up with it.
+describe("a later year start never reopens a closed series (0337)", () => {
+  async function issueAt(s: ReturnType<typeof setup>, at: string, entityPartyId: string) {
+    s.clock.set(at);
+    return s.service.issue(TENANT, (await drafted(s, entityPartyId)).id, ACTOR);
+  }
+
+  it("January to April: carries on the calendar-year series, then starts the new year's", async () => {
+    const s = setup("2027-01-10T06:00:00Z");
+    expect((await issueAt(s, "2027-01-10T06:00:00Z", AE_CO)).number).toBe("INV/2027/0001");
+    s.timeZones.setCompany(AE_CO, { timeZone: "Asia/Dubai", fiscalYearStartMonth: 4 });
+    // 22 February is in April's 2026-27, whose series closed long ago: not reopened.
+    expect((await issueAt(s, "2027-02-22T06:00:00Z", AE_CO)).number).toBe("INV/2027/0002");
+    expect((await issueAt(s, "2028-04-03T06:00:00Z", AE_CO)).number).toBe("INV/2028-29/0001");
+  });
+
+  it("April to July: carries on 2026-27 rather than reopening 2025-26", async () => {
+    const s = setup("2026-05-10T06:00:00Z");
+    expect((await issueAt(s, "2026-05-10T06:00:00Z", US_CO)).number).toBe("INV/2026-27/0001");
+    s.timeZones.setCompany(US_CO, { timeZone: "America/New_York", fiscalYearStartMonth: 7 });
+    expect((await issueAt(s, "2026-05-20T06:00:00Z", US_CO)).number).toBe("INV/2026-27/0002");
+  });
+
+  it("a credit note keeps to the same rule", async () => {
+    const s = setup("2027-01-10T06:00:00Z");
+    const first = await issueAt(s, "2027-01-10T06:00:00Z", AE_CO);
+    const one = await s.service.issueCreditNote(
+      { tenantId: TENANT, invoiceId: first.id, amount: "100", reason: "goodwill" },
+      ACTOR,
+    );
+    expect(one.number).toBe("CN/2027/0001");
+    s.timeZones.setCompany(AE_CO, { timeZone: "Asia/Dubai", fiscalYearStartMonth: 4 });
+    s.clock.set("2027-02-22T06:00:00Z");
+    const two = await s.service.issueCreditNote(
+      { tenantId: TENANT, invoiceId: first.id, amount: "100", reason: "goodwill" },
+      ACTOR,
+    );
+    expect(two.number).toBe("CN/2027/0002");
+  });
+});

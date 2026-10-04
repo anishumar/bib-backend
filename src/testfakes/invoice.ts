@@ -381,7 +381,13 @@ export class FakeInvoiceRepo implements InvoiceRepository {
     // 0027 shipped without a document type. A fake that shared the counter
     // would let a test pass on interleaved numbering the database refuses.
     const k = `${keyOf({ tenantId: c.tenantId, entityPartyId: c.entityPartyId, financialYear })}|credit_note`;
-    const existing = this.creditSeries.get(k) ?? { last: 0, prefix: DEFAULT_CREDIT_NOTE_PREFIX };
+    // Fixed to the year's start month when the series is made, as the
+    // adapter's row is (0337).
+    const existing = this.creditSeries.get(k) ?? {
+      last: 0,
+      prefix: DEFAULT_CREDIT_NOTE_PREFIX,
+      startMonth: c.fiscalYearStartMonth,
+    };
     const sequence = existing.last + 1;
     this.creditSeries.set(k, { ...existing, last: sequence });
 
@@ -390,7 +396,7 @@ export class FakeInvoiceRepo implements InvoiceRepository {
       tenantId: c.tenantId,
       invoiceId: c.invoiceId,
       entityPartyId: c.entityPartyId,
-      number: formatInvoiceNumber({ prefix: existing.prefix, financialYear, sequence, startMonth: c.fiscalYearStartMonth }),
+      number: formatInvoiceNumber({ prefix: existing.prefix, financialYear, sequence, startMonth: existing.startMonth }),
       financialYear,
       sequenceNumber: sequence,
       amount: c.amount,
@@ -449,7 +455,19 @@ export class FakeInvoiceRepo implements InvoiceRepository {
     };
   }
 
-  private readonly creditSeries = new Map<string, { last: number; prefix: string }>();
+  private readonly creditSeries = new Map<string, { last: number; prefix: string; startMonth: number }>();
+
+  newestNumberedYear(
+    tenantId: string,
+    entityPartyId: string,
+    documentType: "invoice" | "credit_note",
+  ): Promise<number | null> {
+    const rows = documentType === "invoice" ? this.series : this.creditSeries;
+    const years = [...rows.entries()]
+      .filter(([k, v]) => k.startsWith(`${tenantId}|${entityPartyId}|`) && v.last > 0)
+      .map(([k]) => Number(k.split("|")[2]));
+    return Promise.resolve(years.length === 0 ? null : Math.max(...years));
+  }
 
   private patch(tenantId: string, invoiceId: string, over: Partial<Invoice>): Promise<Invoice> {
     const at = this.invoices.findIndex((i) => i.tenantId === tenantId && i.id === invoiceId);

@@ -333,6 +333,9 @@ export interface RecurringEngagement {
   /** The firm company its letter is issued by (0337): its periods are cut on
    *  that company's year and opened on its clock. */
   readonly issuingEntityPartyId: string;
+  /** The year start its periods were first cut on (0338), pinned and never
+   *  moved; absent or null = not cut yet: the company's year, else the firm's. */
+  readonly yearStartMonth?: number | null;
   readonly deptCode: string | null;
   readonly teamCode: string | null;
   readonly workflowKey: string | null;
@@ -355,6 +358,9 @@ export interface RecurringEngagementFeed {
   /** Active recurring engagements at this firm, oldest start first, and the
    *  ENDED ones that still owe periods up to their last day (V2.3). */
   activeRecurring(tenantId: string, limit: number): Promise<readonly RecurringEngagement[]>;
+  /** Pin the year each engagement's periods are cut on (0338), where none is
+   *  pinned yet; a pinned one is never moved. */
+  pinYearStarts(tenantId: string, pins: readonly { engagementId: string; month: number }[]): Promise<void>;
 }
 
 /**

@@ -56,7 +56,9 @@ export class GoLiveScheduler {
       if (current === null || current.billingFrom !== null) continue;
       if (current.feeGroup !== null && groupsDone.has(current.feeGroup.id)) continue;
       const recurrence = recurrenceOfService(current.billingFrequency);
-      const fiscalYear = yearStartOfCompany(calendars, current.issuingEntityPartyId, firmYear);
+      // Its pinned year when it has one (0338), else its company's, else the firm's.
+      const fiscalYear =
+        current.yearStartMonth ?? yearStartOfCompany(calendars, current.issuingEntityPartyId, firmYear);
       if (recurrence === null || (recurrence !== "monthly" && fiscalYear === null)) continue;
       const [period] = periodsFrom(
         goesLiveFrom(current.effectiveFrom, input.liveOn),
@@ -71,7 +73,7 @@ export class GoLiveScheduler {
           ? [engagementId]
           : await this.deps.schedules.groupMembers(input.tenantId, current.feeGroup.id);
       if (current.feeGroup !== null) groupsDone.add(current.feeGroup.id);
-      await this.deps.schedules.set(input.tenantId, ids, billingFrom, firstInvoiceOn);
+      await this.deps.schedules.set(input.tenantId, ids, billingFrom, firstInvoiceOn, fiscalYear);
       for (const id of ids) {
         await this.deps.events.recordEvent({
           tenantId: input.tenantId,

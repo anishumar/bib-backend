@@ -488,6 +488,7 @@ export class SchedulerService {
       zoneOfCompany(calendars, row.issuingEntityPartyId, firmZone);
 
     let awaitingFiscalYear = 0;
+    const pins: { engagementId: string; month: number }[] = [];
     // Period -> the engagements owing it. Keyed on start, end AND label: a
     // quarter and a month can begin on the same day and are not one period,
     // and two companies on different years label the same months apart.
@@ -495,7 +496,11 @@ export class SchedulerService {
     for (const row of rows) {
       const recurrence = recurrenceOfService(row.recurrence);
       if (recurrence === null) continue;
-      const fiscalYearStartMonth = yearStartOfCompany(calendars, row.issuingEntityPartyId, firmYearStart);
+      // Its pinned year when it was cut before (0338), so a company's year
+      // change does not re-cut work under way; else its company's, else the
+      // firm's, pinned below once a period is cut on it.
+      const fiscalYearStartMonth =
+        row.yearStartMonth ?? yearStartOfCompany(calendars, row.issuingEntityPartyId, firmYearStart);
       if (recurrence !== "monthly" && fiscalYearStartMonth === null) {
         awaitingFiscalYear += 1;
         continue;
@@ -510,6 +515,9 @@ export class SchedulerService {
         endsOn: row.endsOn,
         resumedOn: row.resumedOn,
       });
+      if (periods.length > 0 && (row.yearStartMonth ?? null) === null && fiscalYearStartMonth !== null) {
+        pins.push({ engagementId: row.engagementId, month: fiscalYearStartMonth });
+      }
       for (const period of periods) {
         if (row.linkedPeriods.includes(period.start)) continue;
         const key = `${period.start}${KEY_SEP}${period.end}${KEY_SEP}${period.label}`;
@@ -518,6 +526,8 @@ export class SchedulerService {
         else wanted.set(key, { period, engagements: [row] });
       }
     }
+
+    if (pins.length > 0) await this.deps.recurring.pinYearStarts(tenantId, pins);
 
     let periodsSpawned = 0;
     let periodsExtended = 0;

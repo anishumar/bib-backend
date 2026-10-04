@@ -760,6 +760,7 @@ interface ScheduleRow {
   first_invoice_on: string | null;
   billing_timing: string | null;
   billing_on: string | null;
+  year_start_month: number | null;
 }
 
 const SCHEDULE_SELECT = `
@@ -774,7 +775,8 @@ const SCHEDULE_SELECT = `
          -- What the LETTER says about when it is billed (0319): a grouped line
          -- is billed with its group, so the group's word is the one.
          CASE WHEN g.id IS NOT NULL THEN g.billing_timing ELSE ll.billing_timing END AS billing_timing,
-         (CASE WHEN g.id IS NOT NULL THEN g.billing_on ELSE ll.billing_on END)::text AS billing_on
+         (CASE WHEN g.id IS NOT NULL THEN g.billing_on ELSE ll.billing_on END)::text AS billing_on,
+         e.year_start_month
     FROM crm.engagement e
     JOIN crm.engagement_letter l ON l.id = e.engagement_letter_id AND l.tenant_id = e.tenant_id
     JOIN crm.engagement_letter_line ll ON ll.id = e.engagement_letter_line_id AND ll.tenant_id = e.tenant_id
@@ -801,6 +803,7 @@ function toSchedule(r: ScheduleRow): ScheduleRecord {
     firstInvoiceOn: r.first_invoice_on,
     billingTiming: timingOf(r.billing_timing),
     billingOn: r.billing_on,
+    yearStartMonth: r.year_start_month,
   };
 }
 
@@ -854,12 +857,15 @@ export class PostgresBillingSchedules implements BillingSchedules {
     engagementIds: readonly string[],
     billingFrom: string | null,
     firstInvoiceOn: string | null,
+    yearStartMonth: number | null,
   ): Promise<void> {
     if (engagementIds.length === 0) return;
     await withTenant(this.app, tenantId, async (db) => {
+      // The year is pinned once, never moved (0338).
       await db`
         UPDATE crm.engagement
-           SET billing_from = ${billingFrom}::date, first_invoice_on = ${firstInvoiceOn}::date
+           SET billing_from = ${billingFrom}::date, first_invoice_on = ${firstInvoiceOn}::date,
+               year_start_month = coalesce(year_start_month, ${yearStartMonth}::smallint)
          WHERE id = ANY(${db.array(engagementIds as string[])}::uuid[])
       `;
     });

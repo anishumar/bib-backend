@@ -301,6 +301,14 @@ export interface InvoiceRepository {
     series: { readonly entityPartyId: string; readonly financialYear: number },
     exceptInvoiceId: string,
   ): Promise<{ readonly number: string; readonly sequenceNumber: number } | null>;
+  /** The newest year this company has drawn a number of this kind in (0337);
+   *  null when it has drawn none. `seriesYearFor` keeps a year change from
+   *  reopening an older series. */
+  newestNumberedYear(
+    tenantId: string,
+    entityPartyId: string,
+    documentType: "invoice" | "credit_note",
+  ): Promise<number | null>;
   /**
    * Cancel it, unless it is ISSUED and money was received against it (B05):
    * then nothing changes and the net paid comes back. Checked under the

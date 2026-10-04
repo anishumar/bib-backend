@@ -150,3 +150,20 @@ describe("a series keeps the year it started with (0337)", () => {
     ]);
   });
 });
+
+describe("a later year start never reopens a closed series (0337, final review)", () => {
+  it("January to April: the calendar-year series carries on; 2026's is not reopened", async () => {
+    const gulf = await company("Gulf Moves Later FZE", "AE", "Asia/Dubai", "12-31");
+    expect((await issueAt("2026-11-10T06:00:00Z", gulf)).number).toBe("INV/2026/0001");
+    expect((await issueAt("2027-01-10T06:00:00Z", gulf)).number).toBe("INV/2027/0001");
+    // It moves to an April year in February 2027: 22 February is April's 2026-27.
+    await owner`UPDATE core.legal_entity SET financial_year_end = '03-31' WHERE party_id = ${gulf}`;
+    const next = await issueAt("2027-02-22T06:00:00Z", gulf);
+    expect(next.number).toBe("INV/2027/0002");
+    expect(next.financialYear).toBe(2027);
+    expect((await seriesOf(gulf)).map((s) => [s.financial_year, s.start_month, s.last_number])).toEqual([
+      [2026, 1, 1],
+      [2027, 1, 2],
+    ]);
+  });
+});

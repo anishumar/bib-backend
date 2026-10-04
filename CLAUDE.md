@@ -905,6 +905,19 @@ company's own tax number's `valid_from`).
 made, so changing a company's year mid-series keeps the label until the new year (a
 transition period, as Business Central does); a new series row carries the company's latest
 prefix. The invoice read's `financialYearLabel` is read off the frozen number, never rebuilt.
+**A number is never drawn in a series OLDER than the newest one the company has drawn in**
+(`seriesYearFor`): moving a year start later (January to April) would otherwise reopen the
+series that closed before it; the series in progress carries on until the new year catches up.
+
+**An engagement keeps the year it was first cut on (0338).** `crm.engagement.year_start_month`
+is pinned when billing is scheduled (go-live, or by hand) or the first recurring period is cut,
+and never moved; the billing sweep and the scheduler cut on it before the company's live year.
+A company's year change applies to engagements that start after it, never re-cutting months
+already billed or worked.
+
+**A recorded acceptance takes the RECORDER's day** (`asOf`, held to the company's day ±1, on
+letters and proposals): its date is a person's statement, and a partner in Delhi at 09:00 must
+be able to record "today" for a New York company still on yesterday.
 
 **`asOf` on a company document is held to the COMPANY's day** or one either side, and the
 screens no longer send it: the API dates the document on the company's day. The invoice read's

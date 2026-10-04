@@ -51,7 +51,7 @@ function engine(now: string, firmYear: number | null, uaeOnItsOwn = true, ids: I
     clock: new FakeClock(new Date(now)),
     events: new RecordingEventSink(),
   });
-  return { service, jobs, recurring };
+  return { service, jobs, recurring, zone };
 }
 
 function work(
@@ -125,6 +125,28 @@ describe("recurring work follows its company's calendar (0337)", () => {
     // September's books are still owed in both; October has begun only in Delhi.
     expect(jobsOf(jobs, UAE_WORK).map((j) => j.periodLabel)).toEqual(["Sep 2026"]);
     expect(jobsOf(jobs, IN_WORK).map((j) => j.periodLabel)).toEqual(["Sep 2026", "Oct 2026"]);
+  });
+
+  // FINAL REVIEW #2: a company's year change must not re-cut work already
+  // under way. The engagement keeps the year its first period was cut on.
+  it("pins the year on the first period, and keeps it after the company changes year", async () => {
+    const { service, jobs, recurring, zone } = engine("2026-11-15T09:00:00Z", 4);
+    recurring.add(FIRM, work(UAE_WORK, UAE_LETTER, UAE_CO, "annually"));
+    await service.sweepActivations();
+    expect(recurring.pins.get(UAE_WORK)).toBe(1);
+    expect(jobsOf(jobs, UAE_WORK).map((j) => j.periodLabel)).toEqual(["2026"]);
+
+    zone.setCompany(UAE_CO, { timeZone: "Asia/Dubai", fiscalYearStartMonth: 4 });
+    await service.sweepActivations();
+    // No April-cut "FY2026-27" job beside the open "2026" one.
+    expect(jobsOf(jobs, UAE_WORK).map((j) => j.periodLabel)).toEqual(["2026"]);
+  });
+
+  it("cuts an engagement already pinned on its pinned year", async () => {
+    const { service, jobs, recurring } = engine("2026-11-15T09:00:00Z", 4);
+    recurring.add(FIRM, { ...work(UAE_WORK, UAE_LETTER, UAE_CO, "annually"), yearStartMonth: 4 });
+    await service.sweepActivations();
+    expect(jobsOf(jobs, UAE_WORK).map((j) => j.periodLabel)).toEqual(["FY2026-27"]);
   });
 
   it("leaves an Indian job's identity exactly as it was before companies had calendars", async () => {

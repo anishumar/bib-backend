@@ -713,6 +713,7 @@ export class BillingDeskService {
 
     let billingFrom: string | null = null;
     let firstInvoiceOn: string | null = null;
+    let fiscalYear: number | null = null;
     if (input.billingFrom !== null || input.firstInvoiceOn !== null) {
       if (input.billingFrom === null || input.firstInvoiceOn === null) {
         throw new InvalidBillingInput("Give both the first period billed and the date its invoice falls due, or neither.");
@@ -725,12 +726,14 @@ export class BillingDeskService {
       }
       const recurrence = recurrenceOfService(current.billingFrequency);
       if (recurrence === null) throw new NotBilledOnASchedule(current.billingFrequency ?? "unset");
-      // The letter's company's year (0337), else the firm's.
-      const fiscalYear = yearStartOfCompany(
-        await this.deps.timeZones.companyCalendars(input.tenantId),
-        current.issuingEntityPartyId,
-        await this.deps.fiscalYears.fiscalYearStartMonth(input.tenantId),
-      );
+      // Its pinned year (0338), else the letter's company's (0337), else the firm's.
+      fiscalYear =
+        current.yearStartMonth ??
+        yearStartOfCompany(
+          await this.deps.timeZones.companyCalendars(input.tenantId),
+          current.issuingEntityPartyId,
+          await this.deps.fiscalYears.fiscalYearStartMonth(input.tenantId),
+        );
       if (recurrence !== "monthly" && fiscalYear === null) throw new FiscalYearNeeded();
       const [period] = periodsFrom(input.billingFrom, recurrence, 1, fiscalYear ?? 1);
       billingFrom = period?.start ?? input.billingFrom;
@@ -749,7 +752,7 @@ export class BillingDeskService {
         ? [current.engagementId]
         : await this.deps.schedules.groupMembers(input.tenantId, current.feeGroup.id);
     const before = await Promise.all(ids.map((id) => this.deps.schedules.find(input.tenantId, id)));
-    await this.deps.schedules.set(input.tenantId, ids, billingFrom, firstInvoiceOn);
+    await this.deps.schedules.set(input.tenantId, ids, billingFrom, firstInvoiceOn, fiscalYear);
     for (const [i, id] of ids.entries()) {
       await this.deps.events.recordEvent({
         tenantId: input.tenantId,

@@ -113,7 +113,10 @@ export class BillingService {
       // THE ISSUING COMPANY'S CALENDAR (0337): its periods are cut on its own
       // year and fall due on its own day, else the firm's. A New York
       // company's October is not billed while it is 31 October in New York.
-      const fiscalYearStartMonth = yearStartOfCompany(calendars, subject.issuingEntityPartyId, firmYearStart);
+      // An engagement already cut keeps the year it was cut on (0338): a
+      // company's year change does not re-cut months already billed.
+      const fiscalYearStartMonth =
+        subject.yearStartMonth ?? yearStartOfCompany(calendars, subject.issuingEntityPartyId, firmYearStart);
       const today = dayInZone(now, zoneOfCompany(calendars, subject.issuingEntityPartyId, firmZone));
       if (recurrence !== "monthly" && fiscalYearStartMonth === null) {
         awaitingFiscalYear += 1;

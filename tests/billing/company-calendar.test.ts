@@ -70,6 +70,7 @@ function world(opts: { now: string; firmYear?: number | null }) {
   const timeZones = new FakeFirmTimeZone("Asia/Kolkata");
   timeZones.setCompany(AE_CO, { timeZone: "Asia/Dubai", fiscalYearStartMonth: 1 });
   timeZones.setCompany(US_CO, { timeZone: "America/New_York" });
+  const clock = new FakeClock(new Date(opts.now));
   const service = new BillingService({
     dues,
     managers: new FakeBillingManagerFacts(),
@@ -77,10 +78,10 @@ function world(opts: { now: string; firmYear?: number | null }) {
     fiscalYears: new FakeFiscalYearSource(opts.firmYear === undefined ? 4 : opts.firmYear),
     timeZones,
     ids: new FakeIds(),
-    clock: new FakeClock(new Date(opts.now)),
+    clock,
     events: new RecordingEventSink(),
   });
-  return { dues, service };
+  return { dues, service, clock };
 }
 
 describe("the billing sweep follows each company's year (0337)", () => {
@@ -122,6 +123,33 @@ describe("the billing sweep follows each company's year (0337)", () => {
     const [report] = await w.service.sweep();
     expect(report?.awaitingFiscalYear).toBe(1);
     expect(w.dues.dues).toEqual([]);
+  });
+});
+
+// FINAL REVIEW #2: a company's year change must not re-cut work already being
+// billed. An engagement keeps the year it was first cut on (pinned when its
+// schedule was set); new engagements take the company's new year.
+describe("a year change does not re-cut an engagement already billed (0337)", () => {
+  it("keeps billing a yearly service on its pinned April year after its company moved to January", async () => {
+    const w = world({ now: "2026-04-02T06:00:00Z" });
+    w.dues.add(FIRM, subject({
+      issuingEntityPartyId: AE_CO,
+      billingFrequency: "annually",
+      billingFrom: "2026-04-01",
+      firstInvoiceOn: "2026-04-01",
+      yearStartMonth: 4,
+    }));
+    await w.service.sweep();
+    w.clock.set("2026-10-15T06:00:00Z");
+    await w.service.sweep();
+    // No "2026" January-to-December bill over months already billed.
+    expect(w.dues.dues.map((d) => [d.periodStart, d.periodEnd])).toEqual([["2026-04-01", "2027-03-31"]]);
+    w.clock.set("2027-04-02T06:00:00Z");
+    await w.service.sweep();
+    expect(w.dues.dues.map((d) => [d.periodStart, d.periodEnd])).toEqual([
+      ["2026-04-01", "2027-03-31"],
+      ["2027-04-01", "2028-03-31"],
+    ]);
   });
 });
 
@@ -227,6 +255,27 @@ describe("setting billing up follows the letter's company's year (0337)", () => 
     w.schedules.rows.push(schedule({ issuingEntityPartyId: AE_CO }));
     await w.goLive.scheduleActivated({ tenantId: FIRM, engagementIds: [ENG], liveOn: "2026-10-15" }, ME);
     expect(w.schedules.rows[0]).toMatchObject({ billingFrom: "2026-01-01", firstInvoiceOn: "2027-01-01" });
+  });
+
+  it("pins the year the schedule was cut on, at go-live and when set by hand", async () => {
+    const w = deskWorld();
+    await w.setting.set(FIRM, true);
+    w.schedules.rows.push(schedule({ engagementId: "00000000-0000-4000-8000-00000000c0a1", issuingEntityPartyId: AE_CO }));
+    w.schedules.rows.push(schedule({ engagementId: "00000000-0000-4000-8000-00000000c0a2", issuingEntityPartyId: AE_CO }));
+    await w.goLive.scheduleActivated({ tenantId: FIRM, engagementIds: ["00000000-0000-4000-8000-00000000c0a1"], liveOn: "2026-10-15" }, ME);
+    await w.desk.setSchedule(
+      { tenantId: FIRM, engagementId: "00000000-0000-4000-8000-00000000c0a2", billingFrom: "2026-06-15", firstInvoiceOn: "2027-01-01" },
+      ME,
+    );
+    expect(w.schedules.rows.map((r) => r.yearStartMonth)).toEqual([1, 1]);
+  });
+
+  it("cuts an engagement already pinned on its pinned year, not its company's new one", async () => {
+    const w = deskWorld();
+    await w.setting.set(FIRM, true);
+    w.schedules.rows.push(schedule({ issuingEntityPartyId: AE_CO, yearStartMonth: 4 }));
+    await w.goLive.scheduleActivated({ tenantId: FIRM, engagementIds: [ENG], liveOn: "2026-10-15" }, ME);
+    expect(w.schedules.rows[0]).toMatchObject({ billingFrom: "2026-04-01", firstInvoiceOn: "2027-04-01", yearStartMonth: 4 });
   });
 });
 

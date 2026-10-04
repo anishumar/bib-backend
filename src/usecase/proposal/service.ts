@@ -85,6 +85,7 @@ import {
   NotADraft,
   NotAService,
   ProposalExpired,
+  ProposalNotCallersToday,
   ProposalNotFound,
   ProposalPartyArchived,
   ProposalClientIsOwnCompany,
@@ -109,7 +110,7 @@ import {
   proposalDeletionRefusal,
 } from "../../domain/proposal/errors";
 import { zoneOfCompany } from "../../domain/calendar/model";
-import { dayInZone } from "../../domain/scheduler/zone";
+import { dayInZone, isCallersToday } from "../../domain/scheduler/zone";
 import { checkAcceptance } from "../../domain/acceptance/model";
 import type { AcceptanceStatement } from "../../domain/acceptance/model";
 import { planProposal } from "../../domain/proposal/document";
@@ -1686,6 +1687,9 @@ export class ProposalService {
     statement: AcceptanceStatement,
     recordedByUserId: string,
     actor: Actor,
+    /** The recorder's today (their screen's), held to the company's day or
+     *  one either side (0337); absent = the company's day. */
+    asOf?: string,
   ): Promise<Proposal> {
     const proposal = await this.findOrThrow(tenantId, proposalId);
     if (proposal.deletedAt !== null) throw new ProposalDeleted(proposal.ref);
@@ -1697,8 +1701,13 @@ export class ProposalService {
     if (proposal.status !== "sent") throw new InvalidTransition(proposal.status, "accepted");
 
     const zone = await this.companyZone(tenantId, proposal.issuingEntityPartyId);
+    // THE RECORDER'S DAY: a partner in Delhi at 09:00 on 1 November records a
+    // New York company's quote as accepted today, though New York is still on
+    // 31 October (final review). Held to the company's day or one either side.
+    const companyDay = dayInZone(now, zone);
+    if (asOf !== undefined && !isCallersToday(asOf, companyDay)) throw new ProposalNotCallersToday(asOf, companyDay);
     const evidence = checkAcceptance(statement, {
-      today: dayInZone(now, zone),
+      today: asOf ?? companyDay,
       sentOn: proposal.sentAt === null ? null : dayInZone(proposal.sentAt, zone),
       needsEvidence: false,
     });

@@ -781,6 +781,7 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_BILLING_FREQUENCY":
       case "INVALID_LINE_JURISDICTION":
       case "INVALID_OOP_ESTIMATE":
+      case "NOT_CALLERS_TODAY":
       case "INVALID_DISCOUNT":
       case "INVALID_FX_RATE":
       case "INVALID_CURRENCY":

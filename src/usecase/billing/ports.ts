@@ -29,6 +29,9 @@ export interface BillingSubject {
   readonly billingFrequency: string;
   readonly billingFrom: string;
   readonly firstInvoiceOn: string;
+  /** The year start its periods were first cut on (0338), pinned and never
+   *  moved; absent or null = not cut yet: the company's year, else the firm's. */
+  readonly yearStartMonth?: number | null;
   /** The letter's amount for ONE WHOLE period, as a decimal string, or null
    *  when the letter names no price ("as mutually agreed"). */
   readonly fullAmount: string | null;
@@ -632,6 +635,9 @@ export interface ScheduleRecord {
    *  line, else the line's. Null = the letter said nothing (arrears). */
   readonly billingTiming: BillingTiming | null;
   readonly billingOn: string | null;
+  /** The year start its periods were first cut on (0338), pinned and never
+   *  moved; absent or null = not cut yet: the company's year, else the firm's. */
+  readonly yearStartMonth?: number | null;
 }
 
 export interface BillingSchedules {
@@ -640,11 +646,14 @@ export interface BillingSchedules {
   find(tenantId: string, engagementId: string): Promise<ScheduleRecord | null>;
   /** Every engagement a fee group prices. */
   groupMembers(tenantId: string, feeGroupId: string): Promise<readonly string[]>;
+  /** `yearStartMonth` pins the year the schedule was cut on (0338) where
+   *  none is pinned yet; a pinned one is never moved. */
   set(
     tenantId: string,
     engagementIds: readonly string[],
     billingFrom: string | null,
     firstInvoiceOn: string | null,
+    yearStartMonth: number | null,
   ): Promise<void>;
 }
 
