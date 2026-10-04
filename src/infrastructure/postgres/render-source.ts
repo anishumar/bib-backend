@@ -1726,13 +1726,14 @@ function noteFlow(title: string, rows: readonly BlockRow[], kind: string): Flow[
   ];
 }
 
-/** "after each month", "at the start of each quarter", "first invoice on 15
+/** "at the end of each month" (Q042), "at the start of each quarter", "first invoice on 15
  *  November 2026": when the fee is invoiced (0319), or "" when the letter does
  *  not say, which prints nothing and leaves the document as it was. */
 function billedWhen(frequency: string | null, timing: string | null, on: string | null): string {
   const span = ({ monthly: "month", quarterly: "quarter", annually: "year" } as Record<string, string>)[frequency ?? ""];
   if (span === undefined || timing === null) return "";
-  if (timing === "arrears") return `billed after each ${span}`;
+  // Arrears is billed on the period's last day (Q042): "at the end of".
+  if (timing === "arrears") return `billed at the end of each ${span}`;
   if (timing === "advance") return `billed at the start of each ${span}`;
   return timing === "on_date" && on !== null ? `first invoice on ${longDate(on)}` : "";
 }

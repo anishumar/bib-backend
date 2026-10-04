@@ -233,8 +233,9 @@ describe("setting billing up follows the letter's company's year (0337)", () => 
     );
     const rows = await w.desk.unscheduled(FIRM);
     const by = new Map(rows.map((r) => [r.engagementId, r.suggestion]));
-    expect(by.get("e-ae")).toMatchObject({ billingFrom: "2026-01-01", firstInvoiceOn: "2027-01-01" });
-    expect(by.get("e-in")).toMatchObject({ billingFrom: "2026-04-01", firstInvoiceOn: "2027-04-01" });
+    // Each year billed on its last day (Q042).
+    expect(by.get("e-ae")).toMatchObject({ billingFrom: "2026-01-01", firstInvoiceOn: "2026-12-31" });
+    expect(by.get("e-in")).toMatchObject({ billingFrom: "2026-04-01", firstInvoiceOn: "2027-03-31" });
     // Each named in its own company's year.
     expect(by.get("e-ae")?.periodLabel).not.toBe(by.get("e-in")?.periodLabel);
   });
@@ -254,7 +255,8 @@ describe("setting billing up follows the letter's company's year (0337)", () => 
     await w.setting.set(FIRM, true);
     w.schedules.rows.push(schedule({ issuingEntityPartyId: AE_CO }));
     await w.goLive.scheduleActivated({ tenantId: FIRM, engagementIds: [ENG], liveOn: "2026-10-15" }, ME);
-    expect(w.schedules.rows[0]).toMatchObject({ billingFrom: "2026-01-01", firstInvoiceOn: "2027-01-01" });
+    // Arrears on the year's last day (Q042).
+    expect(w.schedules.rows[0]).toMatchObject({ billingFrom: "2026-01-01", firstInvoiceOn: "2026-12-31" });
   });
 
   it("pins the year the schedule was cut on, at go-live and when set by hand", async () => {
@@ -275,7 +277,14 @@ describe("setting billing up follows the letter's company's year (0337)", () => 
     await w.setting.set(FIRM, true);
     w.schedules.rows.push(schedule({ issuingEntityPartyId: AE_CO, yearStartMonth: 4 }));
     await w.goLive.scheduleActivated({ tenantId: FIRM, engagementIds: [ENG], liveOn: "2026-10-15" }, ME);
-    expect(w.schedules.rows[0]).toMatchObject({ billingFrom: "2026-04-01", firstInvoiceOn: "2027-04-01", yearStartMonth: 4 });
+    expect(w.schedules.rows[0]).toMatchObject({ billingFrom: "2026-04-01", firstInvoiceOn: "2027-03-31", yearStartMonth: 4 });
+  });
+
+  it("suggests an engagement already pinned on its pinned year, not its company's new one", async () => {
+    const w = deskWorld();
+    w.schedules.rows.push(schedule({ issuingEntityPartyId: AE_CO, yearStartMonth: 4 }));
+    const [row] = await w.desk.unscheduled(FIRM);
+    expect(row?.suggestion).toMatchObject({ billingFrom: "2026-04-01", firstInvoiceOn: "2027-03-31" });
   });
 });
 

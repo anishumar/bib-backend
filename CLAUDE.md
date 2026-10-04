@@ -2000,6 +2000,18 @@ currencies and cannot share an axis).
   cancelled invoice, a draft, a USD invoice from the Gulf company, a second firm behind the wall)
   and `revenue.test.ts` (the month cut at 00:30 IST on 1 October, the assembly).
 
+## Arrears is billed on the period's LAST day (Q042, 0339, 2026-10-04)
+
+Ashish: "1st November ko na bana kar 31st October ko hi banao". `scheduleFor` sets an arrears
+schedule's first bill on its first period's last day, and `billingDues` bills every period of a
+schedule that starts that way on its own last day, read off the period, never "first plus N
+months" (30 November plus a month is 30 December). The sweep makes it on that day on the issuing
+company's calendar. The invoice raised from it is still dated and numbered at Issue (0322), so a
+bill made on 31 October and issued on 2 November is a 2 November invoice. 0339 moved arrears
+schedules already set to the 1st after their first period back one day; an advance, a letter's
+own date and a day a person typed are untouched, and bills already written keep their day. The
+letter prints "billed at the end of each month"; To raise ages count from the last day.
+
 ## The advance and the final bill (auto-invoice phase 2, 0320)
 
 Phase 1 (0318/0319, `bib/prompts/auto-invoice/PLAN.md`) writes a `crm.billing_due` per period of

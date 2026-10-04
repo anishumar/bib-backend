@@ -83,7 +83,7 @@ describe("billingDues: which periods are due to be billed by today", () => {
     expect(dues.map((d) => d.period.label)).toEqual(["Oct 2026"]);
   });
 
-  it("bills each month on the first invoice date plus one month per period (arrears)", () => {
+  it("bills each month on the first invoice date plus one month per period (a schedule set before Q042)", () => {
     const dues = billingDues({
       periods: [oct, nov, dec],
       spanMonths: 1,
@@ -153,6 +153,54 @@ describe("billingDues: which periods are due to be billed by today", () => {
       windows: [open, { ...open, from: "2026-10-20" }],
     });
     expect(dues[0]).toMatchObject({ servedDays: 31, periodDays: 31 });
+  });
+
+  // Q042: a schedule whose first bill is its first period's LAST day bills
+  // every period on its own last day, read off the period, never "first plus
+  // N months": 30 November plus a month is 30 December, not 31 December.
+  it("bills each period on its own last day when the first bill is the first period's last day (Q042)", () => {
+    const dues = billingDues({
+      periods: [oct, nov, dec],
+      spanMonths: 1,
+      firstInvoiceOn: "2026-10-31",
+      today: "2026-12-31",
+      windows: [open],
+    });
+    expect(dues.map((d) => [d.period.label, d.billOn])).toEqual([
+      ["Oct 2026", "2026-10-31"],
+      ["Nov 2026", "2026-11-30"],
+      ["Dec 2026", "2026-12-31"],
+    ]);
+  });
+
+  it("does not drift to the 30th after a 30-day first month (Q042)", () => {
+    const dues = billingDues({
+      periods: [nov, dec],
+      spanMonths: 1,
+      firstInvoiceOn: "2026-11-30",
+      today: "2026-12-31",
+      windows: [open],
+    });
+    expect(dues.map((d) => d.billOn)).toEqual(["2026-11-30", "2026-12-31"]);
+  });
+
+  it("bills a month on its last day and not the day before (Q042)", () => {
+    const at = (today: string) =>
+      billingDues({ periods: [oct], spanMonths: 1, firstInvoiceOn: "2026-10-31", today, windows: [open] });
+    expect(at("2026-10-30")).toEqual([]);
+    expect(at("2026-10-31").map((d) => d.billOn)).toEqual(["2026-10-31"]);
+  });
+
+  it("bills a quarter on each quarter's last day (Q042)", () => {
+    const q4 = { start: "2027-01-01", end: "2027-03-31", label: "Q4 FY2026-27" };
+    const dues = billingDues({
+      periods: [q3, q4],
+      spanMonths: 3,
+      firstInvoiceOn: "2026-12-31",
+      today: "2027-03-31",
+      windows: [open],
+    });
+    expect(dues.map((d) => d.billOn)).toEqual(["2026-12-31", "2027-03-31"]);
   });
 
   it("bills a quarter a quarter apart", () => {
@@ -289,9 +337,10 @@ describe("serviceWindowOf: the days an engagement was served, from its row", () 
 });
 
 describe("scheduleFor: the schedule an engagement gets when it goes live (0319)", () => {
-  it("bills the period after it ends by default, and when the letter said nothing", () => {
-    expect(scheduleFor(oct, "arrears", null)).toEqual({ billingFrom: "2026-10-01", firstInvoiceOn: "2026-11-01" });
-    expect(scheduleFor(oct, null, null)).toEqual({ billingFrom: "2026-10-01", firstInvoiceOn: "2026-11-01" });
+  it("bills the period on its LAST day by default, and when the letter said nothing (Q042)", () => {
+    // Ashish, 4 Oct 2026: "1st November ko na bana kar 31st October ko hi banao".
+    expect(scheduleFor(oct, "arrears", null)).toEqual({ billingFrom: "2026-10-01", firstInvoiceOn: "2026-10-31" });
+    expect(scheduleFor(oct, null, null)).toEqual({ billingFrom: "2026-10-01", firstInvoiceOn: "2026-10-31" });
   });
 
   it("bills the period on its first day when the letter says in advance", () => {
@@ -302,8 +351,8 @@ describe("scheduleFor: the schedule an engagement gets when it goes live (0319)"
     expect(scheduleFor(oct, "on_date", "2026-11-15")).toEqual({ billingFrom: "2026-10-01", firstInvoiceOn: "2026-11-15" });
   });
 
-  it("rolls over a year end", () => {
-    expect(scheduleFor(dec, "arrears", null).firstInvoiceOn).toBe("2027-01-01");
+  it("bills December on 31 December, in its own year", () => {
+    expect(scheduleFor(dec, "arrears", null).firstInvoiceOn).toBe("2026-12-31");
   });
 
   it("moves a letter's date that is before the first period forward by whole spans (0321)", () => {

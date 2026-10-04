@@ -271,7 +271,7 @@ const UnscheduledSchema = ScheduleSchema.extend({
   suggestion: z
     .object({ billingFrom: z.string(), firstInvoiceOn: z.string(), periodLabel: z.string() })
     .nullable()
-    .openapi({ description: "The current period, billed the day after it ends (the firm's default)." }),
+    .openapi({ description: "The current period, billed on its last day (the firm's default, Q042)." }),
 }).openapi("BillingUnscheduled");
 
 const listRoute = createRoute({

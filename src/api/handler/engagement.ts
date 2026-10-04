@@ -295,7 +295,7 @@ const LetterLineSchema = z
     billingFrequency: z.enum(BILLING_FREQUENCY_VALUES).nullable(),
     billingTiming: z.enum(LETTER_BILLING_TIMINGS).nullable().openapi({
       description:
-        "When the fee is invoiced (0319): `arrears` (after each period), `advance` (at its start) " +
+        "When the fee is invoiced (0319): `arrears` (on each period's last day, Q042), `advance` (at its start) " +
         "or `on_date` (from `billingOn`, then one span after). Null: not chosen, billed after each " +
         "period. Only for a monthly, quarterly or yearly fee.",
     }),
@@ -810,7 +810,7 @@ const AddLineRequest = z
     billingFrequency: z.enum(BILLING_FREQUENCY_VALUES).optional(),
     billingTiming: z.enum(LETTER_BILLING_TIMINGS).optional().openapi({
       description:
-        "When the fee is invoiced (0319): `arrears` (after each period), `advance` (at its start) " +
+        "When the fee is invoiced (0319): `arrears` (on each period's last day, Q042), `advance` (at its start) " +
         "or `on_date` (from `billingOn`, then one span after). Null: not chosen, billed after each " +
         "period. Only for a monthly, quarterly or yearly fee.",
     }),

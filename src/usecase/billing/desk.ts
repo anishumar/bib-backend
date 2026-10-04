@@ -23,9 +23,9 @@ import type { Actor } from "../../domain/ledger/model";
 import type { EventSink } from "../ledger/ports";
 import { dayInZone } from "../../domain/scheduler/zone";
 import { yearStartOfCompany, zoneOfCompany } from "../../domain/calendar/model";
-import { addDays, periodsFrom, recurrenceOfService } from "../../domain/scheduler/model";
+import { periodsFrom, recurrenceOfService } from "../../domain/scheduler/model";
 import { isCalendarDay } from "../../domain/engagement/model";
-import { scheduleNotice } from "../../domain/billing/model";
+import { scheduleFor, scheduleNotice } from "../../domain/billing/model";
 import { compareAmounts, isAmount, isExchangeRate } from "../../domain/money/model";
 import {
   advancePolicyProblem,
@@ -219,8 +219,9 @@ export class BillingDeskService {
     return rows
       .filter((r) => SCHEDULED_FREQUENCIES.includes(r.billingFrequency ?? ""))
       .map((r) => {
-        // The letter's company's year and day (0337), else the firm's.
-        const fiscalYear = yearStartOfCompany(calendars, r.issuingEntityPartyId, firmYear);
+        // Its pinned year (0338), else the letter's company's (0337), else the
+        // firm's; the day is the company's.
+        const fiscalYear = r.yearStartMonth ?? yearStartOfCompany(calendars, r.issuingEntityPartyId, firmYear);
         const today = dayInZone(now, zoneOfCompany(calendars, r.issuingEntityPartyId, firmZone));
         const recurrence = recurrenceOfService(r.billingFrequency);
         if (recurrence === null || (recurrence !== "monthly" && fiscalYear === null)) {
@@ -229,14 +230,10 @@ export class BillingDeskService {
         const from = r.effectiveFrom > today ? r.effectiveFrom : today;
         const [period] = periodsFrom(from, recurrence, 1, fiscalYear ?? 1);
         if (period === undefined) return { ...r, suggestion: null };
-        return {
-          ...r,
-          suggestion: {
-            billingFrom: period.start,
-            firstInvoiceOn: addDays(period.end, 1),
-            periodLabel: period.label,
-          },
-        };
+        // What going live would set: the letter's timing, arrears on the
+        // period's last day (Q042).
+        const { billingFrom, firstInvoiceOn } = scheduleFor(period, r.billingTiming, r.billingOn);
+        return { ...r, suggestion: { billingFrom, firstInvoiceOn, periodLabel: period.label } };
       });
   }
 

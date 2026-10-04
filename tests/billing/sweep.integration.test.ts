@@ -572,7 +572,8 @@ describe("the billing desk on a real database (0318)", () => {
     expect(row).toMatchObject({
       serviceName: "Accounting and bookkeeping",
       billingFrequency: "monthly",
-      suggestion: { billingFrom: "2026-12-01", firstInvoiceOn: "2027-01-01" },
+      // Billed on its last day (Q042).
+      suggestion: { billingFrom: "2026-12-01", firstInvoiceOn: "2026-12-31" },
     });
     expect(rows.some((r) => r.engagementId === monthly)).toBe(false);
 

@@ -448,13 +448,24 @@ describe("an engagement's billing schedule", () => {
     expect(w.schedules.rows[0]).toMatchObject({ billingFrom: null, firstInvoiceOn: null });
   });
 
-  it("lists what has no schedule yet, suggesting this period billed after it ends", async () => {
+  it("lists what has no schedule yet, suggesting this period billed on its last day (Q042)", async () => {
     const w = world();
     w.schedules.rows.push(schedule(), schedule({ engagementId: ENG2, billingFrequency: "one_time" }));
     const rows = await w.service.unscheduled(FIRM);
     expect(rows.map((r) => [r.engagementId, r.suggestion])).toEqual([
-      [ENG, { billingFrom: "2026-12-01", firstInvoiceOn: "2027-01-01", periodLabel: "Dec 2026" }],
+      [ENG, { billingFrom: "2026-12-01", firstInvoiceOn: "2026-12-31", periodLabel: "Dec 2026" }],
     ]);
+  });
+
+  it("suggests what the letter says: its first day for an advance, its own date for on_date", async () => {
+    const w = world();
+    w.schedules.rows.push(
+      schedule({ billingTiming: "advance" }),
+      schedule({ engagementId: ENG2, billingTiming: "on_date", billingOn: "2026-12-05" }),
+    );
+    const by = new Map((await w.service.unscheduled(FIRM)).map((r) => [r.engagementId, r.suggestion?.firstInvoiceOn]));
+    expect(by.get(ENG)).toBe("2026-12-01");
+    expect(by.get(ENG2)).toBe("2026-12-05");
   });
 });
 
@@ -510,7 +521,8 @@ describe("the schedule an engagement starts with, from its letter", () => {
       schedule({ engagementId: ENG2, billingFrequency: "annually", billingTiming: "on_date", billingOn: "2026-11-15" }),
     );
     await live(w, [ENG, ENG2]);
-    expect(w.schedules.rows[0]).toMatchObject({ billingFrom: "2026-10-01", firstInvoiceOn: "2026-11-01" });
+    // Arrears on the period's last day (Q042).
+    expect(w.schedules.rows[0]).toMatchObject({ billingFrom: "2026-10-01", firstInvoiceOn: "2026-10-31" });
     expect(w.schedules.rows[1]).toMatchObject({ billingFrom: "2026-04-01", firstInvoiceOn: "2026-11-15" });
   });
 
@@ -519,7 +531,7 @@ describe("the schedule an engagement starts with, from its letter", () => {
     await w.setting.set(FIRM, true);
     w.schedules.rows.push(schedule({ effectiveFrom: "2026-12-10" }));
     await live(w, [ENG]);
-    expect(w.schedules.rows[0]).toMatchObject({ billingFrom: "2026-12-01", firstInvoiceOn: "2027-01-01" });
+    expect(w.schedules.rows[0]).toMatchObject({ billingFrom: "2026-12-01", firstInvoiceOn: "2026-12-31" });
   });
 
   it("sets nothing while the firm's switch is off: those go to Billing not set up", async () => {

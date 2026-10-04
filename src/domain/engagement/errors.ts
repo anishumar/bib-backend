@@ -572,7 +572,7 @@ export class InvalidLetterBillingTiming extends EngagementError {
   constructor(reason: string) {
     super(
       "INVALID_BILLING_TIMING",
-      `Billing timing: ${reason}. Send "arrears" (after each period), "advance" (at its start) ` +
+      `Billing timing: ${reason}. Send "arrears" (on each period's last day), "advance" (at its start) ` +
         `or "on_date" with "billingOn" (YYYY-MM-DD), for a monthly, quarterly or yearly fee only.`,
     );
   }

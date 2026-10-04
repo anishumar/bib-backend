@@ -15,7 +15,8 @@
 // ── THE FIRM'S RULES, NOT OURS (Ashish, 2026-10-01) ────────────────────────
 //
 //   - A schedule is a FIRST INVOICE DATE plus the letter's billing frequency.
-//     Arrears (October's work billed on 1 November), advance (billed on
+//     Arrears (October's work billed on 31 October, its last day: Q042),
+//     advance (billed on
 //     1 October) and a yearly audit billed in October are the same rule with a
 //     different first date. Nothing is billed before it, which is what makes it
 //     each client's go-live: the firm has no single go-live day.
@@ -95,9 +96,15 @@ export function goesLiveFrom(effectiveFrom: string, liveOn: string): string {
 
 /**
  * The schedule for an engagement going live, from the first period billed (the
- * one containing `goesLiveFrom`) and the letter's timing. Arrears bills it the
- * day after it ends, advance on its first day, `on_date` on the letter's date;
- * every later period follows one span after (`billingDues`).
+ * one containing `goesLiveFrom`) and the letter's timing. Arrears bills it on
+ * its LAST day (Q042), advance on its first day, `on_date` on the letter's
+ * date; every later period follows (`billingDues`).
+ *
+ * ARREARS ON THE LAST DAY (Q042, Ashish, 2026-10-04): "woh bill na aap 1st
+ * November ko na bana kar 31st October ko hi banao". The bill is a reminder to
+ * invoice; the invoice raised from it is dated and numbered on the day it is
+ * issued (0322), so a bill made on 31 October and issued on 2 November is a
+ * 2 November invoice.
  *
  * AN `on_date` BEFORE THE FIRST PERIOD moves forward by whole spans until it is
  * not (0321). A letter drafted in July saying "first invoice 5 August", signed
@@ -116,7 +123,7 @@ export function scheduleFor(
       ? period.start
       : timing === "on_date" && billingOn !== null
         ? notBeforeStart(billingOn, period)
-        : dayAfter(period.end);
+        : period.end;
   return { billingFrom: period.start, firstInvoiceOn };
 }
 
@@ -194,11 +201,15 @@ export function billingDues(input: {
   readonly windows: readonly ServiceWindow[];
 }): readonly BillingDuePlan[] {
   const dues: BillingDuePlan[] = [];
+  // ON EACH PERIOD'S LAST DAY (Q042) when the first bill is the first
+  // period's last day: read off each period, never "first plus N months",
+  // which drifts at month ends (30 November plus a month is 30 December).
+  const onLastDay = input.periods[0]?.end === input.firstInvoiceOn;
   input.periods.forEach((period, k) => {
     // A period that has not begun is never billed, whatever the schedule says
     // (0321): there is nothing served in it yet to bill.
     if (period.start > input.today) return;
-    const billOn = addMonthsClamped(input.firstInvoiceOn, k * input.spanMonths);
+    const billOn = onLastDay ? period.end : addMonthsClamped(input.firstInvoiceOn, k * input.spanMonths);
     if (billOn > input.today) return;
     const served = Math.max(0, ...input.windows.map((w) => servedDays(period, w)));
     if (served === 0) return;
