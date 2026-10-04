@@ -66,6 +66,8 @@ import {
   isDay,
   resolveEffectiveFrom,
 } from "../../src/domain/engagement/model";
+import type { EngagementLetter } from "../../src/domain/engagement/model";
+import { SignatoryNotFound, SignatoryRetired } from "../../src/domain/tenancy/errors";
 import { SEEDED_FIRM_ENTITY } from "../../src/testfakes/document";
 
 const TENANT = "00000000-0000-0000-0000-0000000000aa";
@@ -1161,6 +1163,112 @@ describe("the firm's signature block", () => {
     await completeTerms(s, undated);
     // The fake clock is 2026-07-01T09:00:00Z.
     expect((await s.service.send(TENANT, undated, ACTOR)).issuedOn).toBe("2026-07-01");
+  });
+});
+
+// ── Several signatories, and a choice on each letter (0343, Q005) ───────────
+//
+// The client: "the drop down at the time of finalizing EL to select who will
+// sign that particular EL". The choice is a draft's; send snapshots it. The
+// image is the PERSON's: the company's mark only ever prints for the default.
+
+describe("the signatory a letter chooses", () => {
+  const CHOSEN = "00000000-0000-0000-0000-0000000005a1";
+  const DEFAULT_ENTRY = "00000000-0000-0000-0000-0000000005a0";
+  const COMPANY_MARK = "00000000-0000-0000-0000-0000000005b0";
+  const OWN_MARK = "00000000-0000-0000-0000-0000000005b1";
+
+  function firmWithTwo() {
+    const s = setup();
+    s.firm.name(SIGNATORY, "Director");
+    s.firm.add(DEFAULT_ENTRY, SIGNATORY, "Director");
+    s.firm.add(CHOSEN, SUCCESSOR, "Partner", { displayName: "Ravi Iyer" });
+    s.firmSignatureImage.set(SEEDED_FIRM_ENTITY, COMPANY_MARK);
+    return s;
+  }
+
+  it("signs with the chosen partner, and never prints the company's mark over their name", async () => {
+    const s = firmWithTwo();
+    const id = await draft(s);
+    await s.service.revise({ tenantId: TENANT, letterId: id, chosenSignatoryId: CHOSEN }, ACTOR);
+    await completeTerms(s, id);
+    const sent = await s.service.send(TENANT, id, ACTOR);
+    expect(sent.firmSignatoryUserId).toBe(SUCCESSOR);
+    expect(sent.firmSignatoryTitle).toBe("Partner");
+    // The company's mark is the DEFAULT's signature; over Ravi's name it would
+    // be a forged document. No image of his own, so a bare rule.
+    expect(sent.firmSignatureVersionId).toBeNull();
+  });
+
+  it("pins the chosen partner's OWN signature when they have one", async () => {
+    const s = firmWithTwo();
+    s.firm.add(CHOSEN, SUCCESSOR, "Partner", { signatureVersionId: OWN_MARK });
+    const id = await draft(s);
+    await s.service.revise({ tenantId: TENANT, letterId: id, chosenSignatoryId: CHOSEN }, ACTOR);
+    await completeTerms(s, id);
+    expect((await s.service.send(TENANT, id, ACTOR)).firmSignatureVersionId).toBe(OWN_MARK);
+  });
+
+  it("leaves a letter nobody chose for exactly as before: the default, with the company's mark", async () => {
+    const s = firmWithTwo();
+    const id = await draft(s);
+    await completeTerms(s, id);
+    const sent = await s.service.send(TENANT, id, ACTOR);
+    expect(sent.firmSignatoryUserId).toBe(SIGNATORY);
+    expect(sent.firmSignatureVersionId).toBe(COMPANY_MARK);
+  });
+
+  it("prefers the default's own signature over the company's once they upload one", async () => {
+    const s = firmWithTwo();
+    s.firm.name(SIGNATORY, "Director", OWN_MARK);
+    const id = await draft(s);
+    await completeTerms(s, id);
+    expect((await s.service.send(TENANT, id, ACTOR)).firmSignatureVersionId).toBe(OWN_MARK);
+  });
+
+  it("refuses a retired partner when chosen, and at send if retired after", async () => {
+    const s = firmWithTwo();
+    const id = await draft(s);
+    await s.service.revise({ tenantId: TENANT, letterId: id, chosenSignatoryId: CHOSEN }, ACTOR);
+    await completeTerms(s, id);
+    s.firm.retire(CHOSEN);
+    await expect(s.service.send(TENANT, id, ACTOR)).rejects.toBeInstanceOf(SignatoryRetired);
+    // Refused before anything was written.
+    expect((await s.letters.findLetter(TENANT, id))?.status).toBe("draft");
+    expect(s.signatures.rows.size).toBe(0);
+
+    const other = await draft(s);
+    await expect(
+      s.service.revise({ tenantId: TENANT, letterId: other, chosenSignatoryId: CHOSEN }, ACTOR),
+    ).rejects.toBeInstanceOf(SignatoryRetired);
+    await expect(
+      s.service.revise(
+        { tenantId: TENANT, letterId: other, chosenSignatoryId: "00000000-0000-0000-0000-0000000005ff" },
+        ACTOR,
+      ),
+    ).rejects.toBeInstanceOf(SignatoryNotFound);
+  });
+
+  it("goes back to the default when the choice is cleared", async () => {
+    const s = firmWithTwo();
+    const id = await draft(s);
+    await s.service.revise({ tenantId: TENANT, letterId: id, chosenSignatoryId: CHOSEN }, ACTOR);
+    const cleared = await s.service.revise({ tenantId: TENANT, letterId: id, chosenSignatoryId: null }, ACTOR);
+    expect(cleared.chosenSignatoryId).toBeNull();
+    await completeTerms(s, id);
+    expect((await s.service.send(TENANT, id, ACTOR)).firmSignatoryUserId).toBe(SIGNATORY);
+  });
+
+  it("does not move a letter's content hash: the choice is not a term, the snapshot is", async () => {
+    const s = firmWithTwo();
+    const id = await draft(s);
+    await completeTerms(s, id);
+    const letter = (await s.letters.findLetter(TENANT, id)) as EngagementLetter;
+    const base = { letter, lines: [], feeGroups: [], clauses: [] };
+    // canonicalContent's own type does not even admit the column; this proves
+    // the value cannot leak in through the object either.
+    const chose: EngagementLetter = { ...letter, chosenSignatoryId: CHOSEN };
+    expect(canonicalContent(base)).toBe(canonicalContent({ ...base, letter: chose }));
   });
 });
 

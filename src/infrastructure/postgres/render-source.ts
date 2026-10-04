@@ -495,16 +495,21 @@ export class PostgresRenderSource implements RenderSource {
         SELECT el.party_id, el.ref, el.title, el.layout, el.jurisdiction, el.currency,
                el.status, el.issuing_entity_party_id,
                -- WHO SEND WOULD SIGN FOR THE FIRM, read for a draft's preview
-               -- only: the standing signatory on the tenant and the issuer's
-               -- signature in force — the two things Send pins (0081).
-               firm.firm_signatory_user_id AS standing_user_id,
-               firm.firm_signatory_title AS standing_title,
+               -- only, by EngagementService.signerFor's rule (0343): the
+               -- drafter's choice, else the firm's default; the person's OWN
+               -- image, else (the default only) the issuer's signature in force.
+               CASE WHEN chosen.id IS NOT NULL THEN chosen.user_id
+                    ELSE firm.firm_signatory_user_id END AS standing_user_id,
+               CASE WHEN chosen.id IS NOT NULL THEN chosen.title
+                    ELSE firm.firm_signatory_title END AS standing_title,
                standing.display_name AS standing_name,
                standing.email::text AS standing_email,
-               (SELECT b.document_version_id FROM files.brand_asset b
-                 WHERE b.entity_party_id = el.issuing_entity_party_id
-                   AND b.tenant_id = el.tenant_id AND b.kind = 'signature' AND b.is_active
-               ) AS standing_signature_version_id,
+               CASE WHEN chosen.id IS NOT NULL
+                    THEN COALESCE(chosen.signature_version_id,
+                                  CASE WHEN chosen.user_id = firm.firm_signatory_user_id
+                                       THEN mark.version_id END)
+                    ELSE COALESCE(dflt.signature_version_id, mark.version_id)
+               END AS standing_signature_version_id,
                el.background, el.advance_required, el.advance_amount::text,
                addressee.display_name AS addressee_name,
                signatory.email::text AS firm_signatory_email,
@@ -535,7 +540,17 @@ export class PostgresRenderSource implements RenderSource {
         JOIN tenancy.tenant firm ON firm.id = el.tenant_id
         LEFT JOIN core.legal_entity le ON le.party_id = entity.id
         LEFT JOIN tenancy.user_account signatory ON signatory.id = el.firm_signatory_user_id
-        LEFT JOIN tenancy.user_account standing ON standing.id = firm.firm_signatory_user_id
+        LEFT JOIN tenancy.firm_signatory chosen ON chosen.id = el.chosen_signatory_id
+        LEFT JOIN tenancy.firm_signatory dflt
+               ON dflt.tenant_id = el.tenant_id AND dflt.user_id = firm.firm_signatory_user_id
+        LEFT JOIN tenancy.user_account standing
+               ON standing.id = CASE WHEN chosen.id IS NOT NULL THEN chosen.user_id
+                                     ELSE firm.firm_signatory_user_id END
+        LEFT JOIN LATERAL (
+          SELECT b.document_version_id AS version_id FROM files.brand_asset b
+           WHERE b.entity_party_id = el.issuing_entity_party_id
+             AND b.tenant_id = el.tenant_id AND b.kind = 'signature' AND b.is_active
+        ) mark ON true
         LEFT JOIN core.party addressee ON addressee.id = el.addressed_to_party_id
         WHERE el.id = ${letterId}
       `;

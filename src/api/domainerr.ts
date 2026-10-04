@@ -140,7 +140,16 @@ export function mapError(err: unknown): MappedError {
       // named somebody who is not on this firm's roster. Same answer as
       // MEMBERSHIP_NOT_FOUND above, because it is the same fact.
       case "SIGNATORY_NOT_A_MEMBER":
+      case "SIGNATORY_NOT_FOUND":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      case "INVALID_SIGNATORY_TITLE":
+      case "SIGNATURE_NOT_DRAWABLE":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      // The list's state refuses these, not the request's shape (0343).
+      case "SIGNATORY_ALREADY_LISTED":
+      case "SIGNATORY_RETIRED":
+      case "DEFAULT_SIGNATORY_CANNOT_RETIRE":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
     }

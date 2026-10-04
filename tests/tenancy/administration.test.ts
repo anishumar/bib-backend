@@ -18,7 +18,13 @@ import {
   MembershipExists,
   MembershipNotFound,
   RoleNotDefined,
+  DefaultSignatoryCannotRetire,
+  InvalidSignatoryTitle,
+  SignatoryAlreadyListed,
   SignatoryNotAMember,
+  SignatoryNotFound,
+  SignatoryRetired,
+  SignatureNotDrawable,
 } from "../../src/domain/tenancy/errors";
 
 const ACTOR = { type: "human" as const, id: "00000000-0000-4000-8000-0000000000e1" };
@@ -382,7 +388,7 @@ describe("the firm's standing signatory", () => {
       { tenantId: tenant.id, userId: owner.id, title: "Director" },
       ACTOR,
     );
-    expect(named).toEqual({ userId: owner.id, displayName: "Anita Rao", title: "Director" });
+    expect(named).toMatchObject({ userId: owner.id, displayName: "Anita Rao", title: "Director" });
     expect(await service.firmSignatory(tenant.id)).toEqual(named);
   });
 
@@ -484,5 +490,150 @@ describe("the firm's standing signatory", () => {
       ACTOR,
     );
     expect((await service.firmSignatory(tenant.id))?.userId).toBe(successor.userId);
+  });
+});
+
+// ── The list of signatories (0343, Q005) ────────────────────────────────────
+//
+// "pls add option to add signatories and then the drop down at the time of
+// finalizing EL to select who will sign that particular EL" (Ashish, 30 Sep
+// 2026). Firm-wide; the default stays on the tenant row.
+
+describe("the list of signatories", () => {
+  async function withColleague() {
+    const base = await firm();
+    const colleague = await base.service.inviteMember(
+      {
+        tenantId: base.tenant.id,
+        email: "partner2@harbour.example",
+        audience: "STAFF",
+        role: "partner",
+        commercialVisibility: true,
+      },
+      ACTOR,
+    );
+    return { ...base, colleague };
+  }
+
+  it("puts the firm's first signatory on the list AS its default", async () => {
+    // A list with entries and no default would still send letters with a
+    // blank block, so the first one is the default whatever was asked.
+    const { service, tenant, owner } = await firm();
+    const added = await service.addSignatory({ tenantId: tenant.id, userId: owner.id, title: "Director" }, ACTOR);
+    expect(added.isDefault).toBe(true);
+    expect(await service.firmSignatory(tenant.id)).toMatchObject({ userId: owner.id, signatoryId: added.id });
+  });
+
+  it("adds a second signatory without moving the default", async () => {
+    const { service, tenant, owner, colleague } = await withColleague();
+    await service.addSignatory({ tenantId: tenant.id, userId: owner.id, title: "Director" }, ACTOR);
+    const second = await service.addSignatory(
+      { tenantId: tenant.id, userId: colleague.userId, title: "Partner" },
+      ACTOR,
+    );
+    expect(second.isDefault).toBe(false);
+    expect((await service.firmSignatory(tenant.id))?.userId).toBe(owner.id);
+    const list = await service.listSignatories(tenant.id);
+    expect(list.map((s) => [s.title, s.isDefault])).toEqual([
+      ["Director", true],
+      ["Partner", false],
+    ]);
+  });
+
+  it("lists one person once", async () => {
+    const { service, tenant, owner } = await firm();
+    await service.addSignatory({ tenantId: tenant.id, userId: owner.id, title: "Director" }, ACTOR);
+    await expect(
+      service.addSignatory({ tenantId: tenant.id, userId: owner.id, title: "Partner" }, ACTOR),
+    ).rejects.toBeInstanceOf(SignatoryAlreadyListed);
+  });
+
+  it("refuses a blank title and somebody who does not work here", async () => {
+    const { service, tenant, owner } = await firm();
+    await expect(
+      service.addSignatory({ tenantId: tenant.id, userId: owner.id, title: "  " }, ACTOR),
+    ).rejects.toBeInstanceOf(InvalidSignatoryTitle);
+    const stranger = await service.ensureUser("someone@elsewhere.example");
+    await expect(
+      service.addSignatory({ tenantId: tenant.id, userId: stranger.id, title: "Director" }, ACTOR),
+    ).rejects.toBeInstanceOf(SignatoryNotAMember);
+  });
+
+  it("moves the default, and renaming the default's title moves the tenant's copy", async () => {
+    const { service, tenant, owner, colleague } = await withColleague();
+    await service.addSignatory({ tenantId: tenant.id, userId: owner.id, title: "Director" }, ACTOR);
+    const second = await service.addSignatory(
+      { tenantId: tenant.id, userId: colleague.userId, title: "Partner" },
+      ACTOR,
+    );
+    await service.makeDefaultSignatory(tenant.id, second.id, ACTOR);
+    await service.changeSignatory({ tenantId: tenant.id, signatoryId: second.id, title: "Managing Partner" }, ACTOR);
+    expect(await service.firmSignatory(tenant.id)).toMatchObject({
+      userId: colleague.userId,
+      title: "Managing Partner",
+    });
+  });
+
+  it("never retires the default, and a retired signatory cannot become it", async () => {
+    const { service, tenant, owner, colleague } = await withColleague();
+    const first = await service.addSignatory({ tenantId: tenant.id, userId: owner.id, title: "Director" }, ACTOR);
+    const second = await service.addSignatory(
+      { tenantId: tenant.id, userId: colleague.userId, title: "Partner" },
+      ACTOR,
+    );
+    await expect(service.setSignatoryActive(tenant.id, first.id, false, ACTOR)).rejects.toBeInstanceOf(
+      DefaultSignatoryCannotRetire,
+    );
+    const retired = await service.setSignatoryActive(tenant.id, second.id, false, ACTOR);
+    expect(retired.isActive).toBe(false);
+    await expect(service.makeDefaultSignatory(tenant.id, second.id, ACTOR)).rejects.toBeInstanceOf(
+      SignatoryRetired,
+    );
+    expect((await service.setSignatoryActive(tenant.id, second.id, true, ACTOR)).isActive).toBe(true);
+  });
+
+  it("takes a PNG or JPEG as a signature, and nothing else", async () => {
+    const { service, f, tenant, owner } = await firm();
+    const s = await service.addSignatory({ tenantId: tenant.id, userId: owner.id, title: "Director" }, ACTOR);
+    f.signatories.versions.set("00000000-0000-4000-8000-0000000000a1", "image/png");
+    f.signatories.versions.set("00000000-0000-4000-8000-0000000000a2", "application/pdf");
+    const withImage = await service.changeSignatory(
+      { tenantId: tenant.id, signatoryId: s.id, signatureVersionId: "00000000-0000-4000-8000-0000000000a1" },
+      ACTOR,
+    );
+    expect(withImage.signatureVersionId).toBe("00000000-0000-4000-8000-0000000000a1");
+    await expect(
+      service.changeSignatory(
+        { tenantId: tenant.id, signatoryId: s.id, signatureVersionId: "00000000-0000-4000-8000-0000000000a2" },
+        ACTOR,
+      ),
+    ).rejects.toBeInstanceOf(SignatureNotDrawable);
+    await expect(
+      service.changeSignatory(
+        { tenantId: tenant.id, signatoryId: s.id, signatureVersionId: "00000000-0000-4000-8000-0000000000a3" },
+        ACTOR,
+      ),
+    ).rejects.toBeInstanceOf(SignatoryNotFound);
+  });
+
+  it("records each change by user id and capacity, never by name", async () => {
+    const { service, f, tenant, owner, colleague } = await withColleague();
+    await service.addSignatory({ tenantId: tenant.id, userId: owner.id, title: "Director" }, ACTOR);
+    const second = await service.addSignatory(
+      { tenantId: tenant.id, userId: colleague.userId, title: "Partner" },
+      ACTOR,
+    );
+    await service.setSignatoryActive(tenant.id, second.id, false, ACTOR);
+    const ours = f.events.recorded.filter((e) => e.verb.startsWith("firm_signatory."));
+    expect(ours.map((e) => e.verb)).toEqual([
+      "firm_signatory.added",
+      "firm_signatory.set",
+      "firm_signatory.added",
+      "firm_signatory.retired",
+    ]);
+    for (const e of ours) {
+      expect(JSON.stringify(e.payload)).not.toContain("Anita");
+      expect(JSON.stringify(e.payload)).not.toContain("@");
+    }
   });
 });

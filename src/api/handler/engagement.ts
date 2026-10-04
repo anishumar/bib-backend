@@ -258,6 +258,12 @@ const LetterSchema = z
         "The withdrawn letter this draft was copied from (0316), or null. Not `supersedesId`, " +
         "which names a SIGNED letter this one replaces.",
     }),
+    chosenSignatoryId: z.string().uuid().nullable().openapi({
+      description:
+        "Who the drafter chose to sign for the firm (0343): an entry on " +
+        "GET /api/v1/tenancy/signatories, or null for the firm's default at send. Once sent, " +
+        "`firmSignatoryUserId`/`firmSignatoryTitle` are the record.",
+    }),
   })
   .openapi("EngagementLetter");
 
@@ -750,6 +756,11 @@ const ReviseLetterRequest = z
     currency: CurrencySchema.optional(),
     fxRate: RateSchema.optional(),
     fxRateDate: DaySchema.optional(),
+    chosenSignatoryId: z.string().uuid().nullable().optional().openapi({
+      description:
+        "Who signs for the firm (0343): an entry on the firm's list, or null for its default. " +
+        "A retired signatory is refused (SIGNATORY_RETIRED), here and again at send.",
+    }),
   })
   .openapi("ReviseEngagementLetterRequest");
 
@@ -1797,6 +1808,7 @@ function toLetterBody(
     deletedAt: letter.deletedAt,
     deletedByUserId: letter.deletedByUserId,
     copiedFromId: letter.copiedFromId,
+    chosenSignatoryId: letter.chosenSignatoryId,
   };
 }
 

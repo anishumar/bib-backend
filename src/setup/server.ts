@@ -13,6 +13,7 @@ import { systemClock, systemSleeper } from "../platform/clock";
 import { InMemoryRateLimiter } from "../platform/ratelimit";
 import type { Logger } from "../platform/log";
 import { PostgresTenantRepository } from "../infrastructure/postgres/tenant-repository";
+import { PostgresSignatoryRepository } from "../infrastructure/postgres/signatory-repository";
 import { PostgresUserRepository } from "../infrastructure/postgres/user-repository";
 import { PostgresMembershipRepository } from "../infrastructure/postgres/membership-repository";
 import { PostgresPartyRepository } from "../infrastructure/postgres/party-repository";
@@ -739,6 +740,9 @@ export function wire(cfg: Config, log: Logger): Wired {
       seedDefaultGrades: (tenantId, actor) => staffGrades.seedDefaultGrades(tenantId, actor),
     },
     gradeDirectory: staffGradeRepository,
+    // The firm's list of signatories (0343, Q005); the default stays on the
+    // tenant row, held onto this list by a key.
+    signatories: new PostgresSignatoryRepository(pools.app),
     // And the firm's own words for work (T3.1), for the same reason again: a
     // firm with no work-item states cannot create a single task, and telling it
     // to configure that before it can record any work would be a worse first

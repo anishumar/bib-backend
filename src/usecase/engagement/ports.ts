@@ -232,6 +232,8 @@ export interface LetterRevision {
   readonly currency?: CurrencyCode | undefined;
   readonly fxRate?: Amount | undefined;
   readonly fxRateDate?: string | undefined;
+  /** An entry on the firm's list of signatories, or null for the default (0343). */
+  readonly chosenSignatoryId?: string | null | undefined;
 }
 
 /**
@@ -300,9 +302,32 @@ export interface IssuingEntity {
  * a bigger decision than this task (see the note on `EngagementService.send`).
  */
 export interface FirmSignatory {
-  firmSignatory(
-    tenantId: string,
-  ): Promise<{ readonly userId: string; readonly title: string } | null>;
+  /** The DEFAULT: who signs a letter nobody chose a signatory for. Since 0343
+   *  it carries its own image, when the default has uploaded one. */
+  firmSignatory(tenantId: string): Promise<{
+    readonly userId: string;
+    readonly title: string;
+    readonly signatureVersionId?: string | null | undefined;
+  } | null>;
+  /**
+   * One entry on the firm's list of signatories (0343, Q005), or null when
+   * there is no such entry at this firm. How a letter's CHOICE is resolved:
+   * checked when a draft chooses it, and again at send, because the firm may
+   * have retired the person in between.
+   */
+  signatory(tenantId: string, signatoryId: string): Promise<ChosenSignatory | null>;
+}
+
+/** An entry on the firm's list, as a letter needs it (0343). */
+export interface ChosenSignatory {
+  readonly id: string;
+  readonly userId: string;
+  readonly displayName: string | null;
+  readonly title: string;
+  /** Their OWN signature image; null when they have uploaded none. */
+  readonly signatureVersionId: string | null;
+  readonly isActive: boolean;
+  readonly isDefault: boolean;
 }
 
 /**

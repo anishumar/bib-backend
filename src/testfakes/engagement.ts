@@ -32,6 +32,7 @@ import type {
   EngagementRepository,
   FeeGroupEdit,
   FirmSignatory,
+  ChosenSignatory,
   FirmSignatureImage,
   FirmSignatureRecord,
   LetterFilters,
@@ -181,6 +182,7 @@ export class FakeEngagementRepo implements EngagementRepository {
       deletedAt: null,
       deletedByUserId: null,
       copiedFromId: l.copiedFromId ?? null,
+      chosenSignatoryId: null,
     };
     this.letters.push(row);
     return Promise.resolve(row);
@@ -845,14 +847,47 @@ export class FakeClauseLibrary implements ClauseLibrary {
  * one — and a letter sent by a firm that has named nobody must still go out.
  */
 export class FakeFirmSignatory implements FirmSignatory {
-  private current: { userId: string; title: string } | null = null;
+  private current: { userId: string; title: string; signatureVersionId: string | null } | null = null;
+  /** The firm's list (0343), by entry id. `name` puts the default on it too. */
+  readonly list = new Map<string, ChosenSignatory>();
 
-  name(userId: string, title: string): void {
-    this.current = { userId, title };
+  name(userId: string, title: string, signatureVersionId: string | null = null): void {
+    this.current = { userId, title, signatureVersionId };
+    for (const [id, s] of this.list) this.list.set(id, { ...s, isDefault: s.userId === userId });
   }
 
-  firmSignatory(_tenantId: string): Promise<{ userId: string; title: string } | null> {
+  /** Put somebody on the list; returns their entry id. */
+  add(
+    id: string,
+    userId: string,
+    title: string,
+    options: { signatureVersionId?: string | null; isActive?: boolean; displayName?: string | null } = {},
+  ): string {
+    this.list.set(id, {
+      id,
+      userId,
+      title,
+      displayName: options.displayName ?? null,
+      signatureVersionId: options.signatureVersionId ?? null,
+      isActive: options.isActive ?? true,
+      isDefault: this.current?.userId === userId,
+    });
+    return id;
+  }
+
+  retire(id: string): void {
+    const s = this.list.get(id);
+    if (s) this.list.set(id, { ...s, isActive: false });
+  }
+
+  firmSignatory(
+    _tenantId: string,
+  ): Promise<{ userId: string; title: string; signatureVersionId: string | null } | null> {
     return Promise.resolve(this.current);
+  }
+
+  signatory(_tenantId: string, signatoryId: string): Promise<ChosenSignatory | null> {
+    return Promise.resolve(this.list.get(signatoryId) ?? null);
   }
 }
 
@@ -1146,6 +1181,8 @@ export function makeEngagementFakes(): Deps & {
   prose: DocumentService;
   /** Who binds the firm, so a test can name one — or leave nobody. */
   firm: FakeFirmSignatory;
+  /** Each company's signature image (0081), so a test can upload one. */
+  firmSignatureImage: FakeFirmSignatureImage;
   events: RecordingEventSink;
   signatures: FakeSignatureRequestRepo;
 } {

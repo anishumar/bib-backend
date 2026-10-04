@@ -133,6 +133,7 @@ import {
   PostgresStandardBlockRepository,
 } from "../infrastructure/postgres/block-repository";
 import { PostgresTenantRepository } from "../infrastructure/postgres/tenant-repository";
+import { PostgresSignatoryRepository } from "../infrastructure/postgres/signatory-repository";
 import { PostgresSignatureRequestRepository } from "../infrastructure/postgres/signature-request-repository";
 import { RandomTokenFactory, Sha256ContentHasher } from "../infrastructure/crypto/random-tokens";
 import { AttestedSigner } from "../infrastructure/esign/attested-signer";
@@ -633,6 +634,7 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     clock: systemClock,
   });
   const tenantRepository = new PostgresTenantRepository(pools.app);
+  const workerSignatories = new PostgresSignatoryRepository(pools.app);
   const workerParties = new PostgresPartyRepository(pools.app);
 
   // THE ADVANCE'S DRAFT AND ITS REMINDERS (0322). The same invoice service and
@@ -761,6 +763,22 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
         return tenant?.firmSignatoryUserId && tenant.firmSignatoryTitle
           ? { userId: tenant.firmSignatoryUserId, title: tenant.firmSignatoryTitle }
           : null;
+      },
+      // The list (0343), from its own table for the same reason: never asked
+      // here, but answered truthfully the day something is.
+      signatory: async (tenantId, signatoryId) => {
+        const entry = await workerSignatories.find(tenantId, signatoryId);
+        if (entry === null) return null;
+        const tenant = await tenantRepository.findById(tenantId);
+        return {
+          id: entry.id,
+          userId: entry.userId,
+          displayName: null,
+          title: entry.title,
+          signatureVersionId: entry.signatureVersionId,
+          isActive: entry.isActive,
+          isDefault: tenant?.firmSignatoryUserId === entry.userId,
+        };
       },
     },
     // Never called here — this process does not send — but wired to the real

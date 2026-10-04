@@ -36,6 +36,7 @@ import { PostgresRelationshipRepository } from "../../src/infrastructure/postgre
 import { PostgresFirmTimeZone } from "../../src/infrastructure/postgres/firm-timezone-repository";
 import { PostgresMembershipRepository } from "../../src/infrastructure/postgres/membership-repository";
 import { PostgresTenantRepository } from "../../src/infrastructure/postgres/tenant-repository";
+import { PostgresSignatoryRepository } from "../../src/infrastructure/postgres/signatory-repository";
 import { PostgresUserRepository } from "../../src/infrastructure/postgres/user-repository";
 import { PostgresEventStore } from "../../src/infrastructure/postgres/event-repository";
 import { AttestedSigner } from "../../src/infrastructure/esign/attested-signer";
@@ -140,6 +141,7 @@ const tenancy = new TenancyService({
   roleDirectory: configRepository,
   gradeSeeder: { seedDefaultGrades: (t, a) => staffGrades.seedDefaultGrades(t, a) },
   gradeDirectory: staffGradeRepository,
+  signatories: new PostgresSignatoryRepository(app),
   // T3.1. The real service over the real table, like the two seeders above:
   // provisioning that stopped giving a firm its work-item states would leave it
   // unable to record a single task, and this test is what would catch it.
@@ -1185,6 +1187,92 @@ describe("the firm's signature block, in the database", () => {
 });
 
 // ── G1.5 · the dates, through the whole stack ──────────────────────────────
+
+describe("a letter's chosen signatory, in the database (0343)", () => {
+  async function staffMember(name: string): Promise<string> {
+    const [user] = await owner<{ id: string }[]>`
+      INSERT INTO tenancy.user_account (email, display_name)
+      VALUES (${`chosen-${stamp}-${String(refProbe())}@example.test`}, ${name}) RETURNING id
+    `;
+    if (!user) throw new Error("could not create the user");
+    await owner`
+      INSERT INTO tenancy.membership (tenant_id, user_id, audience, role, commercial_visibility)
+      VALUES (${tenantA}, ${user.id}, 'STAFF', 'partner', true)
+    `;
+    return user.id;
+  }
+
+  async function draftWithTerms(title: string): Promise<string> {
+    const letter = await service.draft(
+      {
+        tenantId: tenantA,
+        partyId: partyA,
+        jurisdiction: "IN",
+        title,
+        currency: "INR",
+        fxRate: "1",
+        fxRateDate: "2026-07-01",
+        advanceRequired: false,
+      },
+      SYSTEM_ACTOR,
+    );
+    await service.addLine({
+      tenantId: tenantA,
+      letterId: letter.id,
+      entityPartyId: entityA1,
+      serviceVersionId: gstV1,
+      description: "GST filing",
+      quantity: "1",
+      unitAmount: "2000",
+      discountPercent: "0",
+    });
+    await service.addClause(tenantA, letter.id, scopeV1);
+    await writeOpening(documents, tenantA, letter.id);
+    return letter.id;
+  }
+
+  it("sends under the partner the drafter chose, and freezes the choice once signed", async () => {
+    await nameTheFirmSignatory();
+    const partner = await staffMember("Ravi Iyer");
+    const chosen = await tenancy.addSignatory({ tenantId: tenantA, userId: partner, title: "Partner" }, SYSTEM_ACTOR);
+    expect(chosen.isDefault).toBe(false);
+
+    const id = await draftWithTerms("Acme: signed by the second partner");
+    await service.revise({ tenantId: tenantA, letterId: id, chosenSignatoryId: chosen.id }, SYSTEM_ACTOR);
+    const sent = await service.send(tenantA, id, SYSTEM_ACTOR);
+    expect(sent.firmSignatoryUserId).toBe(partner);
+    expect(sent.firmSignatoryTitle).toBe("Partner");
+    expect(sent.chosenSignatoryId).toBe(chosen.id);
+
+    await service.sign(
+      { tenantId: tenantA, letterId: id, signedByName: "Priya Menon", reference: "paper-0343" },
+      SYSTEM_ACTOR,
+    );
+    // 0019's freeze covers the new column the day it exists.
+    const err = await owner`
+      UPDATE crm.engagement_letter SET chosen_signatory_id = NULL WHERE id = ${id}
+    `.catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+  });
+
+  it("refuses, in the schema, a letter choosing another firm's signatory", async () => {
+    const [user] = await owner<{ id: string }[]>`
+      INSERT INTO tenancy.user_account (email)
+      VALUES (${`other-firm-signatory-${stamp}@example.test`}) RETURNING id
+    `;
+    if (!user) throw new Error("could not create the user");
+    const [theirs] = await owner<{ id: string }[]>`
+      INSERT INTO tenancy.firm_signatory (tenant_id, user_id, title)
+      VALUES (${tenantB}, ${user.id}, 'Director') RETURNING id
+    `;
+    if (!theirs) throw new Error("could not list the other firm's signatory");
+    const id = await draftWithTerms("Acme: borrowing a signature");
+    const err = await owner`
+      UPDATE crm.engagement_letter SET chosen_signatory_id = ${theirs.id} WHERE id = ${id}
+    `.catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("23503");
+  });
+});
 
 describe("effective dates", () => {
   it("carries the resolved start date onto every engagement", async () => {

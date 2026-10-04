@@ -6,7 +6,7 @@ import type { IdGen } from "../../platform/ids";
 import type { Actor } from "../../domain/ledger/model";
 import { SYSTEM_ACTOR } from "../../domain/ledger/model";
 import type { EventSink } from "../ledger/ports";
-import type { Membership, Tenant, UserAccount } from "../../domain/tenancy/model";
+import type { FirmSignatoryEntry, Membership, Tenant, UserAccount } from "../../domain/tenancy/model";
 import {
   activeMemberships,
   hasActiveAdministrator,
@@ -32,7 +32,13 @@ import {
   MembershipExists,
   MembershipNotFound,
   RoleNotDefined,
+  DefaultSignatoryCannotRetire,
+  InvalidSignatoryTitle,
+  SignatoryAlreadyListed,
   SignatoryNotAMember,
+  SignatoryNotFound,
+  SignatoryRetired,
+  SignatureNotDrawable,
   SlugTaken,
   TenantNotFound,
   UserNotFound,
@@ -58,10 +64,12 @@ import type {
   MembershipRepository,
   RoleDirectory,
   RoleRegistrySeeder,
+  SignatoryRepository,
   TenantRepository,
   UserRepository,
   Colleague,
 } from "./ports";
+import { isDrawableImage } from "../../domain/render/model";
 
 export interface Deps {
   readonly tenants: TenantRepository;
@@ -83,6 +91,8 @@ export interface Deps {
   /** What this firm's rungs ARE, for the two things a grade assignment must
    *  refuse: a grade this firm never defined, and one it has retired. */
   readonly gradeDirectory: GradeDirectory;
+  /** The firm's list of signatories (0343, Q005). */
+  readonly signatories: SignatoryRepository;
   readonly ids: IdGen;
   readonly events: EventSink;
 }
@@ -150,6 +160,37 @@ export interface FirmSignatoryRecord {
   readonly userId: string;
   readonly displayName: string | null;
   readonly title: string;
+  /** Their entry on the list (0343). Null only for a default never listed,
+   *  which 0343's key onto the list now rules out. */
+  readonly signatoryId: string | null;
+  /** Their OWN signature image, or null (then a letter falls back to the
+   *  issuing company's, for the default only). */
+  readonly signatureVersionId: string | null;
+}
+
+/** One entry on the firm's list of signatories, as the screens show it. */
+export interface SignatoryView extends FirmSignatoryEntry {
+  readonly displayName: string | null;
+  /** Whether this is the firm's default: who signs a letter nobody chose for. */
+  readonly isDefault: boolean;
+}
+
+export interface AddSignatoryInput {
+  readonly tenantId: string;
+  readonly userId: string;
+  readonly title: string;
+  /** Make them the firm's default as well. The first entry on a firm that has
+   *  named nobody becomes the default whatever this says. */
+  readonly makeDefault?: boolean | undefined;
+}
+
+export interface ChangeSignatoryInput {
+  readonly tenantId: string;
+  readonly signatoryId: string;
+  readonly title?: string | undefined;
+  /** A `files.document_version` holding a PNG or JPEG; null takes their own
+   *  image off (letters already sent keep the one they pinned). */
+  readonly signatureVersionId?: string | null | undefined;
 }
 
 export class TenancyService {
@@ -753,9 +794,9 @@ export class TenancyService {
   // to bind is an audit question about the firm, and a firm where the person
   // who presses send is the person who signs is a coincidence, not a rule.
 
-  /** Who signs this firm's letters, with the name a letterhead prints. Null
-   *  when the firm has not named anyone — a state it operates in perfectly
-   *  well, with the signature block simply not printing. */
+  /** Who signs this firm's letters by default, with the name a letterhead
+   *  prints. Null when the firm has not named anyone — a state it operates in
+   *  perfectly well, with the signature block simply not printing. */
   async firmSignatory(tenantId: string): Promise<FirmSignatoryRecord | null> {
     const tenant = await this.deps.tenants.findById(tenantId);
     if (!tenant) throw new TenantNotFound(tenantId);
@@ -763,15 +804,18 @@ export class TenancyService {
     // The NAME is a read-time join, like the ledger's actor: an erased account
     // stops resolving and the letters that named it survive.
     const user = await this.deps.users.findById(tenant.firmSignatoryUserId);
+    const entry = await this.deps.signatories.findByUser(tenantId, tenant.firmSignatoryUserId);
     return {
       userId: tenant.firmSignatoryUserId,
       displayName: user?.displayName ?? null,
       title: tenant.firmSignatoryTitle,
+      signatoryId: entry?.id ?? null,
+      signatureVersionId: entry?.signatureVersionId ?? null,
     };
   }
 
   /**
-   * Name the person who binds the firm.
+   * Name the person who binds the firm by default.
    *
    * Checked against the ROSTER, not just against `user_account`: that table is
    * global, so the foreign key would happily accept a login at another firm.
@@ -781,10 +825,10 @@ export class TenancyService {
    * STAFF only, and active only. A client-portal membership is a client, and a
    * revoked one is somebody who used to work here.
    *
-   * There is no way to CLEAR it, deliberately: a firm that has named a
-   * signatory and then unnames one has letters going out with a blank block
-   * again, which is the defect this exists to fix. A successor is an UPDATE,
-   * which is the whole reason it is a row.
+   * Since 0343 the default is somebody ON the list, so this puts them there (or
+   * brings their entry back, with this title) and then points the default at
+   * them. There is still no way to CLEAR it: a firm that unnames its signatory
+   * has letters going out with a blank block again.
    */
   async setFirmSignatory(input: SetFirmSignatoryInput, actor: Actor): Promise<FirmSignatoryRecord> {
     const tenant = await this.deps.tenants.findById(input.tenantId);
@@ -792,31 +836,217 @@ export class TenancyService {
 
     const title = input.title.trim();
     if (title === "") throw new SignatoryNotAMember(input.userId);
+    const member = await this.requireSignableMember(input.tenantId, input.userId);
 
-    const roster = await this.deps.memberships.listMembers(input.tenantId);
-    const member = roster.find(
-      (m) =>
-        m.membership.userId === input.userId &&
-        m.membership.audience === "STAFF" &&
-        m.membership.isActive,
-    );
-    if (!member) throw new SignatoryNotAMember(input.userId);
+    const listed = await this.deps.signatories.findByUser(input.tenantId, input.userId);
+    let entry: FirmSignatoryEntry;
+    if (listed === null) {
+      entry = await this.deps.signatories.add({
+        id: this.deps.ids.newId(),
+        tenantId: input.tenantId,
+        userId: input.userId,
+        title,
+        createdBy: actor.type === "human" ? actor.id : null,
+      });
+    } else {
+      entry =
+        listed.title === title
+          ? listed
+          : await this.deps.signatories.update(input.tenantId, listed.id, { title });
+      if (!entry.isActive) entry = await this.deps.signatories.setActive(input.tenantId, entry.id, true);
+    }
+    await this.deps.signatories.makeDefault(input.tenantId, entry.id);
+    await this.recordDefault(input.tenantId, entry, actor);
+    // The name comes back with the write — the roster read above is already
+    // holding it, and the caller is a screen that has to render what it just
+    // changed.
+    return {
+      userId: input.userId,
+      displayName: member.displayName,
+      title,
+      signatoryId: entry.id,
+      signatureVersionId: entry.signatureVersionId,
+    };
+  }
 
-    await this.deps.tenants.setFirmSignatory(input.tenantId, input.userId, title);
+  // ── The list of signatories (0343, Q005) ───────────────────────────────────
+  //
+  // "pls add option to add signatories and then the drop down at the time of
+  // finalizing EL to select who will sign that particular EL" (Ashish, 30 Sep
+  // 2026). Firm-wide, whichever company issues (Shrestha, 2026-10-04), like the
+  // single signatory before it. The default stays on the tenant row; see 0343.
+
+  /** Everyone on the list, retired included, with the default marked. */
+  async listSignatories(tenantId: string): Promise<readonly SignatoryView[]> {
+    const tenant = await this.deps.tenants.findById(tenantId);
+    if (!tenant) throw new TenantNotFound(tenantId);
+    const [entries, roster] = await Promise.all([
+      this.deps.signatories.list(tenantId),
+      this.deps.memberships.listMembers(tenantId),
+    ]);
+    return entries.map((e) => {
+      const member = roster.find((m) => m.membership.userId === e.userId);
+      return { ...e, displayName: member?.displayName ?? null, isDefault: tenant.firmSignatoryUserId === e.userId };
+    });
+  }
+
+  /** One entry, or null when there is none on this firm's list. The seam the
+   *  engagement use case reaches through to resolve a letter's choice. */
+  async signatory(tenantId: string, signatoryId: string): Promise<SignatoryView | null> {
+    const tenant = await this.deps.tenants.findById(tenantId);
+    if (!tenant) throw new TenantNotFound(tenantId);
+    const entry = await this.deps.signatories.find(tenantId, signatoryId);
+    if (entry === null) return null;
+    const user = await this.deps.users.findById(entry.userId);
+    return {
+      ...entry,
+      displayName: user?.displayName ?? null,
+      isDefault: tenant.firmSignatoryUserId === entry.userId,
+    };
+  }
+
+  /** Put somebody on the list. Staff, active, and not listed already. */
+  async addSignatory(input: AddSignatoryInput, actor: Actor): Promise<SignatoryView> {
+    const tenant = await this.deps.tenants.findById(input.tenantId);
+    if (!tenant) throw new TenantNotFound(input.tenantId);
+    const title = input.title.trim();
+    if (title === "") throw new InvalidSignatoryTitle();
+    const member = await this.requireSignableMember(input.tenantId, input.userId);
+    if ((await this.deps.signatories.findByUser(input.tenantId, input.userId)) !== null) {
+      throw new SignatoryAlreadyListed(member.displayName ?? member.email);
+    }
+    const entry = await this.deps.signatories.add({
+      id: this.deps.ids.newId(),
+      tenantId: input.tenantId,
+      userId: input.userId,
+      title,
+      createdBy: actor.type === "human" ? actor.id : null,
+    });
     await this.deps.events.recordEvent({
       tenantId: input.tenantId,
+      verb: "firm_signatory.added",
+      objectId: entry.id,
+      actor,
+      // The user id and the capacity, never the name: personal data in a log
+      // that cannot be erased (firm_signatory.set's rule).
+      payload: { userId: entry.userId, title },
+    });
+    // A firm that had named nobody: its first signatory is its default, or the
+    // list would have entries and letters would still go out with a blank block.
+    const becomesDefault = input.makeDefault === true || tenant.firmSignatoryUserId === null;
+    if (becomesDefault) {
+      await this.deps.signatories.makeDefault(input.tenantId, entry.id);
+      await this.recordDefault(input.tenantId, entry, actor);
+    }
+    return { ...entry, displayName: member.displayName, isDefault: becomesDefault };
+  }
+
+  /** Change what someone signs as, or their signature image. */
+  async changeSignatory(input: ChangeSignatoryInput, actor: Actor): Promise<SignatoryView> {
+    const current = await this.requireSignatory(input.tenantId, input.signatoryId);
+    const change: { title?: string; signatureVersionId?: string | null } = {};
+    if (input.title !== undefined) {
+      const title = input.title.trim();
+      if (title === "") throw new InvalidSignatoryTitle();
+      if (title !== current.title) change.title = title;
+    }
+    if (input.signatureVersionId !== undefined) {
+      if (input.signatureVersionId !== null) {
+        const mediaType = await this.deps.signatories.versionMediaType(
+          input.tenantId,
+          input.signatureVersionId,
+        );
+        // A version at another firm reads exactly as one that does not exist:
+        // the wall decides, and says nothing about the other firm.
+        if (mediaType === null) throw new SignatoryNotFound(input.signatureVersionId);
+        if (!isDrawableImage(mediaType)) throw new SignatureNotDrawable(mediaType);
+      }
+      if (input.signatureVersionId !== current.signatureVersionId) {
+        change.signatureVersionId = input.signatureVersionId;
+      }
+    }
+    if (Object.keys(change).length === 0) return current;
+    const entry = await this.deps.signatories.update(input.tenantId, current.id, change);
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "firm_signatory.changed",
+      objectId: entry.id,
+      actor,
+      payload: {
+        userId: entry.userId,
+        ...(change.title === undefined ? {} : { fromTitle: current.title, toTitle: entry.title }),
+        ...(change.signatureVersionId === undefined ? {} : { signatureVersionId: entry.signatureVersionId }),
+      },
+    });
+    return { ...current, ...entry };
+  }
+
+  /** Make this entry the firm's default. A retired entry is reinstated by its
+   *  own call first, never silently here. */
+  async makeDefaultSignatory(tenantId: string, signatoryId: string, actor: Actor): Promise<SignatoryView> {
+    const current = await this.requireSignatory(tenantId, signatoryId);
+    if (!current.isActive) throw new SignatoryRetired(current.displayName ?? "This signatory");
+    if (current.isDefault) return current;
+    // Still on the roster? Somebody whose access was revoked after they were
+    // listed cannot become who the firm signs as.
+    await this.requireSignableMember(tenantId, current.userId);
+    await this.deps.signatories.makeDefault(tenantId, current.id);
+    await this.recordDefault(tenantId, current, actor);
+    return { ...current, isDefault: true };
+  }
+
+  /** Retire someone (they cannot be chosen for a new letter) or reinstate
+   *  them. Letters already sent keep the block they went out with. */
+  async setSignatoryActive(
+    tenantId: string,
+    signatoryId: string,
+    isActive: boolean,
+    actor: Actor,
+  ): Promise<SignatoryView> {
+    const current = await this.requireSignatory(tenantId, signatoryId);
+    if (current.isActive === isActive) return current;
+    if (!isActive && current.isDefault) {
+      throw new DefaultSignatoryCannotRetire(current.displayName ?? "This signatory");
+    }
+    if (isActive) await this.requireSignableMember(tenantId, current.userId);
+    const entry = await this.deps.signatories.setActive(tenantId, current.id, isActive);
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: isActive ? "firm_signatory.reinstated" : "firm_signatory.retired",
+      objectId: entry.id,
+      actor,
+      payload: { userId: entry.userId },
+    });
+    return { ...current, ...entry };
+  }
+
+  private async requireSignatory(tenantId: string, signatoryId: string): Promise<SignatoryView> {
+    const found = await this.signatory(tenantId, signatoryId);
+    if (found === null) throw new SignatoryNotFound(signatoryId);
+    return found;
+  }
+
+  /** An active STAFF membership here, or the refusal by name. */
+  private async requireSignableMember(tenantId: string, userId: string): Promise<MemberRecord> {
+    const roster = await this.deps.memberships.listMembers(tenantId);
+    const member = roster.find(
+      (m) => m.membership.userId === userId && m.membership.audience === "STAFF" && m.membership.isActive,
+    );
+    if (!member) throw new SignatoryNotAMember(userId);
+    return member;
+  }
+
+  private async recordDefault(tenantId: string, entry: FirmSignatoryEntry, actor: Actor): Promise<void> {
+    await this.deps.events.recordEvent({
+      tenantId,
       verb: "firm_signatory.set",
-      objectId: input.tenantId,
+      objectId: tenantId,
       actor,
       // userId and the CAPACITY, never the name or the address: the first two
       // are machine facts about the firm's own configuration and the last two
       // are personal data in a log that cannot be erased.
-      payload: { userId: input.userId, title },
+      payload: { userId: entry.userId, title: entry.title },
     });
-    // The name comes back with the write — the roster read above is already
-    // holding it, and the caller is a screen that has to render what it just
-    // changed.
-    return { userId: input.userId, displayName: member.displayName, title };
   }
 
   // ── internals ───────────────────────────────────────────────────────────────

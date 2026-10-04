@@ -295,6 +295,17 @@ export interface EngagementLetter {
   /** The withdrawn letter this draft was COPIED from (0316), or null. Not
    *  `supersedesId`, which names a SIGNED letter this one replaces. */
   readonly copiedFromId: string | null;
+  /**
+   * Who the drafter chose to sign for the firm (0343, Q005): an entry on the
+   * firm's list of signatories, or null for the firm's default at send.
+   *
+   * A DRAFT's choice, so the preview prints the right name before anybody
+   * presses send. `send` snapshots the person, title and image into the three
+   * columns above, which stay the record. Not part of `canonicalContent`: the
+   * snapshot already is, and adding the choice would move the hash of every
+   * letter in flight.
+   */
+  readonly chosenSignatoryId: string | null;
 }
 
 /**

@@ -96,6 +96,7 @@ interface LetterRow {
   deleted_at: Date | null;
   deleted_by_user_id: string | null;
   copied_from_id: string | null;
+  chosen_signatory_id: string | null;
 }
 
 interface LineRow {
@@ -148,7 +149,7 @@ const LETTER_COLUMNS = `id, tenant_id, ref, party_id, issuing_entity_party_id, p
                         signed_by_title, withdrawn_at, background, addressed_to_party_id,
                         issued_on, supersedes_id, effective_from, firm_signatory_user_id,
                         firm_signatory_title, firm_signed_at, firm_signature_version_id,
-                        deleted_at, deleted_by_user_id, copied_from_id`;
+                        deleted_at, deleted_by_user_id, copied_from_id, chosen_signatory_id`;
 
 interface FeeGroupRow {
   id: string;
@@ -282,6 +283,7 @@ function toLetter(r: LetterRow): EngagementLetter {
     deletedAt: r.deleted_at?.toISOString() ?? null,
     deletedByUserId: r.deleted_by_user_id,
     copiedFromId: r.copied_from_id,
+    chosenSignatoryId: r.chosen_signatory_id,
   };
 }
 
@@ -443,7 +445,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
                l.background, l.addressed_to_party_id, l.issued_on, l.supersedes_id,
                l.effective_from, l.firm_signatory_user_id, l.firm_signatory_title,
                l.firm_signed_at, l.firm_signature_version_id, l.deleted_at, l.deleted_by_user_id,
-               l.copied_from_id,
+               l.copied_from_id, l.chosen_signatory_id,
                party.display_name AS party_display_name,
                issuer.display_name AS issuer_display_name,
                addressee.display_name AS addressee_display_name,
@@ -774,7 +776,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
                l.background, l.addressed_to_party_id, l.issued_on, l.supersedes_id,
                l.effective_from, l.firm_signatory_user_id, l.firm_signatory_title,
                l.firm_signed_at, l.firm_signature_version_id, l.deleted_at, l.deleted_by_user_id,
-               l.copied_from_id,
+               l.copied_from_id, l.chosen_signatory_id,
                party.display_name AS party_display_name,
                issuer.display_name AS issuer_display_name,
                t.gross + g.fees AS gross, t.discount, t.net + g.fees AS net,
@@ -988,7 +990,10 @@ export class PostgresEngagementRepository implements EngagementRepository {
                fx_rate = CASE WHEN ${has("fxRate")} THEN ${change.fxRate ?? null}::numeric
                               ELSE fx_rate END,
                fx_rate_date = CASE WHEN ${has("fxRateDate")} THEN ${change.fxRateDate ?? null}::date
-                                   ELSE fx_rate_date END
+                                   ELSE fx_rate_date END,
+               chosen_signatory_id = CASE WHEN ${has("chosenSignatoryId")}
+                                          THEN ${change.chosenSignatoryId ?? null}::uuid
+                                          ELSE chosen_signatory_id END
          -- A live draft only, repeated here: a letter sent or deleted since the
          -- service read it is left exactly as it stands.
          WHERE id = ${letterId} AND status = 'draft' AND deleted_at IS NULL

@@ -143,6 +143,7 @@ import type {
   EngagementRepository,
   FeeGroupEdit,
   FirmSignatory,
+  ChosenSignatory,
   FirmSignatureImage,
   FirmSignatureRecord,
   LetterFilters,
@@ -161,6 +162,9 @@ import type {
   SignatureTenants,
   SignedCopyFiler,
 } from "./ports";
+// The list of signatories is tenancy's, so its refusals are too (0343): a
+// letter choosing a retired partner is refused in the list's own words.
+import { SignatoryNotFound, SignatoryRetired } from "../../domain/tenancy/errors";
 
 export interface Deps {
   readonly letters: EngagementRepository;
@@ -514,6 +518,9 @@ export interface ReviseLetterInput {
   readonly currency?: string | undefined;
   readonly fxRate?: string | undefined;
   readonly fxRateDate?: string | undefined;
+  /** Who signs for the firm (0343, Q005): an entry on the firm's list, or null
+   *  for the firm's default at send. A retired entry is refused. */
+  readonly chosenSignatoryId?: string | null | undefined;
 }
 
 /**
@@ -1716,6 +1723,7 @@ export class EngagementService {
       currency?: string;
       fxRate?: string;
       fxRateDate?: string;
+      chosenSignatoryId?: string | null;
     } = {};
 
     if (input.title !== undefined) {
@@ -1724,6 +1732,12 @@ export class EngagementService {
       change.title = title;
     }
     if (input.background !== undefined) change.background = blankToNull(input.background ?? undefined);
+    // WHO SIGNS FOR THE FIRM (0343, Q005). Checked here so the drafter hears at
+    // once, and again at send, because the firm may retire the person between.
+    if (input.chosenSignatoryId !== undefined) {
+      if (input.chosenSignatoryId !== null) await this.requireChoosable(input.tenantId, input.chosenSignatoryId);
+      change.chosenSignatoryId = input.chosenSignatoryId;
+    }
     if (input.addressedToPartyId !== undefined) {
       if (input.addressedToPartyId !== null) {
         await this.requireContact(input.tenantId, letter.partyId, input.addressedToPartyId);
@@ -2243,6 +2257,53 @@ export class EngagementService {
   }
 
   /**
+   * An entry on the firm's list that a letter may choose (0343): there, and
+   * not retired. The refusals are tenancy's, because the list is.
+   */
+  private async requireChoosable(tenantId: string, signatoryId: string): Promise<ChosenSignatory> {
+    const chosen = await this.deps.firm.signatory(tenantId, signatoryId);
+    if (chosen === null) throw new SignatoryNotFound(signatoryId);
+    if (!chosen.isActive) throw new SignatoryRetired(chosen.displayName ?? chosen.title);
+    return chosen;
+  }
+
+  /**
+   * Who signs this letter for the firm, and the image to PIN beside them
+   * (0081): the drafter's choice, or the firm's default.
+   *
+   * THE MARK IS A PERSON'S (0343). Their own uploaded signature first. Only the
+   * DEFAULT, with none of their own, falls back to the issuing company's mark,
+   * which is exactly what every letter sent before 0343 carried. Anyone else
+   * with no image prints a bare rule: the company's mark is somebody's
+   * signature, and printing it over another partner's name forges a document.
+   *
+   * Null when nobody is chosen and the firm has named no default: the block
+   * does not print, as before.
+   */
+  private async signerFor(
+    tenantId: string,
+    letter: EngagementLetter,
+  ): Promise<Omit<FirmSignatureRecord, "signedAt"> | null> {
+    const companyMark = (): Promise<string | null> =>
+      this.deps.firmSignatureImage.activeSignatureVersion(tenantId, letter.issuingEntityPartyId);
+    if (letter.chosenSignatoryId !== null) {
+      const chosen = await this.requireChoosable(tenantId, letter.chosenSignatoryId);
+      return {
+        userId: chosen.userId,
+        title: chosen.title,
+        signatureVersionId: chosen.signatureVersionId ?? (chosen.isDefault ? await companyMark() : null),
+      };
+    }
+    const standing = await this.deps.firm.firmSignatory(tenantId);
+    if (standing === null) return null;
+    return {
+      userId: standing.userId,
+      title: standing.title,
+      signatureVersionId: standing.signatureVersionId ?? (await companyMark()),
+    };
+  }
+
+  /**
    * Send it for signature. Refuses a letter that commits nobody to anything,
    * and one with no terms at all.
    *
@@ -2287,6 +2348,10 @@ export class EngagementService {
     // 01:00 in Delhi the day before it went out. Settled before anything is
     // written, so a refused asOf leaves nothing behind.
     const issuedOn = await this.callersDay(tenantId, options.asOf);
+    // WHO SIGNS FOR THE FIRM, settled before anything is written as well: a
+    // draft that chose a partner the firm has since retired is refused here
+    // with nothing left behind (0343).
+    const signer = await this.signerFor(tenantId, letter);
 
     // WHOM TO ASK, recorded BEFORE the letter is marked sent. The other order
     // could leave a letter `sent` through DocuSign with nobody on record to
@@ -2307,23 +2372,8 @@ export class EngagementService {
           });
 
     const at = this.deps.clock.now().toISOString();
-    const standing = await this.deps.firm.firmSignatory(tenantId);
-    // THE MARK IS RESOLVED HERE AND PINNED, never looked up when the PDF is
-    // drawn (0081). Only when there IS a signatory: the firm's block prints on
-    // the strength of the signatory row, so with no signatory there is no block
-    // to draw a mark on and the lookup would answer a question nobody asked.
     const firm: FirmSignatureRecord | null =
-      standing === null
-        ? null
-        : {
-            userId: standing.userId,
-            title: standing.title,
-            signedAt: at,
-            signatureVersionId: await this.deps.firmSignatureImage.activeSignatureVersion(
-              tenantId,
-              letter.issuingEntityPartyId,
-            ),
-          };
+      signer === null ? null : { ...signer, signedAt: at };
 
     const sent = await this.deps.letters.markSent(tenantId, letter.id, at, issuedOn, firm);
     await this.deps.events.recordEvent({

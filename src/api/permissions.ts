@@ -371,6 +371,12 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // literal-first rule in decideRoute.
   [routeKey("GET", "/api/v1/tenancy/firm-signatory"), "config:read" as const],
   [routeKey("PUT", "/api/v1/tenancy/firm-signatory"), "tenant:admin" as const],
+  // And the LIST of signatories (0343, Q005), on the same split.
+  [routeKey("GET", "/api/v1/tenancy/signatories"), "config:read" as const],
+  [routeKey("POST", "/api/v1/tenancy/signatories"), "tenant:admin" as const],
+  [routeKey("PATCH", "/api/v1/tenancy/signatories/{signatoryId}"), "tenant:admin" as const],
+  [routeKey("POST", "/api/v1/tenancy/signatories/{signatoryId}/default"), "tenant:admin" as const],
+  [routeKey("PUT", "/api/v1/tenancy/signatories/{signatoryId}/active"), "tenant:admin" as const],
 
   // THE PIPELINE (T2.1) reuses the PARTY permissions rather than inventing
   // lead:read / lead:write, and that is a decision rather than laziness.

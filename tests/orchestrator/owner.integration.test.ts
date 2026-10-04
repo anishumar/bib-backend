@@ -286,6 +286,11 @@ describe("only active staff, on every rung", () => {
 
   it("does not treat a Key Manager named from a later day as today's, and falls to the signatory", async () => {
     const km = await assign("key_manager", users.kavya, null, "2026-10-01");
+    // The default is somebody on the firm's list (0343's key), so list first.
+    await owner`
+      INSERT INTO tenancy.firm_signatory (tenant_id, user_id, title)
+      VALUES (${tenant}, ${users.sid}, 'Partner') ON CONFLICT (tenant_id, user_id) DO NOTHING
+    `;
     await owner`
       UPDATE tenancy.tenant SET firm_signatory_user_id = ${users.sid}, firm_signatory_title = 'Partner'
       WHERE id = ${tenant}
@@ -302,6 +307,11 @@ describe("only active staff, on every rung", () => {
   });
 
   it("passes over a signatory whose access was revoked: nobody, with the note saying so", async () => {
+    // The default is somebody on the firm's list (0343's key), so list first.
+    await owner`
+      INSERT INTO tenancy.firm_signatory (tenant_id, user_id, title)
+      VALUES (${tenant}, ${users.rajat}, 'Partner') ON CONFLICT (tenant_id, user_id) DO NOTHING
+    `;
     await owner`
       UPDATE tenancy.tenant SET firm_signatory_user_id = ${users.rajat}, firm_signatory_title = 'Partner'
       WHERE id = ${tenant}

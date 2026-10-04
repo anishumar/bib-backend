@@ -94,6 +94,7 @@ const service = new EngagementService({
   firm: {
     firmSignatory: () =>
       Promise.resolve(signatoryUserId === "" ? null : { userId: signatoryUserId, title: "Director" }),
+    signatory: () => Promise.resolve(null),
   },
   firmSignatureImage: { activeSignatureVersion: () => Promise.resolve(null) },
   parties: new PostgresPartyRepository(app),
