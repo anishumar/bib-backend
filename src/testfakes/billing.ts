@@ -43,6 +43,8 @@ import type {
   WorkRelease,
   RaisePlan,
   RaiseWritten,
+  WbFacts,
+  WorkBillingFacts,
 } from "../usecase/billing/ports";
 
 export interface StoredDue extends NewBillingDue {
@@ -800,5 +802,25 @@ export class FakeAutoBillingSetting implements AutoBillingSetting {
     if (days === null) this.dueDays.delete(tenantId);
     else this.dueDays.set(tenantId, days);
     return Promise.resolve();
+  }
+}
+
+// ── Work vs Billing (Q041) ──────────────────────────────────────────────────
+
+/** The facts a test sets, handed back whatever is asked; the last query is kept
+ *  so a test can see the window and the client it was asked for. */
+export class FakeWorkBillingFacts implements WorkBillingFacts {
+  lastQuery: { from: string; to: string; partyId?: string | undefined; today: string } | null = null;
+
+  constructor(
+    public facts: WbFacts = { autoBilling: true, autoBillingSince: null, subjects: [], bills: [], jobs: [], filings: [] },
+  ) {}
+
+  read(
+    _tenantId: string,
+    query: { readonly from: string; readonly to: string; readonly partyId?: string | undefined; readonly today: string },
+  ): Promise<WbFacts> {
+    this.lastQuery = { ...query };
+    return Promise.resolve(this.facts);
   }
 }

@@ -820,6 +820,9 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // advance policy and default tax rates (0322) change what every advance does.
   [routeKey("GET", "/api/v1/billing/dues"), "party:read" as const],
   [routeKey("GET", "/api/v1/billing/unscheduled"), "party:read" as const],
+  // Work vs Billing (Q041): a read of the bills beside the work; amounts
+  // redacted for a login without the fee axis, like the dues.
+  [routeKey("GET", "/api/v1/billing/work-vs-billing"), "party:read" as const],
   [routeKey("PUT", "/api/v1/engagements/{engagementId}/billing"), "party:write" as const],
   [routeKey("POST", "/api/v1/billing/raise"), "party:write" as const],
   // Skipping gives up revenue: the firm's own permission, Partner and Manager by

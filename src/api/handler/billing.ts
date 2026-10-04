@@ -17,6 +17,8 @@ import type { BillNowCandidate, FinalBiller } from "../../usecase/billing/final"
 import type { PersonRef, RefundCandidate, ScheduleRecord } from "../../usecase/billing/ports";
 import type { AuthzService } from "../../usecase/authz/service";
 import type { Principal } from "../../platform/callctx";
+import type { WorkBillingService } from "../../usecase/billing/work-vs-billing";
+import { registerWorkBillingRoutes } from "./work-billing";
 
 export interface BillingDeps {
   readonly service: BillingDeskService;
@@ -26,6 +28,8 @@ export interface BillingDeps {
   readonly finals: FinalBiller;
   /** For the FEE AXIS only; gate 3 is middleware. */
   readonly authz: AuthzService;
+  /** Work vs Billing (Q041): the read model, its own handler file. */
+  readonly workBilling: WorkBillingService;
 }
 
 const Decimal = z.string().regex(/^\d+(\.\d+)?$/);
@@ -870,6 +874,7 @@ function unscheduledBody(u: UnscheduledRecord) {
 
 export function registerBillingRoutes(app: OpenAPIHono<AppEnv>, deps: BillingDeps): void {
   const seesFees = (principal: Principal | null): boolean => principal !== null && deps.authz.seesFees(principal);
+  registerWorkBillingRoutes(app, { service: deps.workBilling, authz: deps.authz });
 
   app.openapi(listRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
