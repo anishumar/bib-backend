@@ -149,7 +149,7 @@ describe("a draft's issuer, against real Postgres (T6.18, D9)", () => {
 });
 
 describe("a draft's currency, against real Postgres (T6.18, 0312)", () => {
-  it("moves over a line struck off the draft — the key cascades to it", async () => {
+  it("moves over a line struck off the draft, which keeps its own currency (0344)", async () => {
     const id = await draftIndian();
     const line = await c.proposals.addLine({
       tenantId: tenant,
@@ -169,7 +169,9 @@ describe("a draft's currency, against real Postgres (T6.18, 0312)", () => {
     const [pulled] = await c.owner<{ currency: string }[]>`
       SELECT currency FROM crm.proposal_line WHERE id = ${line.id}
     `;
-    expect(pulled?.currency).toBe("AED");
+    // The line's key no longer carries the proposal's currency (0344), so a
+    // pulled line keeps what it was quoted in; nothing reads it again.
+    expect(pulled?.currency).toBe("INR");
   });
 
   it("the WHERE refuses a new currency over a live line, below the service", async () => {

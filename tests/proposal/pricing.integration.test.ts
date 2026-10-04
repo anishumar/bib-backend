@@ -560,10 +560,10 @@ describe("the pin", () => {
 });
 
 describe("one proposal, one currency", () => {
-  it("the database refuses a line in another currency", async () => {
-    // A composite foreign key on (proposal_id, tenant_id, currency), not a rule
-    // in the application: a mixed-currency document has a total that means
-    // nothing, and the wall should make that unrepresentable.
+  it("the database refuses a line in a currency the proposal holds no rate for", async () => {
+    // Since 0344 a line may be in another currency, but only one the proposal
+    // holds a rate for: the deferred check refuses anything else at commit,
+    // whoever writes it. Not a rule in the application alone.
     const id = await draft("AED", "23.45");
     const err = await withTenant(app, tenantA, (db) =>
       db`
@@ -573,7 +573,7 @@ describe("one proposal, one currency", () => {
         VALUES (${tenantA}, ${id}, ${gstV1}, 'sneaky', 99, 1, 100, 'INR', 0)
       `,
     ).catch((e: unknown) => e);
-    expect((err as { code?: string }).code).toBe("23503"); // foreign_key_violation
+    expect((err as { code?: string }).code).toBe("23514"); // check_violation, at commit
   });
 
   it("refuses two live lines at the same position", async () => {

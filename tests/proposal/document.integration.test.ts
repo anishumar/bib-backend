@@ -385,11 +385,11 @@ describe("the columns 0084 added", () => {
 
     // THE MONEY PER FREQUENCY, added by the database, in reading order.
     expect(view.totalsByFrequency).toEqual([
-      { frequency: "quarterly", net: "25000.0000", lineCount: 1, unpricedLineCount: 0 },
-      { frequency: "annually", net: "50000.0000", lineCount: 1, unpricedLineCount: 0 },
+      { currency: "INR", frequency: "quarterly", net: "25000.0000", lineCount: 1, unpricedLineCount: 0 },
+      { currency: "INR", frequency: "annually", net: "50000.0000", lineCount: 1, unpricedLineCount: 0 },
     ]);
     // A year of it (CA#42): four quarters and the annual fee.
-    expect(view.annualValue).toBe("150000.0000");
+    expect(view.annualValue).toEqual([{ amount: "150000.0000", currency: "INR" }]);
 
     // The issuer, and where it is registered: the seeded fallback has no
     // legal-entity row, so the answer is null rather than a guess.
@@ -450,13 +450,13 @@ describe("the columns 0084 added", () => {
     );
     const view = await proposals.describe(tenant, id);
     expect(view.totalsByFrequency).toEqual([
-      { frequency: "quarterly", net: "25000.0000", lineCount: 2, unpricedLineCount: 1 },
+      { currency: "INR", frequency: "quarterly", net: "25000.0000", lineCount: 2, unpricedLineCount: 1 },
     ]);
     await owner`UPDATE crm.proposal_line SET billing_frequency = NULL WHERE id = ${line?.line.id ?? ""}`;
     const after = await proposals.describe(tenant, id);
     expect(after.totalsByFrequency).toEqual([
-      { frequency: "quarterly", net: "25000.0000", lineCount: 1, unpricedLineCount: 0 },
-      { frequency: null, net: "0", lineCount: 1, unpricedLineCount: 1 },
+      { currency: "INR", frequency: "quarterly", net: "25000.0000", lineCount: 1, unpricedLineCount: 0 },
+      { currency: "INR", frequency: null, net: "0", lineCount: 1, unpricedLineCount: 1 },
     ]);
   });
 
