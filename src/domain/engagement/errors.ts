@@ -85,6 +85,9 @@ export type EngagementErrorCode =
   | "INVALID_LINE_DESCRIPTION"
   | "INVALID_CURRENCY_CHANGE"
   | "CURRENCY_LOCKED_BY_LINES"
+  | "CURRENCY_NEEDS_A_RATE"
+  | "RATE_IN_USE"
+  | "RATE_FOR_MAIN_CURRENCY"
   | "PROSE_EDITED"
   | "TERMS_ON_LETTER"
   | "NOT_CALLERS_TODAY";
@@ -148,9 +151,8 @@ export class LetterCurrencyLocked extends EngagementError {
   constructor(currency: string) {
     super(
       "CURRENCY_LOCKED_BY_LINES",
-      `This letter has already priced services or sections in ${currency}, and every figure on a ` +
-        `letter is in its own currency. Keep ${currency}, or delete this draft and start a new ` +
-        `letter in the other currency.`,
+      `This letter prices services or sections in ${currency}, its main currency. Move them to ` +
+        `another currency or remove them first, or keep ${currency}.`,
     );
   }
 }
@@ -979,5 +981,39 @@ export function letterDeletionRefusal(ref: string, block: LetterDeletionBlock): 
       return new LetterDeleted(ref);
     case "not_draft":
       return new LetterNotDeletable(ref, block.status);
+  }
+}
+
+/** A fee in a currency the document has no rate for (0344). Every currency
+ *  other than the main one needs its rate first, or the fee would drop out of
+ *  every figure converted to the firm's reporting currency. */
+export class CurrencyNeedsARate extends EngagementError {
+  constructor(currency: string) {
+    super(
+      "CURRENCY_NEEDS_A_RATE",
+      `Give ${currency} an exchange rate on this letter first, then price services in it.`,
+    );
+  }
+}
+
+/** A rate still in use by live services or sections cannot be taken off. */
+export class RateInUse extends EngagementError {
+  constructor(currency: string, count: number) {
+    super(
+      "RATE_IN_USE",
+      `${String(count)} ${count === 1 ? "fee is" : "fees are"} in ${currency}. Move ` +
+        `${count === 1 ? "it" : "them"} to another currency or remove ${count === 1 ? "it" : "them"} ` +
+        `first, then remove the rate.`,
+    );
+  }
+}
+
+/** The main currency's rate is the document's own; it has no second one. */
+export class RateIsMainCurrency extends EngagementError {
+  constructor(currency: string) {
+    super(
+      "RATE_FOR_MAIN_CURRENCY",
+      `${currency} is this letter's main currency. Change its rate with the currency on step 1.`,
+    );
   }
 }

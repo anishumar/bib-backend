@@ -4,7 +4,7 @@
 // cases at the composition root.
 import type { NewRecordedAcceptance, RecordedAcceptance } from "../../domain/acceptance/model";
 import type { ProposalErrorCode } from "../../domain/proposal/errors";
-import type { Amount, CurrencyCode, Money } from "../../domain/money/model";
+import type { Amount, CurrencyCode, CurrencyRate, Money } from "../../domain/money/model";
 import type { BillingBasis, ServiceRecurrence } from "../../domain/config/model";
 import type {
   BillingFrequency,
@@ -226,13 +226,16 @@ export interface NewProposalLine {
  * rules are about COMBINATIONS (no price needs a reason, no price takes no
  * discount) and the database CHECKs judge the row, not the change.
  *
- * Not here, on purpose: the pin, the entity, the position and the currency. A
- * different service is a different line (remove this one, add that one); the
- * currency is the proposal's and moves only with it.
+ * Not here, on purpose: the pin, the entity and the position. A different
+ * service is a different line (remove this one, add that one). The CURRENCY is
+ * here since 0344: a line is priced in the proposal's main currency or in one
+ * the proposal holds a rate for, which the use case checks first and the
+ * database again at commit.
  */
 export interface LineEdit {
   readonly description: string;
   readonly quantity: Amount;
+  readonly currency: CurrencyCode;
   readonly unitAmount: Amount | null;
   readonly discountPercent: Amount;
   readonly jurisdiction: string | null;
@@ -262,7 +265,11 @@ export interface ProposalRecord {
   readonly proposal: Proposal;
   readonly party: { readonly id: string; readonly displayName: string };
   readonly lines: readonly ProposalLineRecord[];
-  readonly totals: ProposalTotals;
+  /** One row per currency the live lines are in, the main currency first, then
+   *  by code (0344). Amounts in two currencies are never added together, so
+   *  there is no single total. A proposal with no line has one row, its main
+   *  currency at zero, as before. */
+  readonly totals: readonly ProposalTotals[];
   /** Which of the firm's own entities is offering it, by NAME — this is what a
    *  letterhead prints, and a uuid prints as nothing. */
   readonly issuingEntity: { readonly id: string; readonly displayName: string };
@@ -298,9 +305,10 @@ export interface ProposalRecord {
    * monthly x 12, quarterly x 4, annually x 1, summed by the database. A
    * one-off or custom fee is not in it (it is not a yearly figure), and an
    * unpriced line is counted beside it in `totalsByFrequency`. Null when no
-   * priced line recurs. "What is this client worth a year?"
+   * priced line recurs. "What is this client worth a year?" One per currency
+   * (0344), the main currency first; empty when nothing priced recurs.
    */
-  readonly annualValue: Amount | null;
+  readonly annualValue: readonly Money[];
   /**
    * The firm's Depts as `tenancy.service_axis` holds them, retired ones
    * included — what `planProposal` letters the sections by, read the way the
@@ -365,8 +373,10 @@ export interface CopyLink {
   readonly status: ProposalStatus;
 }
 
-/** One row of `ProposalRecord.totalsByFrequency`. */
+/** One row of `ProposalRecord.totalsByFrequency`: one currency, one frequency
+ *  (0344). */
 export interface FrequencyTotal {
+  readonly currency: CurrencyCode;
   /** Null for the lines that state no billing frequency. */
   readonly frequency: BillingFrequency | null;
   /** gross − discount of the PRICED lines at this frequency, from `numeric`. */
@@ -701,7 +711,8 @@ export interface ProposalSummary {
   readonly proposal: Proposal;
   readonly party: { readonly id: string; readonly displayName: string };
   readonly issuingEntity: { readonly id: string; readonly displayName: string };
-  readonly totals: ProposalTotals;
+  /** Per currency, the main currency first (0344). */
+  readonly totals: readonly ProposalTotals[];
   readonly lineCount: number;
 }
 
@@ -747,6 +758,8 @@ export interface SharedProposalRecord {
     /** Null for "as mutually agreed" — and then `pricingNote` is what the
      *  recipient reads where the figure would be. */
     readonly unitAmount: Amount | null;
+    /** What this line is priced in (0344). */
+    readonly currency: CurrencyCode;
     readonly discountPercent: Amount;
     readonly net: Amount | null;
     /**
@@ -766,7 +779,8 @@ export interface SharedProposalRecord {
      *  and in its own currency. Never folded into the totals. */
     readonly oopEstimate: OutOfPocketEstimate | null;
   }[];
-  readonly totals: ProposalTotals;
+  /** Per currency, the main currency first (0344). */
+  readonly totals: readonly ProposalTotals[];
   /**
    * The answer given ON THIS PAGE, by name (0085) — so the page can say who
    * accepted it and when. Null when unanswered, and when a colleague recorded
@@ -921,6 +935,14 @@ export interface ProposalRepository {
      */
     prose?: readonly ProseLine[] | null,
   ): Promise<Proposal | null>;
+
+  /**
+   * Set the rate of one OTHER currency on a DRAFT (0344): insert, or replace
+   * the rate already there. Null when the proposal is no longer a live draft.
+   */
+  setRate(tenantId: string, proposalId: string, rate: CurrencyRate): Promise<CurrencyRate | null>;
+  /** Take one off a DRAFT. False when there was none, or it is not a draft. */
+  removeRate(tenantId: string, proposalId: string, currency: CurrencyCode): Promise<boolean>;
 
   // ── 0085 ──────────────────────────────────────────────────────────────────
 

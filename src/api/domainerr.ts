@@ -804,6 +804,7 @@ export function mapError(err: unknown): MappedError {
       case "NOTHING_TO_REVISE":
       case "NOTHING_TO_CHANGE_ON_LINE":
       case "INVALID_CURRENCY_CHANGE":
+      case "RATE_FOR_MAIN_CURRENCY":
       case "INVALID_LINE_DESCRIPTION":
       case "INVALID_RECIPIENT":
       case "SIGNER_NAME_REQUIRED":
@@ -850,6 +851,8 @@ export function mapError(err: unknown): MappedError {
       case "PROPOSAL_CITED_BY_LETTER":
       case "LEAD_DELETED":
       case "CURRENCY_LOCKED_BY_LINES":
+      case "CURRENCY_NEEDS_A_RATE":
+      case "RATE_IN_USE":
       case "PROSE_EDITED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       // Reachable only from a process composed with no mailer — the worker,
@@ -911,6 +914,7 @@ export function mapError(err: unknown): MappedError {
       case "NOTHING_TO_CHANGE_ON_LINE":
       case "INVALID_LINE_DESCRIPTION":
       case "INVALID_CURRENCY_CHANGE":
+      case "RATE_FOR_MAIN_CURRENCY":
       case "NOT_CALLERS_TODAY":
       case "END_REASON_REQUIRED":
       case "INVALID_END_DATE":
@@ -982,6 +986,8 @@ export function mapError(err: unknown): MappedError {
       case "LETTER_NOT_COPYABLE":
       case "QUOTE_DELETED":
       case "CURRENCY_LOCKED_BY_LINES":
+      case "CURRENCY_NEEDS_A_RATE":
+      case "RATE_IN_USE":
       case "PROSE_EDITED":
       case "TERMS_ON_LETTER":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };

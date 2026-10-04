@@ -58,6 +58,9 @@ export type ProposalErrorCode =
   | "NOTHING_TO_REVISE"
   | "NOTHING_TO_CHANGE_ON_LINE"
   | "CURRENCY_LOCKED_BY_LINES"
+  | "CURRENCY_NEEDS_A_RATE"
+  | "RATE_IN_USE"
+  | "RATE_FOR_MAIN_CURRENCY"
   | "INVALID_CURRENCY_CHANGE"
   | "PROSE_EDITED"
   | "INVALID_LINE_DESCRIPTION"
@@ -232,10 +235,9 @@ export class CurrencyLockedByLines extends ProposalError {
   constructor(lineCount: number, currency: string) {
     super(
       "CURRENCY_LOCKED_BY_LINES",
-      `This draft already quotes ${String(lineCount)} service${lineCount === 1 ? "" : "s"} in ` +
-        `${currency}, and every line is priced in the document's currency. Remove ` +
-        `${lineCount === 1 ? "it" : "them"} first, then change the currency and quote again, or ` +
-        `keep ${currency}.`,
+      `This draft quotes ${String(lineCount)} service${lineCount === 1 ? "" : "s"} in ` +
+        `${currency}, its main currency. Move ${lineCount === 1 ? "it" : "them"} to another ` +
+        `currency or remove ${lineCount === 1 ? "it" : "them"} first, or keep ${currency}.`,
     );
   }
 }
@@ -655,5 +657,39 @@ export function proposalDeletionRefusal(
       return new ProposalNotDeletable(ref, block.status);
     case "letters":
       return new ProposalCitedByLetter(block.refs);
+  }
+}
+
+/** A fee in a currency the document has no rate for (0344). Every currency
+ *  other than the main one needs its rate first, or the fee would drop out of
+ *  every figure converted to the firm's reporting currency. */
+export class CurrencyNeedsARate extends ProposalError {
+  constructor(currency: string) {
+    super(
+      "CURRENCY_NEEDS_A_RATE",
+      `Give ${currency} an exchange rate on this proposal first, then price services in it.`,
+    );
+  }
+}
+
+/** A rate still in use by live services or sections cannot be taken off. */
+export class RateInUse extends ProposalError {
+  constructor(currency: string, count: number) {
+    super(
+      "RATE_IN_USE",
+      `${String(count)} ${count === 1 ? "fee is" : "fees are"} in ${currency}. Move ` +
+        `${count === 1 ? "it" : "them"} to another currency or remove ${count === 1 ? "it" : "them"} ` +
+        `first, then remove the rate.`,
+    );
+  }
+}
+
+/** The main currency's rate is the document's own; it has no second one. */
+export class RateIsMainCurrency extends ProposalError {
+  constructor(currency: string) {
+    super(
+      "RATE_FOR_MAIN_CURRENCY",
+      `${currency} is this proposal's main currency. Change its rate with the currency on step 1.`,
+    );
   }
 }

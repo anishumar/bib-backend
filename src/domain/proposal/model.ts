@@ -15,7 +15,7 @@
 //   config row (0010), read live at the moment of the check. What lives here is
 //   the COMPARISON and what it means, so the rule is stated once and the use
 //   case only supplies the two numbers.
-import type { Amount, CurrencyCode } from "../money/model";
+import type { Amount, CurrencyCode, CurrencyRate } from "../money/model";
 import type { BillingFrequency, OutOfPocketEstimate } from "../document/model";
 
 /**
@@ -110,13 +110,16 @@ export interface Proposal {
   readonly leadId: string | null;
   readonly title: string;
   readonly status: ProposalStatus;
-  /** What it is quoted in, and the rate back to the firm's reporting currency
-   *  (tenancy.tenant.reportingCurrency). Struck once for the whole document, so
-   *  its total does not depend on the order lines were added. Stored even when
-   *  the two currencies match (1.0, dated). */
+  /** Its MAIN currency (the default for a new line, from the issuing company)
+   *  and that currency's rate back to the firm's reporting currency
+   *  (tenancy.tenant.reportingCurrency). Stored even when the two currencies
+   *  match (1.0, dated). */
   readonly currency: CurrencyCode;
   readonly fxRate: Amount;
   readonly fxRateDate: string;
+  /** The rate of every OTHER currency its lines are in (0344), one each; empty
+   *  for a proposal priced only in its main currency. */
+  readonly rates: readonly CurrencyRate[];
   /** The day the offer lapses, in the client's calendar. A date, not an
    *  instant: "valid until 30 September" is not midnight UTC. */
   readonly validUntil: string | null;
@@ -287,9 +290,8 @@ export interface ProposalLine {
    * somebody forgot to type.
    */
   readonly unitAmount: Amount | null;
-  /** Always equal to the proposal's, held there by a composite foreign key.
-   *  Carried on the line anyway so an amount and its currency are never
-   *  separated. */
+  /** What THIS line is priced in (0344): the proposal's main currency or one it
+   *  holds a rate for (`rates`), which the database checks at commit. */
   readonly currency: CurrencyCode;
   /** Zero when there is no price: a discount off "as mutually agreed" is not a
    *  number, and the database refuses one (0023). It would also reach

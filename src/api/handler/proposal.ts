@@ -206,6 +206,26 @@ const TotalsSchema = z
   })
   .openapi("ProposalTotals");
 
+/** The rate of one OTHER currency on a document (0344). The main currency's
+ *  is the document's own `fxRate`. */
+const CurrencyRateSchema = z
+  .object({
+    currency: CurrencySchema,
+    /** Redacted by the fee axis, like the document's own rate. */
+    fxRate: RateSchema.nullable(),
+    fxRateDate: DaySchema,
+    source: z.string().openapi({ description: 'Either "typed" or the name of the rate service that supplied it.' }),
+  })
+  .openapi("CurrencyRate");
+
+const SetRateRequest = z
+  .object({
+    fxRate: RateSchema,
+    fxRateDate: DaySchema,
+    source: z.string().min(1).max(60).optional(),
+  })
+  .openapi("SetCurrencyRateRequest");
+
 const ProposalSchema = z
   .object({
     id: z.string().uuid(),
@@ -220,9 +240,14 @@ const ProposalSchema = z
     leadId: z.string().uuid().nullable(),
     title: z.string(),
     status: z.enum(STATUS_VALUES),
-    currency: CurrencySchema,
+    currency: CurrencySchema.openapi({
+      description: "The MAIN currency: the default for a new line, with its rate below (0344).",
+    }),
     fxRate: RateSchema.nullable(),
     fxRateDate: DaySchema,
+    rates: z.array(CurrencyRateSchema).openapi({
+      description: "The rate of every other currency a line is priced in (0344), by code.",
+    }),
     validUntil: DaySchema.nullable(),
     sentAt: z.string().nullable(),
     decidedAt: z.string().nullable(),
@@ -275,6 +300,8 @@ const AxisRefSchema = z
 const FrequencyTotalSchema = z
   .object({
     /** Null for the lines that state no billing frequency. */
+    /** One currency per row (0344): amounts in two currencies are never added. */
+    currency: CurrencySchema,
     frequency: z.enum(BILLING_FREQUENCY_VALUES).nullable(),
     /** Summed by the database. Redacted by the fee axis. */
     net: AmountSchema.nullable(),
@@ -461,17 +488,18 @@ const ProposalRecordSchema = z
     /** The money per billing frequency, summed by the database (D8): what a
      *  reader is shown instead of one net that adds monthly to one-time. */
     totalsByFrequency: z.array(FrequencyTotalSchema),
-    annualValue: AmountSchema.nullable().openapi({
+    annualValue: z.array(MoneySchema).openapi({
       description:
         "What the recurring fees come to over a year (CA#42): monthly x 12, quarterly x 4, annually " +
-        "x 1, added by the database. No one-off or custom fee is in it. Null when nothing priced " +
-        "recurs, or for a caller without the fee axis.",
+        "x 1, added by the database, one per currency, the main currency first (0344). No one-off " +
+        "or custom fee is in it. Empty when nothing priced recurs, or for a caller without the fee axis.",
     }),
     /** Sections and codes, from the SAME plan the PDF is rendered from. */
     document: ProposalPlanSchema,
     lines: z.array(ProposalLineSchema),
     blocks: z.array(DocumentBlockSchema),
-    totals: TotalsSchema,
+    /** One per currency the live lines are in, the main currency first (0344). */
+    totals: z.array(TotalsSchema),
     approvedBy: ApproverSchema,
     /** "Prepared for", by NAME (0084), with that person's email identifier
      *  when the firm holds one — what Send offers to email it to (0085). Null
@@ -538,7 +566,8 @@ const ProposalSummarySchema = z
     proposal: ProposalSchema,
     party: PartyRefSchema,
     issuingEntity: PartyRefSchema,
-    totals: TotalsSchema,
+    /** Per currency, the main currency first (0344). */
+    totals: z.array(TotalsSchema),
     lineCount: z.number().int(),
   })
   .openapi("ProposalSummary");
@@ -625,6 +654,8 @@ const SharedProposalSchema = z
          *  model, null here has exactly one meaning and needs no companion
          *  flag. */
         unitAmount: AmountSchema.nullable(),
+        /** What this line is priced in (0344). */
+        currency: CurrencySchema,
         discountPercent: AmountSchema,
         net: AmountSchema.nullable(),
         /** What the client reads where the figure would be. */
@@ -634,7 +665,9 @@ const SharedProposalSchema = z
         oopEstimate: OopEstimateSchema.nullable(),
       }),
     ),
-    totals: z.object({
+    /** One per currency, the main currency first (0344): never one figure
+     *  across two currencies. */
+    totals: z.array(z.object({
       gross: AmountSchema,
       discount: AmountSchema,
       net: AmountSchema,
@@ -643,7 +676,7 @@ const SharedProposalSchema = z
        *  figure does not cover. A client reading a total that quietly omits two
        *  "as mutually agreed" lines is the worst place for this to go wrong. */
       unpricedLineCount: z.number().int(),
-    }),
+    })),
     /** The document's own exclusions, commercial notes and team block (G1.7),
      *  in print order. The words only: no ids, and nothing that says which
      *  lines are the firm's standard wording and which were written for this
@@ -765,6 +798,12 @@ const AddLineRequest = z
     oopEstimate: OopEstimateSchema.optional(),
     /** WHY there is no amount — REQUIRED when `unitAmount` is omitted. */
     pricingNote: z.string().min(1).optional(),
+    currency: CurrencySchema.optional().openapi({
+      description:
+        "What this line is priced in (0344). Absent: the list price's currency when the fee is " +
+        "taken from it and the proposal holds a rate for it, else the main currency. Any other " +
+        "than the main currency needs its rate first (CURRENCY_NEEDS_A_RATE).",
+    }),
   })
   .openapi("AddProposalLineRequest");
 
@@ -790,6 +829,9 @@ const UpdateLineRequest = z
     exclusionsOverride: z.string().max(20000).nullable().optional(),
     oopEstimate: OopEstimateSchema.nullable().optional(),
     pricingNote: z.string().max(2000).nullable().optional(),
+    /** Move the line to another currency the proposal holds (0344). The amount
+     *  is restated, never converted. */
+    currency: CurrencySchema.optional(),
   })
   .openapi("UpdateProposalLineRequest");
 
@@ -994,6 +1036,47 @@ const updateLineRoute = createRoute({
     403: errorResponse("No org selected, or the role does not permit it"),
     404: errorResponse("No such proposal, or no such live line on it"),
     409: errorResponse("The proposal is no longer a draft, or was deleted"),
+  },
+});
+
+const setRateRoute = createRoute({
+  method: "put",
+  path: "/api/v1/proposals/{proposalId}/rates/{currency}",
+  tags: ["proposals"],
+  summary: "Set the exchange rate of one of a draft's other currencies",
+  description:
+    "Every currency a line is priced in, other than the main one, needs a rate back to the " +
+    "firm's reporting currency (0344). Inserts it, or replaces the one there. The main " +
+    "currency's rate is changed with the currency (PATCH the proposal). Answers with the " +
+    "whole proposal.",
+  request: {
+    params: z.object({ proposalId: z.string().uuid(), currency: CurrencySchema }),
+    body: { content: { "application/json": { schema: SetRateRequest } }, required: true },
+  },
+  responses: {
+    200: { description: "Set", content: { "application/json": { schema: ProposalRecordSchema } } },
+    400: errorResponse("Not a rate, or the main currency (RATE_FOR_MAIN_CURRENCY)"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such proposal at this firm"),
+    409: errorResponse("The proposal is no longer a draft"),
+  },
+});
+
+const removeRateRoute = createRoute({
+  method: "delete",
+  path: "/api/v1/proposals/{proposalId}/rates/{currency}",
+  tags: ["proposals"],
+  summary: "Take a currency's rate off a draft",
+  description: "Only while no live line is priced in it (RATE_IN_USE). Answers with the whole proposal.",
+  request: { params: z.object({ proposalId: z.string().uuid(), currency: CurrencySchema }) },
+  responses: {
+    200: { description: "Removed", content: { "application/json": { schema: ProposalRecordSchema } } },
+    400: errorResponse("The main currency (RATE_FOR_MAIN_CURRENCY)"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such proposal at this firm"),
+    409: errorResponse("Not a draft, or lines are priced in it (RATE_IN_USE)"),
   },
 });
 
@@ -1303,6 +1386,12 @@ function toProposalBody(
     // somebody reconstruct a fee, so it goes with them.
     fxRate: fees ? proposal.fxRate : null,
     fxRateDate: proposal.fxRateDate,
+    rates: proposal.rates.map((r) => ({
+      currency: r.currency,
+      fxRate: fees ? r.fxRate : null,
+      fxRateDate: r.fxRateDate,
+      source: r.source,
+    })),
     validUntil: proposal.validUntil,
     sentAt: proposal.sentAt,
     decidedAt: proposal.decidedAt,
@@ -1365,7 +1454,7 @@ function toPinnedServiceBody(
 }
 
 function toTotalsBody(
-  totals: ProposalRecord["totals"],
+  totals: ProposalRecord["totals"][number],
   fees: boolean,
 ): z.infer<typeof TotalsSchema> {
   return {
@@ -1445,8 +1534,9 @@ function toRecordBody(record: ProposalView, fees: boolean): z.infer<typeof Propo
       jurisdiction: record.issuer.jurisdiction,
     },
     issuedOn: record.issuedOn,
-    annualValue: fees ? record.annualValue : null,
+    annualValue: fees ? record.annualValue.map((m) => ({ amount: m.amount, currency: m.currency })) : [],
     totalsByFrequency: record.totalsByFrequency.map((t) => ({
+      currency: t.currency,
       frequency: t.frequency,
       net: fees ? t.net : null,
       lineCount: t.lineCount,
@@ -1478,7 +1568,7 @@ function toRecordBody(record: ProposalView, fees: boolean): z.infer<typeof Propo
       sourceId: b.sourceId,
       isEdited: b.isEdited,
     })),
-    totals: toTotalsBody(record.totals, fees),
+    totals: record.totals.map((t) => toTotalsBody(t, fees)),
     approvedBy: record.approvedBy === null ? null : { ...record.approvedBy },
     addressee:
       record.addressee === null
@@ -1572,13 +1662,20 @@ function toSharedBody(shared: SharedProposal): z.infer<typeof SharedProposalSche
       description: l.description,
       quantity: l.quantity,
       unitAmount: l.unitAmount,
+      currency: l.currency,
       discountPercent: l.discountPercent,
       net: l.net,
       pricingNote: l.pricingNote,
       billingFrequency: l.billingFrequency,
       oopEstimate: l.oopEstimate === null ? null : { ...l.oopEstimate },
     })),
-    totals: { ...shared.totals },
+    totals: shared.totals.map((t) => ({
+      gross: t.gross,
+      discount: t.discount,
+      net: t.net,
+      currency: t.currency,
+      unpricedLineCount: t.unpricedLineCount,
+    })),
     blocks: shared.blocks.map((b) => ({
       kind: b.kind,
       body: b.body,
@@ -1601,7 +1698,7 @@ function toSummaryBody(
       id: summary.issuingEntity.id,
       displayName: summary.issuingEntity.displayName,
     },
-    totals: toTotalsBody(summary.totals, fees),
+    totals: summary.totals.map((t) => toTotalsBody(t, fees)),
     lineCount: summary.lineCount,
   };
 }
@@ -1690,6 +1787,28 @@ export function registerProposalRoutes(app: OpenAPIHono<AppEnv>, deps: ProposalD
     return c.json(toRecordBody(record, seesFees(c.get("principal"))), 200);
   });
 
+  app.openapi(setRateRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { proposalId, currency } = c.req.valid("param");
+    const body = c.req.valid("json");
+    await deps.service.setRate(
+      { tenantId: s.tenantId, proposalId, currency, fxRate: body.fxRate, fxRateDate: body.fxRateDate, source: body.source },
+      s.actor,
+    );
+    const record = await deps.service.describe(s.tenantId, proposalId);
+    return c.json(toRecordBody(record, seesFees(c.get("principal"))), 200);
+  });
+
+  app.openapi(removeRateRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { proposalId, currency } = c.req.valid("param");
+    await deps.service.removeRate(s.tenantId, proposalId, currency, s.actor);
+    const record = await deps.service.describe(s.tenantId, proposalId);
+    return c.json(toRecordBody(record, seesFees(c.get("principal"))), 200);
+  });
+
   app.openapi(addLineRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
@@ -1727,6 +1846,7 @@ export function registerProposalRoutes(app: OpenAPIHono<AppEnv>, deps: ProposalD
         exclusionsOverride: body.exclusionsOverride,
         oopEstimate: body.oopEstimate,
         pricingNote: body.pricingNote,
+        currency: body.currency,
       },
       s.actor,
     );
