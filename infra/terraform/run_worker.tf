@@ -76,6 +76,7 @@ locals {
     # list is asserted by a test so a transport appearing in it turns the build red.
     BIB_MAIL_TRANSPORT = "smtp"
     BIB_MAIL_FROM      = var.mail_from
+    BIB_MAIL_FROM_NAME = var.mail_from_name
     BIB_SMTP_HOST      = var.smtp_host
     BIB_SMTP_PORT      = tostring(var.smtp_port)
     BIB_SMTP_USER      = var.smtp_user
