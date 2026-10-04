@@ -2346,6 +2346,72 @@ with receivables beside it. Read model only: `usecase/billing/work-vs-billing.ts
   the derivations on real SQL, the firm's done day, the filing, hand invoices, the wall). Walk:
   `bib/demo-assets/tools/wvb-walk.mjs` on `wvb-fixture.mjs` (40 checks).
 
+## The ad-hoc advance: money taken before the letter (Q044-Q048, 0363-0364, 2026-10-05)
+
+Ashish: in 5-10% of cases the advance comes BEFORE the engagement letter. It is raised now as a
+tax invoice and sits on "Advances to be adjusted" until it is mapped to the work it pays for.
+Design and every call: `bib/prompts/build-2026-10-05/S4-advance/DESIGN.md`.
+
+- **Tables (0363).** `crm.adhoc_advance` (one per advance: its invoice, raiser, note; the invoice's
+  NET is the advance, read, never copied), `crm.advance_allocation` (one row per map: a service and
+  optionally one job of it, or a whole signed letter; append and END, never erased: ending keeps what
+  bills took in `kept_amount` and frees the rest; a trigger lets only the end columns move),
+  `crm.engagement_letter_advance` (what a DRAFT letter names as received; frozen with the letter),
+  `billing_due.advance_allocation_id` (which allocation a bill took from). RLS on all three, composite
+  keys; a trigger refuses a target of another client, company or currency for every writer.
+- **The pool learns `source`.** `crm.advance_pool` is `letter_bill` (0320's rows, numbers unchanged),
+  `allocation` (effective amount less what bills took from it) and `unmapped` (net less credits less
+  every allocation; NO bill ever takes from it). `sum(remaining)` per invoice is still "what no bill
+  took". A bill's pick: the service's own advance, then allocations to this service (or its fee
+  group, or the job whose period this bill's period holds), then the letter's own advance and
+  letter-wide allocations, oldest money first. `takeFromPool` re-checks the SOURCE (allocation id),
+  under the advisory lock keyed on the advance INVOICE, which map and end also take. A bill still
+  takes from ONE source (0320's rule).
+- **Use case** `usecase/billing/adhoc.ts` (`AdhocAdvanceService`), port `AdhocAdvanceStore`,
+  adapter `postgres/adhoc-advance.ts`, routes `api/handler/advance.ts`:
+  `GET/POST /api/v1/advances`, `GET /advances/{id}`, `GET /advances/{id}/targets` (the client's
+  services, each with the refusal it would get), `POST /advances/{id}/allocations`,
+  `POST /advances/{id}/allocations/{aid}/end`, `POST /advances/{id}/give-back`,
+  `GET/PUT /engagement-letters/{id}/advances-received`. Raise = a DRAFT through
+  `InvoiceDrafter.prepareDraft/prepareLine` (every invoice rule), one line "Advance, to be adjusted
+  against services" (no amount in words), tax from the company default unless sent, manager = the
+  person's pick, else the client's Key Manager, else the raiser; one transaction (B34's rule).
+- **Refusals**: `ADVANCE_NOT_ISSUED` (a draft is not mapped), `ADVANCE_OVER_MAPPED`,
+  `ADVANCE_IN_ANOTHER_CURRENCY` (never converted), `ADVANCE_OF_ANOTHER_ISSUER` (the advance is in that
+  company's tax books), `ADVANCE_OF_ANOTHER_CLIENT`, `ADVANCE_TARGET_NOT_LIVE`,
+  `ADVANCE_JOB_NOT_OF_SERVICE`, `ALLOCATION_USED_UP`, `ALLOCATION_ENDED`, fee axis
+  (`FEES_NOT_VISIBLE`). `INVOICE_ADVANCE_MAPPED`: a mapped advance's invoice is not cancelled. A
+  credit note on an ad-hoc advance may take only its UNMAPPED part (the B06 cap ignores allocation
+  rows); Give back is that credit note, reason `advance_refund`.
+- **Permission `advance:manage`** (0364): raise, map, end. Given to every role carrying `billing:skip`
+  or `tenant:admin` ("Managers and above", whatever the firm renamed its roles); defaults Partner and
+  Manager. Give back is `invoice:issue`; reading is `party:read`.
+- **Q045 "different managers".** Each allocation freezes its manager at map time (the service's, by
+  `billingManagerFor`; a letter-wide one, the client's Key Manager). `crm.invoice_manager_share`
+  (invoice, manager, net share): an ordinary invoice is one row as before; an ad-hoc advance one row
+  per allocation's manager plus the rest to the invoice's manager. Revenue by manager reads it (the
+  month never moves; a re-map moves the share). Always through a service, never to a manager alone
+  (the user, 2026-10-05).
+- **Q048 scenario 1.** A draft letter names advances (this client's, its company, its currency,
+  issued, at most what is unmapped); they are in `canonicalContent` (a `received` row each, ONLY when
+  any, so other letters hash as before) and the Annexure PDF prints "Advance received" under the fees.
+  Signing (`EngagementService.sign`, every path) calls `NamedAdvanceMapping.mapNamedOnSigning`: an
+  allocation to the LETTER for min(named, unmapped now), `how = letter_signed`, once (a partial unique
+  index); post-commit and swallowed, the daily billing queue catches up. The letter's own "advance
+  required" is separate, further money (the user, 2026-10-05).
+- **Q047 reminder.** `usecase/notify/adhoc-reminders.ts`, on `notify.advance-reminders`'s hourly cron:
+  from the firm's `advance_unmapped_day` (1-28, default 1; `PUT /billing/settings
+  unmappedReminderDay`, ledger `tenant.advance_unmapped_day_set`) at the daily email's hour in its zone,
+  for the rest of that month, ONE `advance_unmapped` notification per person (each advance's raiser if
+  still staff, every admin), dedupe per person per month; amounts per currency rendered at read time
+  for a reader who sees fees; emailed in the daily email; resolved when nothing of theirs is left.
+- **Ledger**: `adhoc_advance.raised`, `advance_allocation.mapped` (`how`), `advance_allocation.ended`
+  (`kept`, `freed`); reasons and notes stay on the rows.
+- Tests: `tests/billing/adhoc-advance.test.ts`, `adhoc-advance.integration.test.ts` (sums, currency
+  refusal and the trigger, FIFO, re-map after partial consumption, cancel/credit, scenario 1, the
+  revenue split, the tenant wall), `tests/notify/adhoc-reminders.test.ts`. Walk:
+  `bib/demo-assets/tools/adv-walk.mjs` on `adv-fixture.mjs` (one-firm worker steps `adv-tenant.mts`).
+
 ## Who a commercial document names — the client, not merely the firm (F-10-1, 0306)
 
 The composite `(id, tenant_id)` keys prove a reference is THIS FIRM's and nothing more. The

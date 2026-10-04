@@ -1593,16 +1593,16 @@ function feesFlow(
   // ADVANCES ALREADY RECEIVED (0363, Q048 scenario 1): a term like the rest,
   // in the content hash. Printed only when the letter names one, so every
   // other letter renders exactly as before.
-  if (received.length > 0) {
+  // A paragraph each, not a figures row: the invoice and its date are words a
+  // totals column has no room for (the walk found the label clipped).
+  for (const a of received) {
     out.push({
-      kind: "figures",
-      rows: received.map((a) => ({
-        label:
-          `Advance received${a.invoiceNumber === null ? "" : `, invoice ${a.invoiceNumber}`}` +
-          `${a.issuedOn === null ? "" : ` dated ${longDate(a.issuedOn)}`}, to be adjusted against the fees above`,
-        value: fmt(a.amount, a.currency),
-        emphasis: false,
-      })),
+      kind: "paragraph",
+      lead: "Advance received",
+      text:
+        `${fmt(a.amount, a.currency)}` +
+        `${a.invoiceNumber === null ? "" : `, invoice ${a.invoiceNumber}`}` +
+        `${a.issuedOn === null ? "" : ` dated ${longDate(a.issuedOn)}`}, to be adjusted against the fees above.`,
     });
   }
   return out;
