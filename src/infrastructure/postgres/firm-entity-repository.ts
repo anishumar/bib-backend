@@ -102,10 +102,11 @@ async function writeNumbers(
     voided.push(...gone.map((g) => ({ id: g.id, type: g.type })));
     if (n.set !== null) {
       await db`
+        -- In force from today on the COMPANY's calendar (0337), the day its
+        -- documents are dated on, so one issued this minute prints it.
         INSERT INTO core.party_identifier (id, tenant_id, party_id, type, value, valid_from)
-        SELECT ${n.set.id}, ${tenantId}, ${partyId}, ${n.set.type}, ${n.set.value},
-               (now() AT TIME ZONE t.time_zone)::date
-          FROM tenancy.tenant t WHERE t.id = ${tenantId}
+        VALUES (${n.set.id}, ${tenantId}, ${partyId}, ${n.set.type}, ${n.set.value},
+                (now() AT TIME ZONE crm.issuer_zone(${tenantId}, ${partyId}))::date)
       `;
       added.push({ id: n.set.id, type: n.set.type });
     }

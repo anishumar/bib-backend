@@ -1,6 +1,7 @@
 // The seams rendering needs. Interfaces owned by this use case.
 import type { DocumentKind } from "../../domain/filestore/model";
 import type { PlacedAnchor, RenderableDocument } from "../../domain/render/model";
+import type { CompanyCalendars } from "../../domain/calendar/model";
 
 /**
  * Bytes from a document description. Knows about fonts and page sizes; knows
@@ -61,6 +62,14 @@ export interface RenderSource {
      */
     readonly asIfSentOn?: string | undefined;
   }): Promise<DescribedDocument | null>;
+
+  /** The firm company that issues this record (0337), whose calendar its
+   *  draft is dated on. Null when the record does not exist for this tenant. */
+  issuerOf(input: {
+    readonly tenantId: string;
+    readonly kind: DocumentKind;
+    readonly subjectRef: string;
+  }): Promise<string | null>;
 }
 
 /**
@@ -115,4 +124,6 @@ export interface DescribedDocument {
  */
 export interface FirmTimeZone {
   timeZoneFor(tenantId: string): Promise<string>;
+  /** Each firm company's own calendar (0337); absent means the firm's. */
+  companyCalendars(tenantId: string): Promise<CompanyCalendars>;
 }

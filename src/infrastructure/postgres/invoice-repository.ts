@@ -670,14 +670,15 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
                financial_year = ${financialYear},
                due_on = coalesce(due_on, ${on.dueOnIfUnset}::date),
                -- WHO IT IS FROM AND TO, FROZEN (0334): the supplier and the
-               -- client as they stand today on the firm's calendar, in this same write
-               -- (the only one the trigger lets set it). A correction made
-               -- tomorrow does not reach an issued invoice's paper.
-               printed_parties = (
-                 SELECT jsonb_build_object(
-                          'issuer', crm.print_identity(crm.invoice.entity_party_id, (now() AT TIME ZONE t.time_zone)::date),
-                          'recipient', crm.print_identity(crm.invoice.party_id, (now() AT TIME ZONE t.time_zone)::date))
-                   FROM tenancy.tenant t WHERE t.id = crm.invoice.tenant_id)
+               -- client as they stand today on the issuing company's calendar
+               -- (0337), in this same write (the only one the trigger lets set
+               -- it). A correction made tomorrow does not reach an issued
+               -- invoice's paper.
+               printed_parties = jsonb_build_object(
+                 'issuer', crm.print_identity(entity_party_id,
+                   (now() AT TIME ZONE crm.issuer_zone(tenant_id, entity_party_id))::date),
+                 'recipient', crm.print_identity(party_id,
+                   (now() AT TIME ZONE crm.issuer_zone(tenant_id, entity_party_id))::date))
          WHERE id = ${invoiceId} AND status = 'draft'
         RETURNING ${db.unsafe(INVOICE_COLUMNS)}
       `;
