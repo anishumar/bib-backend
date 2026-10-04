@@ -359,12 +359,13 @@ chk "a line with no fee and no reason takes the list price" 201 \
   "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$SLAPR/lines -H "$H" -d '{"serviceVersionId":"'$BKV1'","description":"Clean-up, at list","quantity":"1"}')"
 chk "…and one with a reason is left unpriced" 201 \
   "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$SLAPR/lines -H "$H" -d '{"serviceVersionId":"'$BKV1'","description":"Clean-up, scope TBD","quantity":"1","pricingNote":"As mutually agreed once the ledger is seen."}')"
+# A proposal's `totals` is one row per currency, its main currency first (0344).
 UNPRICED=$(curl -s -b $J/partner.txt $API/api/v1/proposals/$SLAPR | python3 -c '
 import sys, json
 d = json.load(sys.stdin)
 listed = next(l for l in d["lines"] if l["description"] == "Clean-up, at list")
 line = next(l for l in d["lines"] if l["description"] == "Clean-up, scope TBD")
-print("%s/%s/%s/%s/%s" % (d["totals"]["unpricedLineCount"], d["totals"]["net"], listed["net"], line["priced"], line["net"]))')
+print("%s/%s/%s/%s/%s" % (d["totals"][0]["unpricedLineCount"], d["totals"][0]["net"], listed["net"], line["priced"], line["net"]))')
 # 216000 before these two, plus bookkeeping v1's list price (18000) for the one
 # that said nothing; the one with a reason adds nothing and is counted.
 chk "…the total says how much it does NOT cover" "1/234000.0000/18000.0000/False/None" "$UNPRICED"
@@ -782,7 +783,7 @@ chk "a sent proposal cannot be edited"     409 "$(code -b $J/partner.txt -XPOST 
 QUOTED=$(curl -s -b $J/partner.txt $API/api/v1/proposals/$PRID | python3 -c '
 import sys, json
 p = json.load(sys.stdin); l = p["lines"][0]
-print("%s/%s/%s" % (l["service"]["listPrice"]["amount"], p["totals"]["gross"], p["totals"]["net"]))')
+print("%s/%s/%s" % (l["service"]["listPrice"]["amount"], p["totals"][0]["gross"], p["totals"][0]["net"]))')
 chk "list price then, and what we charged" "25000.00/14400.0000/8640.0000" "$QUOTED"
 
 # The FIFTH axis. The associate has no commercial visibility, so they see the
@@ -791,7 +792,7 @@ chk "list price then, and what we charged" "25000.00/14400.0000/8640.0000" "$QUO
 REDACTED=$(curl -s -b $J/associate.txt $API/api/v1/proposals/$PRID | python3 -c '
 import sys, json
 p = json.load(sys.stdin)
-print("%s/%s/%s" % (p["totals"]["net"], p["totals"]["currency"], p["lines"][0]["description"][:3]))')
+print("%s/%s/%s" % (p["totals"][0]["net"], p["totals"][0]["currency"], p["lines"][0]["description"][:3]))')
 chk "an associate sees the work, not the money" "None/AED/GST" "$REDACTED"
 
 # Staff no longer ACCEPT through /decision (0317): a client's yes given
@@ -809,7 +810,7 @@ GOODTOK='{"token":"'$SHARE'"}'
 chk "an unknown link tells you nothing"    404 "$(code -XPOST $API/api/v1/proposals/shared -H "$H" -d "$BADTOK")"
 SEEN=$(curl -s -XPOST $API/api/v1/proposals/shared -H "$H" -d "$GOODTOK")
 chk "the recipient opens it, with no session" "Harbour Point" "$(echo "$SEEN" | python3 -c 'import sys,json;print(json.load(sys.stdin)["firmName"])')"
-chk "…and reads what they were quoted"    8640.0000 "$(echo "$SEEN" | python3 -c 'import sys,json;print(json.load(sys.stdin)["totals"]["net"])')"
+chk "…and reads what they were quoted"    8640.0000 "$(echo "$SEEN" | python3 -c 'import sys,json;print(json.load(sys.stdin)["totals"][0]["net"])')"
 # Its own read model, not the staff one with fields nulled: a field added for
 # colleagues cannot reach a client's screen by default.
 INSIDES=$(echo "$SEEN" | python3 -c '
