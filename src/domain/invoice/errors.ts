@@ -45,6 +45,7 @@ export type InvoiceErrorCode =
   | "INVOICE_MANAGER_FROZEN"
   | "CREDIT_NOTE_DATE_OUT_OF_RANGE"
   | "INVOICE_HAS_PAYMENTS"
+  | "INVOICE_ADVANCE_MAPPED"
   | "DUNNING_NOTHING_OWED"
   | "CREDIT_EXCEEDS_UNUSED_ADVANCE"
   | "FX_RATE_REQUIRED"
@@ -488,6 +489,22 @@ export class InvoiceHasPayments extends InvoiceError {
         `cannot be cancelled: that money would be attached to nothing. To take money off what the client ` +
         `owes, issue a credit note. If a payment was recorded by mistake, record a refund of the same ` +
         `amount first, then cancel.`,
+    );
+  }
+}
+
+/**
+ * An advance raised before the letter (0363) with part of it mapped to work:
+ * cancelling its invoice would take that money from under the bills that use
+ * it. The mappings are ended first, which frees what bills have not taken.
+ */
+export class InvoiceAdvanceMapped extends InvoiceError {
+  constructor(number: string | null, mapped: string, currency: string) {
+    super(
+      "INVOICE_ADVANCE_MAPPED",
+      `${number ?? "This advance"} has ${moneyInWords(mapped, currency)} mapped to services, so it cannot be ` +
+        `cancelled. On Invoices, Advances to be adjusted, end those mappings first; to give the money back, ` +
+        `issue a credit note.`,
     );
   }
 }

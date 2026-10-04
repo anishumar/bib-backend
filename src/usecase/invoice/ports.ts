@@ -61,7 +61,12 @@ export type CreditNoteOutcome =
 export type PaymentOutcome = { readonly payment: Payment } | { readonly paid: string };
 
 /** A cancellation, or the money that stopped it (B05). */
-export type CancelOutcome = { readonly cancelled: Invoice } | { readonly paid: string };
+/** `mapped`: an ad-hoc advance with part of it mapped to work (0363): ending
+ *  those mappings comes first, or bills of that work lose what they took. */
+export type CancelOutcome =
+  | { readonly cancelled: Invoice }
+  | { readonly paid: string }
+  | { readonly mapped: string };
 
 /**
  * An issue, or why a draft numbered before 0322 was not issued (B51): its

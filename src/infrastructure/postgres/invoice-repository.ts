@@ -728,6 +728,17 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
             FROM crm.payment WHERE invoice_id = ${invoiceId}
         `;
         if (money?.any === true) return { paid: money.paid };
+        // AN AD-HOC ADVANCE STILL MAPPED (0363): under the advance's own lock,
+        // so a mapping written at this moment waits for us or we for it.
+        await db`SELECT pg_advisory_xact_lock(hashtext(${`advance:${invoiceId}`}))`;
+        const [mapped] = await db<{ mapped: string | null }[]>`
+          SELECT sum(coalesce(al.kept_amount, al.amount))::text AS mapped
+            FROM crm.advance_allocation al
+           WHERE al.invoice_id = ${invoiceId}
+          HAVING sum(coalesce(al.kept_amount, al.amount)) > 0
+        `;
+        const mappedAmount = mapped?.mapped ?? null;
+        if (mappedAmount !== null) return { mapped: mappedAmount };
       }
       const [row] = await db<InvoiceRow[]>`
         UPDATE crm.invoice SET status = 'cancelled'
@@ -928,8 +939,12 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
                       THEN round(ap.applied * t.total / nullif(t.net, 0), 2) END AS taken
             FROM crm.invoice_balance b
             JOIN crm.invoice_totals t ON t.invoice_id = b.invoice_id AND t.tenant_id = b.tenant_id
+            -- An ad-hoc advance (0363) gives back only what is MAPPED NOWHERE:
+            -- a mapped part belongs to that work until the mapping is ended.
             LEFT JOIN (
-              SELECT invoice_id, sum(remaining) AS remaining, sum(applied) AS applied
+              SELECT invoice_id,
+                     sum(remaining) FILTER (WHERE source <> 'allocation') AS remaining,
+                     sum(applied) AS applied
                 FROM crm.advance_pool GROUP BY invoice_id
             ) ap ON ap.invoice_id = b.invoice_id
            WHERE b.invoice_id = ${c.invoiceId}

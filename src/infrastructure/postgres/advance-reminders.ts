@@ -176,6 +176,22 @@ export class PostgresAdvancePolicy implements AdvancePolicySource {
     });
   }
 
+  async unmappedDayFor(tenantId: string): Promise<number> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ advance_unmapped_day: number }[]>`
+        SELECT advance_unmapped_day FROM tenancy.tenant WHERE id = ${tenantId}
+      `;
+      if (row === undefined) throw new Error(`no tenant ${tenantId} to read the reminder day of`);
+      return row.advance_unmapped_day;
+    });
+  }
+
+  async setUnmappedDay(tenantId: string, day: number): Promise<void> {
+    await withTenant(this.app, tenantId, async (db) => {
+      await db`UPDATE tenancy.tenant SET advance_unmapped_day = ${day} WHERE id = ${tenantId}`;
+    });
+  }
+
   async setPolicy(tenantId: string, p: AdvancePolicy): Promise<void> {
     await withTenant(this.app, tenantId, async (db) => {
       await db`

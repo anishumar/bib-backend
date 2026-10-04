@@ -780,6 +780,9 @@ export function canonicalContent(input: {
   > &
     Partial<Pick<FeeGroup, "currency">>)[];
   readonly clauses: readonly Pick<LetterClause, "position" | "clauseVersionId">[];
+  /** The advances it names as already received (0363, Q048): a term, the
+   *  money the client is told will be adjusted against these fees. */
+  readonly advancesReceived?: readonly { readonly adhocAdvanceId: string; readonly amount: string }[];
 }): string {
   const head = [
     "letter",
@@ -898,7 +901,13 @@ export function canonicalContent(input: {
     .sort((a, b) => (a.currency < b.currency ? -1 : a.currency > b.currency ? 1 : 0))
     .map((r) => ["rate", r.currency, r.fxRate].join("\t"));
 
-  return [head, ...lines, ...feeGroups, ...rates, ...clauses].join("\n");
+  // ADVANCES ALREADY RECEIVED (0363), one row each and ONLY WHEN THERE ARE
+  // ANY, so every letter that names none hashes exactly as it did.
+  const received = [...(input.advancesReceived ?? [])]
+    .sort((a, b) => (a.adhocAdvanceId < b.adhocAdvanceId ? -1 : a.adhocAdvanceId > b.adhocAdvanceId ? 1 : 0))
+    .map((r) => ["received", r.adhocAdvanceId, r.amount].join("\t"));
+
+  return [head, ...lines, ...feeGroups, ...rates, ...clauses, ...received].join("\n");
 }
 
 function otherCurrency(currency: CurrencyCode | undefined, main: CurrencyCode): string[] {

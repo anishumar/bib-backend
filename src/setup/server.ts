@@ -106,6 +106,8 @@ import { PostgresReadinessFacts } from "../infrastructure/postgres/readiness-fac
 import { ReadinessService } from "../usecase/readiness/service";
 import { InvoiceService } from "../usecase/invoice/service";
 import { BillingDeskService } from "../usecase/billing/desk";
+import { AdhocAdvanceService } from "../usecase/billing/adhoc";
+import { PostgresAdhocAdvanceStore } from "../infrastructure/postgres/adhoc-advance";
 import { WorkBillingService } from "../usecase/billing/work-vs-billing";
 import { PostgresWorkBillingFacts } from "../infrastructure/postgres/work-billing";
 import { GoLiveScheduler } from "../usecase/billing/golive";
@@ -638,6 +640,25 @@ export function wire(cfg: Config, log: Logger): Wired {
     policy: advancePolicy,
     // A default tax rate is for one of the firm's own companies.
     firmEntities: documents,
+  });
+
+  // ADVANCES RAISED BEFORE THE LETTER (0363, Q044-Q048). The invoice goes
+  // through the InvoiceService above, exactly as the billing desk's do.
+  const adhocAdvances = new AdhocAdvanceService({
+    store: new PostgresAdhocAdvanceStore(pools.app),
+    invoices: {
+      prepareDraft: (input) => invoices.prepareDraft(input),
+      prepareLine: (draft, input) => invoices.prepareLine(draft, input),
+      recordRaised: (invoice, actor) => invoices.recordRaised(invoice, actor),
+      find: (tenantId, invoiceId) => invoiceRepository.find(tenantId, invoiceId),
+      issueCreditNote: (input, actor) => invoices.issueCreditNote(input, actor),
+    },
+    taxDefaults,
+    managers: new PostgresBillingManagerFacts(pools.app),
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    ids: systemIds,
+    clock: systemClock,
+    events: ledger,
   });
 
   // WORK VS BILLING (Q041). Read-only: the work, its bill, the invoice and the
@@ -1272,6 +1293,8 @@ export function wire(cfg: Config, log: Logger): Wired {
   const engagement = new EngagementService({
     // 0320: a signed letter's advance becomes a bill to raise.
     advanceBilling: advanceBills,
+    // 0363: and the advances it named as received are mapped to it.
+    namedAdvances: adhocAdvances,
     // CA#24: a signed letter's filings reach the calendar at once, through the
     // nightly sweep's own generator, not tonight.
     calendar: obligations,
@@ -1429,7 +1452,7 @@ export function wire(cfg: Config, log: Logger): Wired {
           }),
         },
         invoice: { service: invoices, dunning, authz },
-        billing: { service: billing, authz, advances: advanceDesk, finals: finalBills, workBilling },
+        billing: { service: billing, authz, advances: advanceDesk, finals: finalBills, workBilling, adhoc: adhocAdvances },
         notifications: { service: notifications, authz },
         filestore: { service: fileStore, authz },
         dashboard: { service: dashboards, authz },

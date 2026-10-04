@@ -127,8 +127,13 @@ export type DueStatus = "open" | "drafted" | "billed" | "skipped" | "covered";
 
 /** What is left of an advance invoice, before tax (0320). */
 export interface AdvancePoolRef {
-  /** The advance BILL it is, which a raise taking from it claims (0321). */
-  readonly advanceDueId: string;
+  /** The advance BILL it is, which a raise taking from it claims (0321). Null
+   *  for part of an ad-hoc advance mapped to this work (0363): that has no bill
+   *  to claim, and the take is re-checked under the advance's lock instead. */
+  readonly advanceDueId: string | null;
+  /** The ad-hoc advance's allocation it is (0363); null or absent for a
+   *  letter's own advance. */
+  readonly allocationId?: string | null | undefined;
   readonly invoiceId: string;
   readonly invoiceNumber: string;
   readonly remaining: string;
@@ -283,16 +288,24 @@ export interface DueFilters {
  * line on no bill. A bill somebody else settled meanwhile is left out and
  * reported; the draft is written only when at least one bill goes on it.
  */
+/** What a bill takes from an advance, before tax: from which invoice, and,
+ *  for an ad-hoc advance, from which of its allocations (0363). */
+export interface AdvanceTake {
+  readonly invoiceId: string;
+  readonly amount: string;
+  readonly allocationId?: string | null | undefined;
+}
+
 export interface RaisePlan {
   readonly draft: NewInvoice | null;
   readonly covered: readonly {
     readonly dueId: string;
-    readonly applied: { readonly invoiceId: string; readonly amount: string };
+    readonly applied: AdvanceTake;
   }[];
   readonly invoiced: readonly {
     readonly dueId: string;
     readonly line: NewInvoiceLine;
-    readonly applied: { readonly invoiceId: string; readonly amount: string } | null;
+    readonly applied: AdvanceTake | null;
   }[];
 }
 
@@ -323,7 +336,7 @@ export interface BillingDueDesk {
     dueId: string,
     invoiceId: string,
     invoiceLineId: string | null,
-    applied?: { readonly invoiceId: string; readonly amount: string } | null,
+    applied?: AdvanceTake | null,
   ): Promise<boolean>;
   /** A whole raise in one transaction (B34); see `RaisePlan`. */
   raiseAtomically(tenantId: string, plan: RaisePlan): Promise<RaiseWritten>;
@@ -331,7 +344,7 @@ export interface BillingDueDesk {
   markCovered(
     tenantId: string,
     dueId: string,
-    applied: { readonly invoiceId: string; readonly amount: string },
+    applied: AdvanceTake,
   ): Promise<boolean>;
   /** Advance bills with their invoices' balances, narrowed to one invoice or
    *  one bill when asked. */
@@ -491,6 +504,10 @@ export interface IssuerTaxDefaults {
 export interface AdvancePolicySource {
   policyFor(tenantId: string): Promise<AdvancePolicy>;
   setPolicy(tenantId: string, policy: AdvancePolicy): Promise<void>;
+  /** The day of the month advances still to be adjusted are reminded (0363,
+   *  Q047): 1 to 28, the tenant row's, default 1. */
+  unmappedDayFor(tenantId: string): Promise<number>;
+  setUnmappedDay(tenantId: string, day: number): Promise<void>;
 }
 
 /** Who is reminded about one advance (0322): active staff only, in force on
@@ -810,4 +827,217 @@ export interface WorkBillingFacts {
     tenantId: string,
     query: { readonly from: string; readonly to: string; readonly partyId?: string | undefined; readonly today: string },
   ): Promise<WbFacts>;
+}
+
+// ── The ad-hoc advance (0363, Q044-Q048) ───────────────────────────────────
+
+/** Where part of an ad-hoc advance is pointed. */
+export type AllocationTarget =
+  | {
+      readonly kind: "service";
+      readonly engagementId: string;
+      readonly serviceName: string;
+      readonly letterRef: string;
+      /** The engagement's own status: a finished one shows "left on a
+       *  finished service" when some of its mapping is still left. */
+      readonly engagementStatus: string;
+      readonly job: { readonly id: string; readonly label: string | null } | null;
+    }
+  | { readonly kind: "letter"; readonly letterId: string; readonly letterRef: string };
+
+export interface AdhocAllocationRecord {
+  readonly id: string;
+  readonly target: AllocationTarget;
+  /** As mapped. */
+  readonly amount: string;
+  /** What it still holds: all of it while live, what bills took once ended. */
+  readonly effective: string;
+  /** What bills have taken from it (raised, drafted or covered). */
+  readonly taken: string;
+  /** Effective less taken: what later bills of that work will still take. */
+  readonly left: string;
+  /** Whose revenue this part is, frozen when it was mapped. */
+  readonly manager: PersonRef | null;
+  readonly how: "by_hand" | "letter_signed";
+  readonly reason: string;
+  readonly createdBy: PersonRef | null;
+  readonly createdAt: string;
+  readonly ended: {
+    readonly at: string;
+    readonly by: PersonRef | null;
+    readonly reason: string;
+    readonly kept: string;
+  } | null;
+}
+
+export interface AdhocAdvanceRecord {
+  readonly id: string;
+  readonly party: { readonly id: string; readonly displayName: string };
+  readonly issuer: { readonly id: string; readonly displayName: string };
+  readonly currency: string;
+  readonly note: string | null;
+  readonly raisedBy: PersonRef | null;
+  readonly raisedAt: string;
+  /** The invoice's manager: whose revenue the unmapped part is. */
+  readonly manager: PersonRef | null;
+  readonly invoice: {
+    readonly id: string;
+    readonly number: string | null;
+    readonly status: "draft" | "issued" | "cancelled";
+    readonly issuedOn: string | null;
+  };
+  /** The invoice's money, before tax (the advance) and with it. */
+  readonly net: string;
+  readonly total: string;
+  readonly credited: string;
+  /** Every allocation's effective amount, added. */
+  readonly mapped: string;
+  /** Before tax, mapped nowhere. Null until the invoice is issued. */
+  readonly unmapped: string | null;
+  /** What giving the unmapped part back would credit: it with its share of the
+   *  tax, never more than the invoice still carries. Null when nothing is. */
+  readonly refundAmount: string | null;
+  readonly paid: string;
+  readonly outstanding: string;
+  readonly allocations: readonly AdhocAllocationRecord[];
+  /** Letters that name it as received (Q048, scenario 1). */
+  readonly namedOn: readonly {
+    readonly letterId: string;
+    readonly ref: string;
+    readonly status: string;
+    readonly amount: string;
+  }[];
+}
+
+export interface AdhocAdvanceFilters {
+  /** `open`: a draft, or issued with something unmapped (the default).
+   *  `all`: every one, cancelled included. */
+  readonly status?: "open" | "all" | undefined;
+  readonly partyId?: string | undefined;
+  readonly advanceId?: string | undefined;
+}
+
+export interface ClientServiceForAdvance extends AllocationTargetFacts {
+  readonly jobs: readonly { readonly id: string; readonly label: string | null; readonly status: string }[];
+}
+
+/** A service an advance could be mapped to, as the rules need to see it. */
+export interface AllocationTargetFacts {
+  readonly engagementId: string;
+  readonly partyId: string;
+  readonly issuerId: string;
+  readonly issuerName: string;
+  /** The line's billing currency, upper case. */
+  readonly currency: string;
+  readonly status: string;
+  readonly letterId: string;
+  readonly letterRef: string;
+  readonly serviceName: string;
+  /** The live service's Dept, for whose revenue it is. */
+  readonly deptCode: string | null;
+}
+
+export interface NewAdhocAdvance {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly invoiceId: string;
+  readonly currency: string;
+  readonly note: string | null;
+  readonly raisedByUserId: string;
+}
+
+export interface NewAllocation {
+  readonly id: string;
+  readonly engagementId: string | null;
+  readonly jobId: string | null;
+  readonly engagementLetterId: string | null;
+  readonly amount: string;
+  readonly managerUserId: string | null;
+  readonly how: "by_hand" | "letter_signed";
+  readonly reason: string;
+  readonly createdByUserId: string | null;
+}
+
+export type MapOutcome =
+  | { readonly written: readonly { readonly id: string; readonly amount: string }[] }
+  | { readonly notIssued: string }
+  | { readonly over: { readonly asked: string; readonly unmapped: string } };
+
+export type EndOutcome =
+  | { readonly ended: { readonly kept: string; readonly freed: string } }
+  | { readonly usedUp: true }
+  | { readonly alreadyEnded: true };
+
+/** A signed letter that named advances not yet mapped to it. */
+export interface LetterOwingMaps {
+  readonly letterId: string;
+  readonly letterRef: string;
+  readonly partyId: string;
+  readonly signedOn: string;
+  readonly named: readonly {
+    readonly adhocAdvanceId: string;
+    readonly amount: string;
+  }[];
+}
+
+export interface AdhocAdvanceStore {
+  /** The draft invoice, its one line and the advance's row, in ONE
+   *  transaction (B34's rule): a refusal half-way leaves nothing. */
+  raiseAtomically(
+    tenantId: string,
+    plan: { readonly draft: NewInvoice; readonly line: NewInvoiceLine; readonly advance: NewAdhocAdvance },
+  ): Promise<Invoice>;
+  list(tenantId: string, filters: AdhocAdvanceFilters): Promise<readonly AdhocAdvanceRecord[]>;
+  targets(tenantId: string, engagementIds: readonly string[]): Promise<readonly AllocationTargetFacts[]>;
+  /** Every service of a client an advance might be mapped to, with its jobs:
+   *  what the map dialog offers (the rules then say which may be picked). */
+  servicesOf(tenantId: string, partyId: string): Promise<readonly ClientServiceForAdvance[]>;
+  /** Each job's engagement (null: not a service's job) and its period label. */
+  jobs(
+    tenantId: string,
+    jobIds: readonly string[],
+  ): Promise<readonly { readonly jobId: string; readonly engagementId: string | null; readonly label: string | null }[]>;
+  /**
+   * Write allocations under the advance's lock, re-reading what is unmapped
+   * there. `clip`: a letter mapping what it named takes at most what is left
+   * (and writes nothing when nothing is); otherwise asking for more than is
+   * left writes nothing and answers `over`.
+   */
+  map(
+    tenantId: string,
+    advanceId: string,
+    rows: readonly NewAllocation[],
+    options?: { readonly clip?: boolean | undefined },
+  ): Promise<MapOutcome>;
+  /** End one, under the same lock: what bills took is kept, the rest freed. */
+  end(
+    tenantId: string,
+    advanceId: string,
+    allocationId: string,
+    input: { readonly byUserId: string | null; readonly reason: string },
+  ): Promise<EndOutcome | null>;
+  /** The advances a letter names (Q048), and replacing them on a DRAFT. */
+  namedOn(
+    tenantId: string,
+    letterId: string,
+  ): Promise<readonly { readonly adhocAdvanceId: string; readonly amount: string; readonly currency: string }[]>;
+  setNamed(
+    tenantId: string,
+    letterId: string,
+    rows: readonly { readonly adhocAdvanceId: string; readonly amount: string; readonly currency: string }[],
+  ): Promise<void>;
+  /** A letter's client, company, currency and status, for naming advances. */
+  letterFacts(
+    tenantId: string,
+    letterId: string,
+  ): Promise<{
+    readonly partyId: string;
+    readonly issuerId: string;
+    readonly currency: string;
+    readonly status: string;
+    readonly ref: string;
+  } | null>;
+  /** Signed letters that named advances never mapped to them (one letter, or
+   *  every one: the daily catch-up). */
+  lettersOwingMaps(tenantId: string, letterId?: string): Promise<readonly LetterOwingMaps[]>;
 }

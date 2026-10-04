@@ -34,6 +34,7 @@ import {
   takeFromAdvance,
   type AdvancePolicy,
 } from "../../domain/billing/advance";
+import { isUnmappedReminderDay } from "../../domain/billing/adhoc-advance";
 import {
   AdvanceLinkNeedsAdmin,
   AdvanceNotSkippable,
@@ -95,6 +96,8 @@ export interface BillingSettings {
   readonly taxDefaults: readonly { readonly entityPartyId: string; readonly taxPercent: string }[];
   /** The firm's own payment terms in days (0327); null: none, never a guess. */
   readonly invoiceDueDays: number | null;
+  /** The day of the month advances still to be adjusted are reminded (0363). */
+  readonly unmappedReminderDay: number;
 }
 
 /** A week: an untouched bill then shows to the manager's own manager too
@@ -367,13 +370,21 @@ export class BillingDeskService {
     const planned = priced.map((p) => {
       const pool = p.due.kind === "advance" ? null : p.due.advancePool;
       if (pool === null) return { ...p, applied: null, balance: p.amount };
-      const taken = takeFromAdvance(left.get(pool.invoiceId) ?? pool.remaining, p.amount);
-      left.set(pool.invoiceId, taken.remaining);
+      // Keyed by the SOURCE (0363): two allocations of one ad-hoc advance are
+      // two pools on one invoice.
+      const source = pool.allocationId ?? pool.invoiceId;
+      const taken = takeFromAdvance(left.get(source) ?? pool.remaining, p.amount);
+      left.set(source, taken.remaining);
       return {
         ...p,
         applied:
           compareAmounts(taken.applied, "0") > 0
-            ? { invoiceId: pool.invoiceId, invoiceNumber: pool.invoiceNumber, amount: taken.applied }
+            ? {
+                invoiceId: pool.invoiceId,
+                invoiceNumber: pool.invoiceNumber,
+                amount: taken.applied,
+                allocationId: pool.allocationId ?? null,
+              }
             : null,
         balance: taken.balance,
       };
@@ -423,7 +434,10 @@ export class BillingDeskService {
       invoiced: lines.map(({ p, line }) => ({
         dueId: p.due.id,
         line,
-        applied: p.applied === null ? null : { invoiceId: p.applied.invoiceId, amount: p.applied.amount },
+        applied:
+          p.applied === null
+            ? null
+            : { invoiceId: p.applied.invoiceId, amount: p.applied.amount, allocationId: p.applied.allocationId },
       })),
     });
 
@@ -435,7 +449,11 @@ export class BillingDeskService {
         verb: "billing_due.covered",
         objectId: p.due.id,
         actor,
-        payload: { advanceInvoiceId: p.applied.invoiceId, advanceApplied: p.applied.amount },
+        payload: {
+          advanceInvoiceId: p.applied.invoiceId,
+          advanceApplied: p.applied.amount,
+          ...(p.applied.allocationId === null ? {} : { advanceAllocationId: p.applied.allocationId }),
+        },
       });
     }
     const invoice = written.invoice;
@@ -443,7 +461,10 @@ export class BillingDeskService {
     for (const { p } of lines) {
       const on = written.invoiced.find((w) => w.dueId === p.due.id);
       if (on === undefined || invoice === null) continue;
-      const applied = p.applied === null ? null : { invoiceId: p.applied.invoiceId, amount: p.applied.amount };
+      const applied =
+        p.applied === null
+          ? null
+          : { invoiceId: p.applied.invoiceId, amount: p.applied.amount, allocationId: p.applied.allocationId };
       await this.deps.events.recordEvent({
         tenantId: input.tenantId,
         verb: "billing_due.invoiced",
@@ -454,6 +475,7 @@ export class BillingDeskService {
           invoiceLineId: on.lineId,
           how: "raised",
           ...(applied === null ? {} : { advanceInvoiceId: applied.invoiceId, advanceApplied: applied.amount }),
+          ...((applied?.allocationId ?? null) === null ? {} : { advanceAllocationId: applied?.allocationId }),
           // A price the letter fixed, billed at another figure (0321): both, so
           // "who changed it and from what" is answerable later.
           ...(p.changedFrom === null ? {} : { letterAmount: p.changedFrom, billedAmount: p.amount }),
@@ -779,13 +801,33 @@ export class BillingDeskService {
   }
 
   async settings(tenantId: string): Promise<BillingSettings> {
-    const [autoBilling, advancePolicy, taxDefaults, invoiceDueDays] = await Promise.all([
+    const [autoBilling, advancePolicy, taxDefaults, invoiceDueDays, unmappedReminderDay] = await Promise.all([
       this.deps.setting.isOn(tenantId),
       this.deps.policy.policyFor(tenantId),
       this.deps.taxDefaults.list(tenantId),
       this.deps.setting.dueInDays(tenantId),
+      this.deps.policy.unmappedDayFor(tenantId),
     ]);
-    return { autoBilling, advancePolicy, taxDefaults, invoiceDueDays };
+    return { autoBilling, advancePolicy, taxDefaults, invoiceDueDays, unmappedReminderDay };
+  }
+
+  /** The day of the month advances still to be adjusted are reminded (0363,
+   *  Q047): 1 to 28, so every month has it. */
+  async setUnmappedReminderDay(tenantId: string, day: number, actor: Actor): Promise<number> {
+    if (!isUnmappedReminderDay(day)) {
+      throw new InvalidBillingInput("The reminder day is a day of the month from 1 to 28.");
+    }
+    const from = await this.deps.policy.unmappedDayFor(tenantId);
+    if (from === day) return day;
+    await this.deps.policy.setUnmappedDay(tenantId, day);
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "tenant.advance_unmapped_day_set",
+      objectId: tenantId,
+      actor,
+      payload: { from, to: day },
+    });
+    return day;
   }
 
   /**
@@ -930,7 +972,13 @@ export function lineDescription(
 function poolsOf(dues: readonly BillingDueRecord[]): string[] {
   return [
     ...new Set(
-      dues.flatMap((d) => (d.kind !== "advance" && d.advancePool !== null ? [d.advancePool.advanceDueId] : [])),
+      // An ad-hoc allocation has no bill to claim (0363): its take is
+      // re-checked under the advance's lock in the write.
+      dues.flatMap((d) =>
+        d.kind !== "advance" && d.advancePool !== null && d.advancePool.advanceDueId !== null
+          ? [d.advancePool.advanceDueId]
+          : [],
+      ),
     ),
   ];
 }

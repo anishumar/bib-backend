@@ -32,7 +32,20 @@ export type BillingErrorCode =
   | "NOTHING_TO_REFUND"
   | "BILL_BUSY"
   | "ADVANCE_LINK_NEEDS_ADMIN"
-  | "PRICE_NOT_VISIBLE";
+  | "PRICE_NOT_VISIBLE"
+  // The ad-hoc advance (0363).
+  | "ADVANCE_NOT_FOUND"
+  | "ALLOCATION_NOT_FOUND"
+  | "ADVANCE_NOT_ISSUED"
+  | "ADVANCE_OVER_MAPPED"
+  | "ADVANCE_IN_ANOTHER_CURRENCY"
+  | "ADVANCE_OF_ANOTHER_ISSUER"
+  | "ADVANCE_OF_ANOTHER_CLIENT"
+  | "ADVANCE_TARGET_NOT_LIVE"
+  | "ADVANCE_JOB_NOT_OF_SERVICE"
+  | "ALLOCATION_USED_UP"
+  | "ALLOCATION_ENDED"
+  | "ADVANCE_FEES_NOT_VISIBLE";
 
 /** An advance bill is how the work it holds gets started (0320): skipping it
  *  while that work still waits would leave it waiting for good. Once nothing
@@ -228,6 +241,116 @@ export class PriceNotVisible extends BillingError {
       "PRICE_NOT_VISIBLE",
       `The letter fixes the price of ${what}, and this login does not see fees, so it cannot bill a different amount. ` +
         "Leave the amount empty to bill the letter's price, or ask somebody who sees fees.",
+    );
+  }
+}
+
+// ── The ad-hoc advance (0363, Q044-Q048) ───────────────────────────────────
+
+export class AdvanceNotFound extends BillingError {
+  constructor(id: string) {
+    super("ADVANCE_NOT_FOUND", `No advance ${id} at this firm.`);
+  }
+}
+
+export class AllocationNotFound extends BillingError {
+  constructor(id: string) {
+    super("ALLOCATION_NOT_FOUND", `No mapping ${id} on this advance.`);
+  }
+}
+
+/** A draft has no number and asks the client for nothing yet: there is no
+ *  money to point at work until it is issued. */
+export class AdvanceNotIssued extends BillingError {
+  constructor(status: string) {
+    super(
+      "ADVANCE_NOT_ISSUED",
+      status === "cancelled"
+        ? "This advance's invoice was cancelled, so there is nothing to map."
+        : "This advance's invoice is still a draft. Issue it first; then map it to the services it pays for.",
+    );
+  }
+}
+
+export class AdvanceOverMapped extends BillingError {
+  constructor(asked: string, unmapped: string, currency: string) {
+    super(
+      "ADVANCE_OVER_MAPPED",
+      `That maps ${currency} ${asked}, and only ${currency} ${unmapped} of this advance is not mapped yet. ` +
+        "Map less, or free part of an earlier mapping first.",
+    );
+  }
+}
+
+/** Never converted: an AED advance is not taken off an INR service's bills. */
+export class AdvanceInAnotherCurrency extends BillingError {
+  constructor(service: string, serviceCurrency: string, advanceCurrency: string) {
+    super(
+      "ADVANCE_IN_ANOTHER_CURRENCY",
+      `${service} is billed in ${serviceCurrency} and this advance is in ${advanceCurrency}. ` +
+        "An advance comes off bills in its own currency only. Map it to a service billed in " +
+        `${advanceCurrency}, or give it back.`,
+    );
+  }
+}
+
+/** The advance is in its issuing company's tax books: another company's
+ *  invoice cannot take it. */
+export class AdvanceOfAnotherIssuer extends BillingError {
+  constructor(service: string, serviceCompany: string, advanceCompany: string) {
+    super(
+      "ADVANCE_OF_ANOTHER_ISSUER",
+      `${service} is under a letter of ${serviceCompany}, and this advance was invoiced by ${advanceCompany}. ` +
+        "An advance comes off the bills of the company that invoiced it.",
+    );
+  }
+}
+
+export class AdvanceOfAnotherClient extends BillingError {
+  constructor(service: string) {
+    super("ADVANCE_OF_ANOTHER_CLIENT", `${service} is another client's work. An advance is mapped to its own client's services.`);
+  }
+}
+
+export class AdvanceTargetNotLive extends BillingError {
+  constructor(service: string, status: string) {
+    super(
+      "ADVANCE_TARGET_NOT_LIVE",
+      `${service} is ${status.replace("_", " ")}, so no bill of it will take this advance. Map it to live work.`,
+    );
+  }
+}
+
+export class AdvanceJobNotOfService extends BillingError {
+  constructor() {
+    super("ADVANCE_JOB_NOT_OF_SERVICE", "That job is not one of this service's jobs.");
+  }
+}
+
+/** Every rupee of it is on bills already: nothing is left to move. */
+export class AllocationUsedUp extends BillingError {
+  constructor() {
+    super(
+      "ALLOCATION_USED_UP",
+      "Bills of this service have already taken all of this mapping, so there is nothing left to move. " +
+        "Cancel the invoice that took it first if it was wrong.",
+    );
+  }
+}
+
+export class AllocationEnded extends BillingError {
+  constructor() {
+    super("ALLOCATION_ENDED", "This mapping was already ended. Reload the list to see what changed.");
+  }
+}
+
+/** An advance IS an amount: a login that does not see fees cannot raise or
+ *  map one. */
+export class AdvanceFeesNotVisible extends BillingError {
+  constructor() {
+    super(
+      "ADVANCE_FEES_NOT_VISIBLE",
+      "An advance is an amount of money, and your login is not set to see fees. Ask somebody who can see fees.",
     );
   }
 }

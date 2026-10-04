@@ -1050,6 +1050,7 @@ export function mapError(err: unknown): MappedError {
       case "MANAGER_NOT_STAFF":
       case "INVOICE_MANAGER_FROZEN":
       case "INVOICE_HAS_PAYMENTS":
+      case "INVOICE_ADVANCE_MAPPED":
       case "DUNNING_NOTHING_OWED":
       case "DUE_BEFORE_ISSUE":
       case "INVOICE_NUMBER_OUT_OF_ORDER":
@@ -1069,6 +1070,8 @@ export function mapError(err: unknown): MappedError {
       case "BILLING_DUE_NOT_FOUND":
       case "BILLING_INVOICE_NOT_FOUND":
       case "BILLING_ENGAGEMENT_NOT_FOUND":
+      case "ADVANCE_NOT_FOUND":
+      case "ALLOCATION_NOT_FOUND":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
       case "BILLING_DUE_NOT_OPEN":
       case "INVOICE_DOES_NOT_FIT_DUE":
@@ -1080,11 +1083,23 @@ export function mapError(err: unknown): MappedError {
       case "AUTO_BILLING_OFF":
       case "NOTHING_TO_REFUND":
       case "BILL_BUSY":
+      case "ADVANCE_NOT_ISSUED":
+      case "ADVANCE_OVER_MAPPED":
+      case "ADVANCE_IN_ANOTHER_CURRENCY":
+      case "ADVANCE_OF_ANOTHER_ISSUER":
+      case "ADVANCE_OF_ANOTHER_CLIENT":
+      case "ADVANCE_TARGET_NOT_LIVE":
+      case "ADVANCE_JOB_NOT_OF_SERVICE":
+      case "ALLOCATION_USED_UP":
+      case "ALLOCATION_ENDED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       // Who may do it, not the request's shape: 403, and the sentence says who can.
       case "ADVANCE_LINK_NEEDS_ADMIN":
       case "PRICE_NOT_VISIBLE":
         return { status: 403, code: "FORBIDDEN", message: err.message, reason: err.code };
+      // The fee axis's one reason code, as every other money refusal has.
+      case "ADVANCE_FEES_NOT_VISIBLE":
+        return { status: 403, code: "FORBIDDEN", message: err.message, reason: "FEES_NOT_VISIBLE" };
       default:
         return unmapped(err.code);
     }

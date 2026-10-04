@@ -3,6 +3,7 @@
 //   1. the spec is generated from the routes (single source of truth),
 //   2. a validation failure returns the SAME envelope as every other error,
 //   3. the principal gate still answers 401 with that envelope.
+import { fakeAdhocService } from "../../src/testfakes/adhoc";
 import { makeFxFakes } from "../../src/testfakes/fx";
 import { NotificationService } from "../../src/usecase/notify/service";
 import { FakeNotificationInbox, FakeNotificationSettings, FakeNotifyFirmSetting } from "../../src/testfakes/notify";
@@ -613,6 +614,7 @@ function deps(): RouterDeps {
         timeZones: new FakeFirmTimeZone(),
         clock: new FakeClock(),
       }),
+      adhoc: fakeAdhocService(),
       finals: new FinalBiller({
         facts: new FakeFinalBillFacts(),
         dues: new FakeBillingDueWriter(),
