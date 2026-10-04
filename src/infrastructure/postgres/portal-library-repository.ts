@@ -252,7 +252,11 @@ export class PostgresPortalLibraryRepository implements PortalLibraryRepository 
           JOIN core.party billed
             ON billed.id = i.party_id AND billed.tenant_id = i.tenant_id
          WHERE i.tenant_id = ${tenantId}
-         ORDER BY i.issued_on DESC NULLS LAST, i.number DESC
+           -- Only what was ISSUED to the client (F06): a draft cancelled before
+           -- it was sent is the firm's own business. The policy says so too
+           -- (0326); this keeps the read honest if a policy is ever dropped.
+           AND i.issued_on IS NOT NULL
+         ORDER BY i.issued_on DESC, i.number DESC
       `;
       return rows.map(toInvoiceRow);
     });

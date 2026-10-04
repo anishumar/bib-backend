@@ -465,6 +465,19 @@ export class PostgresProposalRepository implements ProposalRepository {
                    l.billing_frequency::text), 99)
       `;
 
+      // A YEAR OF THE RECURRING FEES (CA#42), added by the database: monthly
+      // x 12, quarterly x 4, annually x 1. No one-off or custom fee is in it.
+      const [annual] = await db<{ value: string | null }[]>`
+        SELECT sum(a.net * CASE l.billing_frequency WHEN 'monthly' THEN 12
+                                                    WHEN 'quarterly' THEN 4
+                                                    WHEN 'annually' THEN 1 END)::text AS value
+        FROM crm.proposal_line l
+        JOIN crm.proposal_line_amount a ON a.id = l.id
+        WHERE l.proposal_id = ${proposalId} AND l.removed_at IS NULL
+          AND l.unit_amount IS NOT NULL
+          AND l.billing_frequency IN ('monthly', 'quarterly', 'annually')
+      `;
+
       // The firm's Depts and delivery teams, retired rows included — the render
       // source's read, so a line's Dept name and a section's letter are the
       // PDF's.
@@ -510,6 +523,7 @@ export class PostgresProposalRepository implements ProposalRepository {
           jurisdiction: head.issuer_jurisdiction,
         },
         issuedOn: head.issued_on,
+        annualValue: annual?.value ?? null,
         totalsByFrequency: byFrequency.map((f) => ({
           frequency: f.frequency,
           net: f.net ?? "0",
@@ -1359,3 +1373,4 @@ function toPinnedService(
     exclusions: stored.exclusions,
   };
 }
+

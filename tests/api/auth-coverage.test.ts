@@ -47,7 +47,7 @@ import {
 } from "../../src/testfakes/filestore";
 import { systemClock } from "../../src/platform/clock";
 import type { RouterDeps } from "../../src/api/router";
-import { PORTAL_PATHS, PUBLIC_PATHS, compilePortalPaths, isPortalPath } from "../../src/api/guards";
+import { PORTAL_PATHS, PUBLIC_PATHS, PUBLIC_ROUTES, compilePortalPaths, isPortalPath, isPublicRoute } from "../../src/api/guards";
 import { decideRoute } from "../../src/api/permissions";
 import { capabilityFor } from "../../src/api/capabilities";
 import { TenancyService } from "../../src/usecase/tenancy/service";
@@ -154,7 +154,7 @@ import { makeLeadFakes } from "../../src/testfakes/lead";
 import { makeProposalFakes } from "../../src/testfakes/proposal";
 import { FakeEngagementLifecycle, makeEngagementFakes } from "../../src/testfakes/engagement";
 import { makeDocumentFakes, makeFirmEntityFakes } from "../../src/testfakes/document";
-import { makeInvoiceFakes } from "../../src/testfakes/invoice";
+import { FakeFirmEntities, makeInvoiceFakes } from "../../src/testfakes/invoice";
 import { FakeDunningLadder, FakeDunningRepo } from "../../src/testfakes/dunning";
 import {
   FakeCheckerDirectory,
@@ -164,6 +164,23 @@ import {
 } from "../../src/testfakes/verification";
 import { DunningService } from "../../src/usecase/dunning/service";
 import { InvoiceService } from "../../src/usecase/invoice/service";
+import { BillingDeskService } from "../../src/usecase/billing/desk";
+import { AdvanceDesk } from "../../src/usecase/billing/advance";
+import { FinalBiller } from "../../src/usecase/billing/final";
+import {
+  FakeAutoBillingSetting,
+  FakeBillingDueDesk,
+  FakeAutoBillingFirms,
+  FakeBillingDueWriter,
+  FakeBillingManagerFacts,
+  FakeFinalBillFacts,
+  FakeIssuerTaxDefaults,
+  FakeAdvancePolicy,
+  FakeAdvanceReminderFacts,
+  FakeBillingSchedules,
+  FakeFiscalYearSource,
+  FakeInvoiceDrafter,
+} from "../../src/testfakes/billing";
 import {
   FakeCredentialRepo,
   FakeMagicLinkRepo,
@@ -495,6 +512,7 @@ function deps(): RouterDeps {
         timeZones: { timeZoneFor: () => Promise.resolve("UTC") },
         events: new RecordingEventSink(),
       }),
+      authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }),
     },
     portalAccess: {
       service: new PortalAccessService({
@@ -565,8 +583,8 @@ function deps(): RouterDeps {
       }),
     },
     party: { service: new PartyService(makePartyFakes()) },
-    ledger: { service: new LedgerService(makeLedgerFakes()) },
-    config: { service: new ConfigService(makeConfigFakes()) },
+    ledger: { service: new LedgerService(makeLedgerFakes()), authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }) },
+    config: { service: new ConfigService(makeConfigFakes()), authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }) },
     lead: {
       service: new LeadService(makeLeadFakes()),
       authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }),
@@ -600,6 +618,7 @@ function deps(): RouterDeps {
       service: new DashboardService({
         dashboards: new FakeDashboardRepo(),
         timeZones: new FakeFirmTimeZone(),
+        fiscalYears: new FakeFiscalYearSource(),
         clock: new FakeClock(),
       }),
       authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }),
@@ -616,6 +635,42 @@ function deps(): RouterDeps {
         renderSource: new FakeRenderSource(),
         timeZones: new FakeFirmTimeZone(),
         clock: new FakeClock(),
+      }),
+      authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }),
+    },
+    billing: {
+      authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }),
+      service: new BillingDeskService({
+        desk: new FakeBillingDueDesk(),
+        invoices: new FakeInvoiceDrafter(),
+        schedules: new FakeBillingSchedules(),
+        setting: new FakeAutoBillingSetting(),
+        fiscalYears: new FakeFiscalYearSource(),
+        timeZones: new FakeFirmTimeZone(),
+        clock: new FakeClock(),
+        events: new RecordingEventSink(),
+        taxDefaults: new FakeIssuerTaxDefaults(),
+        policy: new FakeAdvancePolicy(),
+        firmEntities: new FakeFirmEntities(),
+      }),
+      advances: new AdvanceDesk({
+        desk: new FakeBillingDueDesk(),
+        policy: new FakeAdvancePolicy(),
+        people: new FakeAdvanceReminderFacts(),
+        taxDefaults: new FakeIssuerTaxDefaults(),
+        timeZones: new FakeFirmTimeZone(),
+        clock: new FakeClock(),
+      }),
+      finals: new FinalBiller({
+        facts: new FakeFinalBillFacts(),
+        dues: new FakeBillingDueWriter(),
+        managers: new FakeBillingManagerFacts(),
+        setting: new FakeAutoBillingSetting(),
+        firms: new FakeAutoBillingFirms(),
+        timeZones: new FakeFirmTimeZone(),
+        clock: new FakeClock(),
+        ids: new FakeIds(),
+        events: new RecordingEventSink(),
       }),
     },
     invoice: {
@@ -751,11 +806,33 @@ describe("every route is accounted for", () => {
     }
   });
 
+  it("exempts a public path for its own method only (B49)", async () => {
+    // PUBLIC_PATHS was matched on the path alone, so any method to a public
+    // path skipped the session guard. Harmless the day it was found (nothing
+    // else is registered there), and a GET added beside a public POST would
+    // have been public without anybody deciding it.
+    for (const key of PUBLIC_ROUTES) {
+      const [method, path] = key.split(" ");
+      expect(registeredRoutes().some((r) => r.method.toUpperCase() === method && r.path === path), key).toBe(true);
+      expect(isPublicRoute(method ?? "", path ?? "")).toBe(true);
+      expect(isPublicRoute("GET", path ?? "")).toBe(false);
+      expect(isPublicRoute("DELETE", path ?? "")).toBe(false);
+    }
+    const asGet = await app().request("/api/v1/auth/login", { method: "GET" });
+    expect(asGet.status).toBe(401);
+    const asPost = await app().request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(asPost.status).not.toBe(401);
+  });
+
   it("refuses every non-public route to an anonymous caller", async () => {
     const unguarded: string[] = [];
 
     for (const { method, path } of registeredRoutes()) {
-      if (PUBLIC_PATHS.has(path) || INTENTIONALLY_PUBLIC.has(path)) continue;
+      if (isPublicRoute(method, path) || INTENTIONALLY_PUBLIC.has(path)) continue;
       const init = bodylessOrJson(method);
       const res = await app().request(concrete(path), init);
       if (res.status !== 401) unguarded.push(`${method.toUpperCase()} ${path} -> ${String(res.status)}`);
@@ -1190,6 +1267,28 @@ describe("gate 3 — role", () => {
     expect(body.permissions.map((p) => p.key)).toContain("tenant:admin");
   });
 
+  it("issuing, cancelling and crediting take invoice:issue, not the whole of tenant:admin (CA#6)", () => {
+    // An accounts person issues invoices and credit notes; making them a full
+    // administrator to do it handed them the roster and the roles too.
+    const issuing = { kind: "permission", permission: "invoice:issue" };
+    expect(decideRoute("POST", "/api/v1/invoices/00000000-0000-4000-8000-000000000001/issue")).toEqual(issuing);
+    expect(decideRoute("POST", "/api/v1/invoices/00000000-0000-4000-8000-000000000001/cancel")).toEqual(issuing);
+    expect(decideRoute("POST", "/api/v1/invoices/00000000-0000-4000-8000-000000000001/credit-notes")).toEqual(issuing);
+    // A refund is a credit note on the advance, and keeping it is the other answer to the same question.
+    expect(decideRoute("POST", "/api/v1/billing/refunds/00000000-0000-4000-8000-000000000001/credit-note")).toEqual(issuing);
+    expect(decideRoute("POST", "/api/v1/billing/refunds/00000000-0000-4000-8000-000000000001/keep")).toEqual(issuing);
+    // Raising a draft is still bookkeeping.
+    expect(decideRoute("POST", "/api/v1/invoices")).toEqual({ kind: "permission", permission: "party:write" });
+  });
+
+  it("names invoice:issue on the roles screen in plain words (CA#6)", async () => {
+    const res = await app(as("partner")).request("/api/v1/config/permissions");
+    const body = (await res.json()) as { permissions: { key: string; description: string }[] };
+    const issue = body.permissions.find((p) => p.key === "invoice:issue");
+    expect(issue?.description).toMatch(/^Issue and cancel invoices, and issue credit notes/);
+    expect(issue?.description).not.toMatch(/tenant|:/);
+  });
+
   it("the preview takes what rendering takes, though it files nothing (2026-09-28)", async () => {
     // It draws the same rows through the same renderer, fee figures and all:
     // a session that could not render and download the PDF must not be handed
@@ -1242,6 +1341,14 @@ describe("CORS — the frontend is a separate origin", () => {
     expect(res.headers.get("access-control-allow-origin")).toBe(ALLOWED);
     // Without this the browser sends no cookie and the session never works.
     expect(res.headers.get("access-control-allow-credentials")).toBe("true");
+  });
+
+  it("lets the browser read Retry-After, so a busy screen can wait the right time", async () => {
+    // A cross-origin script sees only the safelisted response headers unless
+    // the API exposes more. The workspace's "busy, retrying" state (F15) reads
+    // this one to know when to ask again.
+    const res = await app(STAFF_SESSION).request("/api/v1/auth/me", { headers: { Origin: ALLOWED } });
+    expect(res.headers.get("access-control-expose-headers") ?? "").toContain("Retry-After");
   });
 
   it("does not hand credentials to an origin that is not on the list", async () => {
@@ -1396,5 +1503,135 @@ describe("the /internal surface authorizes, not just authenticates", () => {
     // service records rather than reaching into them: covered end to end by the
     // smoke test, and by the tenancy service unit tests for the payload itself.
     expect(capabilityFor("POST", "/internal/v1/tenants")).toBe("tenant.provision");
+  });
+});
+
+describe("the rate limit keys a signed-in caller on the SESSION (F15, B28, CA#14)", () => {
+  // The edge limiter keyed every request on the client ADDRESS. A firm of
+  // forty behind one office NAT gateway then shared one 300-a-minute bucket,
+  // and a 429 on `/auth/me` signed people out. The signed-in surface is now
+  // counted per session; the anonymous surface, and every request whose
+  // credential does not resolve, are still counted per address.
+  const SESSION_A: Principal = { ...STAFF_SESSION, sessionId: "00000000-0000-4000-8000-0000000000a1" };
+  const SESSION_B: Principal = { ...STAFF_SESSION, sessionId: "00000000-0000-4000-8000-0000000000b2" };
+
+  /** A router with tiny budgets. `Bearer a` / `Bearer b` resolve to two
+   *  sessions; any other credential resolves to nobody. `lookups` counts the
+   *  session lookups, which is what an unauthenticated flood would spend. */
+  function limited(general = 3, auth = 2) {
+    const lookups = { count: 0 };
+    const router = buildRouter(deps(), silentLog, {
+      docsEnabled: true,
+      internalClients: INTERNAL_CLIENTS,
+      authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }),
+      rateLimiter: new InMemoryRateLimiter(systemClock),
+      corsOrigins: ["http://localhost:3000"],
+      maxUploadBytes: 25 * 1024 * 1024,
+      hstsEnabled: false,
+      build: { commit: null, builtAt: null },
+      rateLimit: {
+        auth: { limit: auth, windowSeconds: 60 },
+        general: { limit: general, windowSeconds: 60 },
+        trustProxy: true,
+        trustedProxyHops: 1,
+      },
+      principalOf: (header) => {
+        lookups.count += 1;
+        const credential = header("authorization");
+        if (credential === "Bearer a") return Promise.resolve(SESSION_A);
+        if (credential === "Bearer b") return Promise.resolve(SESSION_B);
+        return Promise.resolve(null);
+      },
+    });
+    return { router, lookups };
+  }
+
+  const from = (address: string, credential?: string): RequestInit => ({
+    headers: {
+      "x-forwarded-for": address,
+      ...(credential === undefined ? {} : { authorization: credential }),
+    },
+  });
+
+  it("gives two people in one office a budget each", async () => {
+    const { router } = limited(3);
+    for (let i = 0; i < 3; i += 1) {
+      expect((await router.request("/api/v1/auth/me", from("203.0.113.7", "Bearer a"))).status).not.toBe(429);
+    }
+    // Under address keying the office's bucket is now spent and B is refused.
+    for (let i = 0; i < 3; i += 1) {
+      expect((await router.request("/api/v1/auth/me", from("203.0.113.7", "Bearer b"))).status).not.toBe(429);
+    }
+  });
+
+  it("still stops one session that goes over its own budget", async () => {
+    const { router } = limited(3);
+    for (let i = 0; i < 3; i += 1) {
+      await router.request("/api/v1/auth/me", from("203.0.113.7", "Bearer a"));
+    }
+    const refused = await router.request("/api/v1/auth/me", from("203.0.113.7", "Bearer a"));
+    expect(refused.status).toBe(429);
+    expect(refused.headers.get("retry-after")).not.toBeNull();
+  });
+
+  it("follows the session, not the address it calls from", async () => {
+    // A phone moving from the office Wi-Fi to mobile data is the same caller.
+    const { router } = limited(3);
+    for (let i = 0; i < 3; i += 1) {
+      await router.request("/api/v1/auth/me", from("203.0.113.7", "Bearer a"));
+    }
+    expect((await router.request("/api/v1/auth/me", from("198.51.100.4", "Bearer a"))).status).toBe(429);
+  });
+
+  it("keeps the sign-in routes on the caller's address", async () => {
+    const { router } = limited(100, 2);
+    const login = (address: string) =>
+      router.request("/api/v1/auth/login", {
+        method: "POST",
+        headers: { "x-forwarded-for": address, "content-type": "application/json" },
+        body: JSON.stringify({ email: "nobody@example.com", password: "not the password at all" }),
+      });
+    expect((await login("203.0.113.7")).status).not.toBe(429);
+    expect((await login("203.0.113.7")).status).not.toBe(429);
+    expect((await login("203.0.113.7")).status).toBe(429);
+    // Another address has its own.
+    expect((await login("198.51.100.4")).status).not.toBe(429);
+  });
+
+  it("counts a credential that does not resolve against the address, and stops looking it up", async () => {
+    // Without this, inventing a fresh cookie per request would be a way out of
+    // every limit: each one is a session lookup nobody counts.
+    const { router, lookups } = limited(3);
+    for (let i = 0; i < 3; i += 1) {
+      expect((await router.request("/api/v1/auth/me", from("203.0.113.7", `Bearer junk-${String(i)}`))).status).toBe(401);
+    }
+    const before = lookups.count;
+    expect((await router.request("/api/v1/auth/me", from("203.0.113.7", "Bearer junk-4"))).status).toBe(429);
+    expect(lookups.count).toBe(before);
+    // Another address is not touched by it. (The same address IS held back
+    // until its window clears, credential or not: a lookup is what is being
+    // rationed, and a credential is only known to be good after one. That is
+    // no worse than before, when every request was counted on the address, and
+    // a real session's own requests never spend this bucket.)
+    expect((await router.request("/api/v1/auth/me", from("198.51.100.4", "Bearer a"))).status).not.toBe(429);
+  });
+
+  it("never charges the office's address for a colleague whose session is real", async () => {
+    const { router } = limited(3);
+    for (let i = 0; i < 3; i += 1) {
+      await router.request("/api/v1/auth/me", from("203.0.113.7", "Bearer a"));
+    }
+    // A's own budget is spent; the address's is untouched, so one stale cookie
+    // in the same office still gets its plain 401 rather than a 429.
+    expect((await router.request("/api/v1/auth/me", from("203.0.113.7", "Bearer stale"))).status).toBe(401);
+  });
+
+  it("says it in words a person can act on", async () => {
+    const { router } = limited(1);
+    await router.request("/api/v1/auth/me", from("203.0.113.7", "Bearer a"));
+    const refused = await router.request("/api/v1/auth/me", from("203.0.113.7", "Bearer a"));
+    const body = (await refused.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("RATE_LIMITED");
+    expect(body.error.message).toMatch(/^Too many requests at once\. Wait \d+ seconds? and try again\.$/);
   });
 });

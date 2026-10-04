@@ -488,7 +488,7 @@ function validatePolicyBody(body: Record<string, unknown>): string | null {
   const max = body["maxDiscountPercent"];
   if (typeof max !== "string" || !isAmount(max) || Number(max) > 100) {
     return (
-      `"maxDiscountPercent" must be a decimal STRING between "0" and "100" — "15", "12.5" — ` +
+      `"maxDiscountPercent" must be a decimal STRING between "0" and "100": "15", "12.5", ` +
       `never a number, for the same reason an amount is not: a float does not hold 12.5 ` +
       `exactly, and a limit a hair under what it says refuses a discount that should pass. ` +
       `Got ${describe(max)}`
@@ -646,7 +646,7 @@ function validateClauseBody(body: Record<string, unknown>): string | null {
   if (typeof text !== "string" || text.trim() === "") {
     // An empty clause would publish, pin, and appear on a signed document as
     // nothing — a term the client agreed to that says nothing at all.
-    return `"text" must be a non-empty string — a clause with no words is a term the client ` +
+    return `"text" must be a non-empty string: a clause with no words is a term the client ` +
       `would be agreeing to that says nothing. Got ${describe(text)}`;
   }
   const jurisdictions = body["jurisdictions"];
@@ -684,7 +684,7 @@ function validateJurisdictionalTerm(
   if (raw === undefined || raw === null) return null;
   if (typeof raw !== "object" || Array.isArray(raw)) {
     return (
-      `"${term.field}" is ${term.what} — an object like ${term.example}, or null when this ` +
+      `"${term.field}" is ${term.what}: an object like ${term.example}, or null when this ` +
       `clause does not state it. Got ${describe(raw)}`
     );
   }
@@ -696,7 +696,7 @@ function validateJurisdictionalTerm(
   const jurisdiction = value["jurisdiction"];
   if (typeof jurisdiction !== "string" || !JURISDICTION_CODE_PATTERN.test(jurisdiction)) {
     return (
-      `"${term.field}.jurisdiction" must be an ISO 3166-1 alpha-2 code in UPPER CASE — "US", ` +
+      `"${term.field}.jurisdiction" must be an ISO 3166-1 alpha-2 code in UPPER CASE: "US", ` +
       `"AE", "IN". It is not decoration: it is compared against the jurisdiction of the entity ` +
       `ISSUING the letter, so that terms naming another country's law are refused rather than ` +
       `signed. A body is stored verbatim, so "us" would be stored as written. ` +
@@ -707,7 +707,7 @@ function validateJurisdictionalTerm(
   const text = value["text"];
   if (typeof text !== "string" || text.trim() === "") {
     return (
-      `"${term.field}.text" must be a non-empty string — ${term.example} — because the code ` +
+      `"${term.field}.text" must be a non-empty string: ${term.example}, because the code ` +
       `cannot print: "the laws of the State of Delaware" does not follow from "US", and "the ` +
       `DIFC Courts, Dubai" does not follow from "AE". Got ${describe(text)}`
     );
@@ -824,7 +824,7 @@ function validateConfidenceTierBody(body: Record<string, unknown>): string | nul
   if (typeof autoCommitAt !== "number" || !isConfidence(autoCommitAt)) {
     return (
       `"autoCommitAt" must be a number between 0 and 1, got ${describe(autoCommitAt)}. A ` +
-      `machine acts unattended only STRICTLY above it, which is what makes 1 mean "never" — ` +
+      `machine acts unattended only STRICTLY above it, which is what makes 1 mean "never": ` +
       `the one edit that stops every unattended commit without a deploy.`
     );
   }
@@ -888,7 +888,7 @@ function validateVerificationPolicyBody(body: Record<string, unknown>): string |
 
   const label = body["label"];
   if (typeof label !== "string" || label.trim() === "") {
-    return `"label" must be a non-empty string — what a person reading the step sees, like "Manager review"`;
+    return `"label" must be a non-empty string: what a person reading the step sees, like "Manager review"`;
   }
 
   const rule = body["rule"];
@@ -908,7 +908,7 @@ function validateVerificationPolicyBody(body: Record<string, unknown>): string |
   if (usesRank) {
     if (typeof minGradeRank !== "number" || !Number.isInteger(minGradeRank) || minGradeRank < 1) {
       return (
-        `"minGradeRank" must be a whole number above zero — the rank of the lowest grade that ` +
+        `"minGradeRank" must be a whole number above zero: the rank of the lowest grade that ` +
         `may check, taken from the firm's own ladder. Rule ${JSON.stringify(rule)} tests it. ` +
         `Got ${describe(minGradeRank)}`
       );
@@ -916,7 +916,7 @@ function validateVerificationPolicyBody(body: Record<string, unknown>): string |
     if (typeof minGradeCode !== "string" || minGradeCode.trim() === "") {
       return (
         `"minGradeCode" must name the grade "minGradeRank" came from, so a screen can say ` +
-        `"Manager" rather than "rank 7". It is never compared — the rank is`
+        `"Manager" rather than "rank 7". It is never compared: the rank is`
       );
     }
     return null;
@@ -927,7 +927,7 @@ function validateVerificationPolicyBody(body: Record<string, unknown>): string |
   if (minGradeRank !== null && minGradeRank !== undefined) {
     return (
       `rule "reporting_line" checks only who the maker reports to, so it must not carry a ` +
-      `"minGradeRank" — a threshold nothing reads is a setting that looks live. Use ` +
+      `"minGradeRank": a threshold nothing reads is a setting that looks live. Use ` +
       `"reporting_line_or_rank" to have both.`
     );
   }
@@ -1055,7 +1055,7 @@ function validateCompliancePolicyBody(body: Record<string, unknown>): string | n
   if (from !== null && from !== undefined) {
     if (typeof from !== "string" || !isCalendarDay(from)) {
       return (
-        `"missedFromOn" must be a calendar day as "YYYY-MM-DD" — "2026-04-01" — or null for ` +
+        `"missedFromOn" must be a calendar day as "YYYY-MM-DD": "2026-04-01", or null for ` +
         `no floor at all. A day and never a timestamp: a statutory date is the same day in ` +
         `every zone, and an instant is not. Got ${describe(from)}`
       );
@@ -1066,8 +1066,8 @@ function validateCompliancePolicyBody(body: Record<string, unknown>): string | n
   if (fy !== null && fy !== undefined) {
     if (typeof fy !== "number" || !Number.isInteger(fy) || fy < 1 || fy > 12) {
       return (
-        `"fiscalYearStartMonth" must be a whole month number from 1 to 12 — 4 for a financial ` +
-        `year that starts in April — or null when the firm has not said. Got ${describe(fy)}`
+        `"fiscalYearStartMonth" must be a whole month number from 1 to 12: 4 for a financial ` +
+        `year that starts in April, or null when the firm has not said. Got ${describe(fy)}`
       );
     }
   }
@@ -1132,7 +1132,7 @@ function validateRoleBody(body: Record<string, unknown>): string | null {
     return (
       `"audience" is which surface this role is written for, and ${describe(audience)} is not ` +
       `one. Valid: ${ROLE_AUDIENCES.join(", ")}. A role written for one audience grants ` +
-      `NOTHING to a session in the other — a staff role on a client-portal login, and equally ` +
+      `NOTHING to a session in the other: a staff role on a client-portal login, and equally ` +
       `a portal permission on a colleague's role.`
     );
   }
@@ -1197,7 +1197,7 @@ function validateServiceBody(body: Record<string, unknown>): string | null {
     if (typeof ref !== "string" || ref.trim() !== ref || ref === "" ||
         ref.length > MAX_SERVICE_REF_LENGTH) {
       return (
-        `"ref" is the firm's OWN service code — "A1", "H1", "R7" — a non-empty string of at ` +
+        `"ref" is the firm's OWN service code: "A1", "H1", "R7", a non-empty string of at ` +
         `most ${String(MAX_SERVICE_REF_LENGTH)} characters with no surrounding whitespace, or ` +
         `null for a service the firm's master has no code for. It is printed on proposals and ` +
         `joined on, so " A1" and "A1" must not both exist. Got ${describe(ref)}`
@@ -1217,7 +1217,7 @@ function validateServiceBody(body: Record<string, unknown>): string | null {
     if (v === undefined || v === null) continue;
     if (typeof v !== "string" || !isReportingAxis(v)) {
       return (
-        `"${axis.field}" is ${axis.what} — ${axis.examples}, or null when the firm does not ` +
+        `"${axis.field}" is ${axis.what}: ${axis.examples}, or null when the firm does not ` +
         `file this service under one. Upper case, digits, and single spaces, hyphens or ` +
         `underscores between words, at most ${String(MAX_REPORTING_AXIS_LENGTH)} characters, ` +
         `and no surrounding whitespace: this axis is GROUPED BY, and "frc" beside "FRC" ` +
@@ -1248,8 +1248,8 @@ function validateServiceBody(body: Record<string, unknown>): string | null {
     if (typeof recurrence !== "string" || !isServiceRecurrence(recurrence)) {
       return (
         `"recurrence" must be one of ${SERVICE_RECURRENCES.join(", ")}, or null when the firm ` +
-        `has not stated one. It is how often the service RECURS, which is not how it is priced ` +
-        `— that is "billingBasis" (${BILLING_BASES.join(", ")}), and a monthly service billed ` +
+        `has not stated one. It is how often the service RECURS, which is not how it is priced` +
+        `: that is "billingBasis" (${BILLING_BASES.join(", ")}), and a monthly service billed ` +
         `quarterly needs both. Got ${describe(recurrence)}`
       );
     }
@@ -1258,10 +1258,10 @@ function validateServiceBody(body: Record<string, unknown>): string | null {
   const slaDays = body["slaDays"];
   if (slaDays !== undefined && slaDays !== null && !isSlaDays(slaDays)) {
     return (
-      `"slaDays" must be a whole number of days from 0 to ${String(MAX_SLA_DAYS)} — 7, 30, 90 — ` +
+      `"slaDays" must be a whole number of days from 0 to ${String(MAX_SLA_DAYS)}: 7, 30, 90, ` +
       `counted from signing of the engagement letter, or null for a service with no stated SLA. ` +
       `A NUMBER, not a string: this counts days rather than money, so a float holds it exactly. ` +
-      `Null is not zero — zero commits the firm to the day of signing. Got ${describe(slaDays)}`
+      `Null is not zero: zero commits the firm to the day of signing. Got ${describe(slaDays)}`
     );
   }
 
@@ -1270,7 +1270,7 @@ function validateServiceBody(body: Record<string, unknown>): string | null {
     if (v === undefined || v === null) continue;
     if (typeof v !== "string") {
       return (
-        `"${field}" must be a string or null — the firm's own words, stored as the firm states ` +
+        `"${field}" must be a string or null: the firm's own words, stored as the firm states ` +
         `them ("under 1,000 entries", "under 8 bank accounts") rather than parsed into typed ` +
         `limits, because nothing here is metered and going past a ceiling means the firm ` +
         `re-assesses the engagement. Got ${describe(v)}`
@@ -1289,8 +1289,8 @@ function validateServiceBody(body: Record<string, unknown>): string | null {
   if (pricingNote !== undefined && pricingNote !== null) {
     if (typeof pricingNote !== "string" || pricingNote.trim() === "") {
       return (
-        `"pricingNote" must be a non-empty string — "As mutually agreed", "Plus statutory fees ` +
-        `at actuals" — or null. It is why there is no list price, so an empty one leaves ` +
+        `"pricingNote" must be a non-empty string: "As mutually agreed", "Plus statutory fees ` +
+        `at actuals", or null. It is why there is no list price, so an empty one leaves ` +
         `"listPrice": null saying no more than it already did. Got ${describe(pricingNote)}`
       );
     }
@@ -1306,7 +1306,7 @@ function validateServiceBody(body: Record<string, unknown>): string | null {
     // running a process nobody wrote.
     if (typeof workflowKey !== "string" || !isValidKey(workflowKey)) {
       return (
-        `"workflowTemplateKey" must be a config key — lowercase, url-safe — naming the ` +
+        `"workflowTemplateKey" must be a config key: lowercase, url-safe, naming the ` +
         `workflow_template that says how this service is delivered, or null when the firm has ` +
         `not written that process yet. Got ${describe(workflowKey)}`
       );
@@ -1350,7 +1350,7 @@ function validateListPrice(raw: unknown): string | null {
     // total.
     return (
       `"listPrice.amount" must be a non-negative decimal STRING with at most ` +
-      `${String(MAX_AMOUNT_SCALE)} decimal places — "25000", "1499.50" — never a number, because ` +
+      `${String(MAX_AMOUNT_SCALE)} decimal places: "25000", "1499.50", never a number, because ` +
       `a float cannot hold 1499.50 exactly. Got ${describe(amount)}`
     );
   }
@@ -1358,7 +1358,7 @@ function validateListPrice(raw: unknown): string | null {
   const currency = price["currency"];
   if (typeof currency !== "string" || !isCurrencyCode(normalizeCurrency(currency))) {
     return (
-      `"listPrice.currency" must be an ISO 4217 code — three letters, like "INR" or "AED". ` +
+      `"listPrice.currency" must be an ISO 4217 code: three letters, like "INR" or "AED". ` +
       `An amount without one is a number nobody can act on. Got ${describe(currency)}`
     );
   }
@@ -1521,6 +1521,24 @@ function readServiceListPrice(raw: unknown): Money | null {
   return isCurrencyCode(normalised) ? { amount, currency: normalised } : null;
 }
 
+/**
+ * A config body as a login that cannot see fees reads it (B09, audit
+ * 2026-10-03): a SERVICE's `listPrice` is the one figure any kind carries, and
+ * it is nulled (not dropped, so "you may not see this" never looks like a
+ * field nobody wrote). Every other kind, and every other field, is as stored.
+ * A new object: the stored body is never touched.
+ */
+export function bodyWithoutFees(kind: ConfigKind, body: Readonly<Record<string, unknown>>): Record<string, unknown> {
+  if (kind !== "service" || !("listPrice" in body)) return { ...body };
+  return { ...body, listPrice: null };
+}
+
+/** Whether writing this kind writes a price (B09): a service carries its list
+ *  price, so a login that cannot see fees cannot define, draft or publish one. */
+export function kindCarriesFees(kind: ConfigKind): boolean {
+  return kind === "service";
+}
+
 // ── The dunning ladder (T3.5) ──────────────────────────────────────────────
 
 /**
@@ -1587,7 +1605,7 @@ function validateDunningBody(body: Record<string, unknown>): string | null {
 
   const steps = body["steps"];
   if (!Array.isArray(steps) || steps.length === 0) {
-    return "steps must be a non-empty array — a ladder with no rungs chases nobody";
+    return "steps must be a non-empty array: a ladder with no rungs chases nobody";
   }
 
   const keys = new Set<string>();
@@ -1626,7 +1644,7 @@ function validateDunningBody(body: Record<string, unknown>): string | null {
 
     const label = step["label"];
     if (typeof label !== "string" || label.trim() === "") {
-      return `steps[${String(index)}].label must be a non-empty string — somebody reads it`;
+      return `steps[${String(index)}].label must be a non-empty string: somebody reads it`;
     }
   }
   return null;
@@ -1843,7 +1861,7 @@ function validateChaserBody(body: Record<string, unknown>): string | null {
   const rungs = body["rungs"];
   if (!Array.isArray(rungs) || rungs.length === 0) {
     return (
-      "rungs must be a non-empty array — a chaser ladder with no rungs reminds nobody, and " +
+      "rungs must be a non-empty array: a chaser ladder with no rungs reminds nobody, and " +
       "that is what publishing NO ladder already means. An empty one is a firm believing it " +
       "has turned chasing on."
     );
@@ -1875,7 +1893,7 @@ function validateChaserBody(body: Record<string, unknown>): string | null {
     if (afterDays <= previous) {
       return (
         `rungs[${String(index)}].afterDays must be greater than the rung before it ` +
-        `(${String(previous)}) — a chaser has one subject, so its rungs are one sequence`
+        `(${String(previous)}): a chaser has one subject, so its rungs are one sequence`
       );
     }
     previous = afterDays;
@@ -1985,7 +2003,7 @@ function validateNudgeBody(body: Record<string, unknown>): string | null {
   const rungs = body["rungs"];
   if (!Array.isArray(rungs) || rungs.length === 0) {
     return (
-      "rungs must be a non-empty array — a nudge ladder with no rungs tells nobody anything, " +
+      "rungs must be a non-empty array: a nudge ladder with no rungs tells nobody anything, " +
       "and that is what publishing NO ladder already means. An empty one is a firm believing " +
       "it has turned reminders on."
     );
@@ -2020,7 +2038,7 @@ function validateNudgeBody(body: Record<string, unknown>): string | null {
     if (beforeDays >= previous) {
       return (
         `rungs[${String(index)}].beforeDays must be SMALLER than the rung before it ` +
-        `(${String(previous)}) — a nudge ladder counts down to a deadline, so 7 comes ` +
+        `(${String(previous)}): a nudge ladder counts down to a deadline, so 7 comes ` +
         `before 3 comes before 1`
       );
     }
@@ -2083,7 +2101,7 @@ function validateEscalationBody(body: Record<string, unknown>): string | null {
 
   const rungs = body["rungs"];
   if (!Array.isArray(rungs) || rungs.length === 0) {
-    return "rungs must be a non-empty array — a ladder with no rungs tells nobody anything";
+    return "rungs must be a non-empty array: a ladder with no rungs tells nobody anything";
   }
 
   const keys = new Set<string>();
@@ -2142,7 +2160,7 @@ function validateEscalationBody(body: Record<string, unknown>): string | null {
       if (typeof rank !== "number" || !Number.isInteger(rank)) {
         return (
           `rungs[${String(index)}].minGradeRank must be a whole number when notify is ` +
-          `"grade_at_least" — without it the rung would be visible to everybody. Got ` +
+          `"grade_at_least": without it the rung would be visible to everybody. Got ` +
           `${describe(rank)}`
         );
       }
@@ -2159,14 +2177,14 @@ function validateEscalationBody(body: Record<string, unknown>): string | null {
     // silently notifies nobody every night.
     if (watch === "work_item_unassigned" && notify === "assignee") {
       return (
-        `rungs[${String(index)}] watches unassigned work and notifies its assignee — there is ` +
+        `rungs[${String(index)}] watches unassigned work and notifies its assignee: there is ` +
         `never one, which is what "unassigned" means. Notify a manager or a grade instead`
       );
     }
 
     const label = rung["label"];
     if (typeof label !== "string" || label.trim() === "") {
-      return `rungs[${String(index)}].label must be a non-empty string — somebody reads it`;
+      return `rungs[${String(index)}].label must be a non-empty string: somebody reads it`;
     }
   }
   return null;
@@ -2615,7 +2633,7 @@ function readChecklistLines(raw: unknown): readonly ChecklistLine[] {
 function validateStepPerformer(at: string, p: unknown): string | null {
   if (p === null || p === undefined) return null;
   if (typeof p !== "object" || Array.isArray(p)) {
-    return `${at}.performer must be an object — { minGradeRank, minGradeCode, maxGradeRank, maxGradeCode } — or null for anybody. Got ${describe(p)}`;
+    return `${at}.performer must be an object: { minGradeRank, minGradeCode, maxGradeRank, maxGradeCode }, or null for anybody. Got ${describe(p)}`;
   }
   const b = p as Record<string, unknown>;
   const unknown = unknownFields(b, PERFORMER_FIELDS);
@@ -2627,7 +2645,7 @@ function validateStepPerformer(at: string, p: unknown): string | null {
       return `${at}.performer.${side}GradeRank must be a whole number from the firm's grade ladder, or null for an open end. Got ${describe(rank)}`;
     }
     if (code !== null && code !== undefined && (typeof code !== "string" || code.trim() === "")) {
-      return `${at}.performer.${side}GradeCode must be the grade's code — "analyst", "manager" — or null. Got ${describe(code)}`;
+      return `${at}.performer.${side}GradeCode must be the grade's code: "analyst", "manager", or null. Got ${describe(code)}`;
     }
     if ((rank === null || rank === undefined) !== (code === null || code === undefined)) {
       return `${at}.performer.${side}GradeRank and ${side}GradeCode go together: both the rank that is compared and the code a person reads, or both null for an open end.`;
@@ -2636,10 +2654,10 @@ function validateStepPerformer(at: string, p: unknown): string | null {
   const min = b["minGradeRank"];
   const max = b["maxGradeRank"];
   if ((min === null || min === undefined) && (max === null || max === undefined)) {
-    return `${at}.performer has both ends open, which means anybody — say null instead, so the intent is on the row.`;
+    return `${at}.performer has both ends open, which means anybody: say null instead, so the intent is on the row.`;
   }
   if (typeof min === "number" && typeof max === "number" && min > max) {
-    return `${at}.performer runs from rank ${String(min)} down to ${String(max)} — the lower rank goes first.`;
+    return `${at}.performer runs from rank ${String(min)} down to ${String(max)}: the lower rank goes first.`;
   }
   return null;
 }
@@ -2673,12 +2691,12 @@ function validateWorkflowTemplateBody(body: Record<string, unknown>): string | n
 
   const label = body["label"];
   if (typeof label !== "string" || label.trim() === "") {
-    return `"label" must be a non-empty string — it is what a partner picks this process by`;
+    return `"label" must be a non-empty string: it is what a partner picks this process by`;
   }
 
   const steps = body["steps"];
   if (!Array.isArray(steps) || steps.length === 0) {
-    return `"steps" must be a non-empty array — a process with no steps is not a process`;
+    return `"steps" must be a non-empty array: a process with no steps is not a process`;
   }
 
   const keys = new Set<string>();
@@ -2695,7 +2713,7 @@ function validateWorkflowTemplateBody(body: Record<string, unknown>): string | n
     const key = step["key"];
     if (typeof key !== "string" || !isValidStepKey(key)) {
       return (
-        `${at}.key must be a lowercase handle (2-40 chars, letters, digits, "-" or "_") — ` +
+        `${at}.key must be a lowercase handle (2-40 chars, letters, digits, "-" or "_"): ` +
         `"reconcile", "manager_review". It is stored on every job's row and read in the ` +
         `audit trail, which is why it is a handle and not a sentence.`
       );
@@ -2708,7 +2726,7 @@ function validateWorkflowTemplateBody(body: Record<string, unknown>): string | n
 
     const stepLabel = step["label"];
     if (typeof stepLabel !== "string" || stepLabel.trim() === "") {
-      return `${at}.label must be a non-empty string — somebody reads it on the work board`;
+      return `${at}.label must be a non-empty string: somebody reads it on the work board`;
     }
 
     const executor = step["executor"];
@@ -2722,7 +2740,7 @@ function validateWorkflowTemplateBody(body: Record<string, unknown>): string | n
 
     const dependsOn = step["dependsOn"];
     if (!Array.isArray(dependsOn)) {
-      return `${at}.dependsOn must be an array of step keys — empty for a step that starts first`;
+      return `${at}.dependsOn must be an array of step keys: empty for a step that starts first`;
     }
     const deps: string[] = [];
     for (const d of dependsOn) {
@@ -2746,7 +2764,7 @@ function validateWorkflowTemplateBody(body: Record<string, unknown>): string | n
       if (typeof fact !== "string" || !isStepFact(fact)) {
         return (
           `${at}.condition.fact must be one of ${STEP_FACTS.join(", ")}. The set is closed on ` +
-          `purpose — a free expression is a language nobody can write or test — and it grows ` +
+          `purpose: a free expression is a language nobody can write or test, and it grows ` +
           `by adding a member here when the firm names a condition it actually uses.`
         );
       }
@@ -2774,7 +2792,7 @@ function validateWorkflowTemplateBody(body: Record<string, unknown>): string | n
         if (typeof op !== "string" || !isStepOperator(op)) {
           return (
             `${at}.condition.op must be one of ${STEP_OPERATORS.join(", ")}. All four compare a ` +
-            `STRING, because both facts this engine can resolve are strings — a numeric ` +
+            `STRING, because both facts this engine can resolve are strings: a numeric ` +
             `comparison arrives with the first numeric fact and not before.`
           );
         }
@@ -2782,7 +2800,7 @@ function validateWorkflowTemplateBody(body: Record<string, unknown>): string | n
         if (operatorTakesList(op)) {
           if (!Array.isArray(value) || value.length === 0) {
             return (
-              `${at}.condition.value must be a non-empty array for "${op}" — ` +
+              `${at}.condition.value must be a non-empty array for "${op}": ` +
               `["IN", "AE", "SG"]. An empty list matches nothing, which is a step that never ` +
               `runs rather than a condition somebody meant.`
             );
@@ -2807,8 +2825,8 @@ function validateWorkflowTemplateBody(body: Record<string, unknown>): string | n
     if (policyKey !== undefined && policyKey !== null) {
       if (typeof policyKey !== "string" || !isValidKey(policyKey)) {
         return (
-          `${at}.verificationPolicyKey must be the key of a published verification_policy — ` +
-          `"manager_review", "eqcr" — or null for a step nobody checks. Got ${describe(policyKey)}`
+          `${at}.verificationPolicyKey must be the key of a published verification_policy: ` +
+          `"manager_review", "eqcr", or null for a step nobody checks. Got ${describe(policyKey)}`
         );
       }
     }
@@ -2866,7 +2884,7 @@ function validateWorkflowTemplateBody(body: Record<string, unknown>): string | n
   const cycle = findStepCycle(parsed);
   if (cycle !== null) {
     return (
-      `the steps form a cycle — ${cycle.join(" -> ")} — so none of them could ever start. ` +
+      `the steps form a cycle: ${cycle.join(" -> ")}, so none of them could ever start. ` +
       `Refused here rather than at run time, because a job that deadlocks is discovered by ` +
       `somebody wondering why nothing happened.`
     );

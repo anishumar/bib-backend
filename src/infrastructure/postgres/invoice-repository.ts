@@ -1,9 +1,14 @@
 // Invoicing, in Postgres (T3.4).
 //
-// ## The whole point of this file: `create` is ONE transaction
+// ## The whole point of this file: `issue` is ONE transaction
+//
+// (Until 0322 it was `create`: a draft drew its number when it was made, and a
+// cancelled draft left a cancelled number in the series. Since 0322 the draft
+// has no number and ISSUING draws it, so an automatic draft a firm withdraws
+// spends nothing. What follows is the same argument, about the issue.)
 //
 // A gapless series cannot be allocated by a method that hands a number back to
-// a caller. Between `nextNumber()` returning 41 and `create()` writing it, the
+// a caller. Between `nextNumber()` returning 41 and `issue()` writing it, the
 // caller may throw, the process may die, or a validation may fail — and 41 is
 // gone. Under Indian GST a missing invoice number is something an auditor is
 // entitled to read as a suppressed sale, and "our software burnt it" is not a
@@ -49,11 +54,11 @@ import type {
 import {
   DEFAULT_CREDIT_NOTE_PREFIX,
   DEFAULT_SERIES_PREFIX,
-  financialYearOf,
   formatInvoiceNumber,
   isCreditReason,
   isInvoiceStatus,
   isPaymentMethod,
+  preDrawnNumberOrder,
 } from "../../domain/invoice/model";
 import type {
   EngagementBilling,
@@ -63,6 +68,11 @@ import type {
   InvoiceRepository,
   InvoiceSeriesRecord,
   InvoiceSummary,
+  CancelOutcome,
+  CreditNoteOutcome,
+  PaymentOutcome,
+  IssueOn,
+  IssueOutcome,
   NewCreditNote,
   ReceivableRecord,
   NewInvoice,
@@ -76,9 +86,9 @@ interface InvoiceRow {
   tenant_id: string;
   party_id: string;
   entity_party_id: string;
-  number: string;
+  number: string | null;
   financial_year: number;
-  sequence_number: number;
+  sequence_number: number | null;
   status: string;
   currency: string;
   fx_rate: string;
@@ -88,6 +98,7 @@ interface InvoiceRow {
   irn: string | null;
   irn_registered_at: Date | null;
   notes: string | null;
+  manager_user_id: string | null;
 }
 
 /**
@@ -130,6 +141,7 @@ function toInvoice(r: InvoiceRow): Invoice {
     irn: r.irn,
     irnRegisteredAt: r.irn_registered_at === null ? null : r.irn_registered_at.toISOString(),
     notes: r.notes,
+    managerUserId: r.manager_user_id,
   };
 }
 
@@ -165,75 +177,108 @@ function toLine(r: InvoiceLineRow): InvoiceLine {
 
 const INVOICE_COLUMNS =
   "id, tenant_id, party_id, entity_party_id, number, financial_year, sequence_number, " +
-  "status, currency, fx_rate, fx_rate_date, issued_on, due_on, irn, irn_registered_at, notes";
+  "status, currency, fx_rate, fx_rate_date, issued_on, due_on, irn, irn_registered_at, notes, " +
+  "manager_user_id";
 
 const LINE_COLUMNS =
   "id, tenant_id, invoice_id, engagement_id, description, position, quantity, unit_amount, " +
   "currency, discount_percent, tax_percent";
 
+/** The company's invoice series for the year exists. ON CONFLICT DO NOTHING so
+ *  two concurrent first invoices do not race to create it; the `FOR UPDATE`
+ *  read in `issue` is what actually orders them. */
+async function ensureInvoiceSeries(db: Db, tenantId: string, entityPartyId: string, financialYear: number): Promise<void> {
+  await db`
+    INSERT INTO crm.invoice_series
+      (tenant_id, entity_party_id, financial_year, document_type, prefix)
+    VALUES (${tenantId}, ${entityPartyId}, ${financialYear}, 'invoice', ${DEFAULT_SERIES_PREFIX})
+    ON CONFLICT (tenant_id, entity_party_id, financial_year, document_type) DO NOTHING
+  `;
+}
+
+/**
+ * The highest-numbered invoice of one series that carries an issue date (B51):
+ * issued, or issued and cancelled since (it went out with that number). A draft
+ * cancelled before issue never went out and is not counted. The series is the
+ * company and the year; `sequence_number` orders it whatever the prefix was.
+ */
+async function latestIssued(
+  db: Db,
+  tenantId: string,
+  entityPartyId: string,
+  financialYear: number,
+  exceptInvoiceId: string,
+): Promise<{ readonly number: string; readonly sequenceNumber: number } | null> {
+  const [row] = await db<{ number: string; sequence_number: number }[]>`
+    SELECT number, sequence_number FROM crm.invoice
+     WHERE tenant_id = ${tenantId}
+       AND entity_party_id = ${entityPartyId}
+       AND financial_year = ${financialYear}
+       AND issued_on IS NOT NULL
+       AND number IS NOT NULL
+       AND id <> ${exceptInvoiceId}
+     ORDER BY sequence_number DESC
+     LIMIT 1
+  `;
+  return row === undefined ? null : { number: row.number, sequenceNumber: row.sequence_number };
+}
+
+/**
+ * A draft invoice row, unnumbered (0322), in a transaction the caller holds:
+ * `create`'s, or the billing desk's, which writes the draft, its lines and the
+ * bills they settle as one (B34).
+ */
+export async function insertDraftInvoice(db: Db, i: NewInvoice): Promise<Invoice> {
+  await ensureInvoiceSeries(db, i.tenantId, i.entityPartyId, i.financialYear);
+  const [row] = await db<InvoiceRow[]>`
+    INSERT INTO crm.invoice
+      (id, tenant_id, party_id, entity_party_id, number, financial_year, sequence_number,
+       currency, fx_rate, fx_rate_date, due_on, notes, manager_user_id)
+    VALUES (${i.id}, ${i.tenantId}, ${i.partyId}, ${i.entityPartyId}, NULL,
+            ${i.financialYear}, NULL, ${i.currency}, ${i.fxRate}, ${i.fxRateDate},
+            ${i.dueOn}, ${i.notes}, ${i.managerUserId ?? null})
+    RETURNING ${db.unsafe(INVOICE_COLUMNS)}
+  `;
+  if (!row) throw new Error("invoice insert returned no row");
+  return toInvoice(row);
+}
+
+/** A line on an invoice, in a transaction the caller holds (B34, B36). */
+export async function insertInvoiceLine(db: Db, l: NewInvoiceLine): Promise<InvoiceLine> {
+  // THE INVOICE ROW IS THE LOCK (B36). `MAX(position) + 1` inside the INSERT
+  // still reads a snapshot under READ COMMITTED, so two lines added at once
+  // both took the same position and one failed on the unique index as a
+  // 500. Holding the invoice row first makes the second add wait for the
+  // first to commit and then read its line.
+  await db`SELECT 1 FROM crm.invoice WHERE id = ${l.invoiceId} FOR UPDATE`;
+  const [row] = await db<InvoiceLineRow[]>`
+    INSERT INTO crm.invoice_line
+      (id, tenant_id, invoice_id, engagement_id, description, position, quantity,
+       unit_amount, currency, discount_percent, tax_percent)
+    SELECT ${l.id}, ${l.tenantId}, ${l.invoiceId}, ${l.engagementId}, ${l.description},
+           -- The next position among LIVE lines: a struck-off line frees
+           -- its position (0326).
+           COALESCE(MAX(position), 0) + 1,
+           ${l.quantity}, ${l.unitAmount}, ${l.currency}, ${l.discountPercent},
+           ${l.taxPercent}
+    FROM crm.invoice_line
+    WHERE invoice_id = ${l.invoiceId} AND removed_at IS NULL
+    RETURNING ${db.unsafe(LINE_COLUMNS)}
+  `;
+  if (!row) throw new Error("invoice line insert returned no row");
+  return toLine(row);
+}
+
 export class PostgresInvoiceRepository implements InvoiceRepository {
   constructor(private readonly app: Db) {}
 
+  /**
+   * The DRAFT, with no number (0322). Its series row exists from here, because
+   * the draft names the series (and the year) its number will come from, and
+   * the foreign key wants the row. Nothing is counted.
+   */
   async create(i: NewInvoice): Promise<Invoice> {
-    const financialYear = financialYearOf(i.seriesDate);
-    return withTenant(this.app, i.tenantId, async (db) => {
-      // 1 — the series row exists. ON CONFLICT DO NOTHING so two concurrent
-      // first invoices do not race to create it; the SELECT below is what
-      // actually orders them.
-      await db`
-        INSERT INTO crm.invoice_series
-          (tenant_id, entity_party_id, financial_year, document_type, prefix)
-        VALUES (${i.tenantId}, ${i.entityPartyId}, ${financialYear}, 'invoice',
-                ${DEFAULT_SERIES_PREFIX})
-        ON CONFLICT (tenant_id, entity_party_id, financial_year, document_type) DO NOTHING
-      `;
-
-      // 2 — THE LOCK. Everything this file exists for is this line. A second
-      // writer waits here until the first transaction ends, and then reads what
-      // is stored rather than a snapshot taken at its own BEGIN.
-      const [series] = await db<{ last_number: number; prefix: string }[]>`
-        SELECT last_number, prefix FROM crm.invoice_series
-        WHERE tenant_id = ${i.tenantId}
-          AND entity_party_id = ${i.entityPartyId}
-          AND financial_year = ${financialYear}
-          AND document_type = 'invoice'
-        FOR UPDATE
-      `;
-      if (!series) {
-        // Unreachable through the insert above unless RLS hid the row, which
-        // would mean the tenant context is wrong — a fault worth naming rather
-        // than a null to carry forward.
-        throw new Error(
-          `no invoice series for entity ${i.entityPartyId} in FY ${String(financialYear)} — ` +
-            `the row was just inserted, so this means the tenant context is not this tenant.`,
-        );
-      }
-
-      const sequence = series.last_number + 1;
-      const number = formatInvoiceNumber({ prefix: series.prefix, financialYear, sequence });
-
-      // 3 — the counter moves and the invoice is written, in this same
-      // transaction. Either both happen or neither does.
-      await db`
-        UPDATE crm.invoice_series SET last_number = ${sequence}
-        WHERE tenant_id = ${i.tenantId}
-          AND entity_party_id = ${i.entityPartyId}
-          AND financial_year = ${financialYear}
-          AND document_type = 'invoice'
-      `;
-
-      const [row] = await db<InvoiceRow[]>`
-        INSERT INTO crm.invoice
-          (id, tenant_id, party_id, entity_party_id, number, financial_year, sequence_number,
-           currency, fx_rate, fx_rate_date, due_on, notes)
-        VALUES (${i.id}, ${i.tenantId}, ${i.partyId}, ${i.entityPartyId}, ${number},
-                ${financialYear}, ${sequence}, ${i.currency}, ${i.fxRate}, ${i.fxRateDate},
-                ${i.dueOn}, ${i.notes})
-        RETURNING ${db.unsafe(INVOICE_COLUMNS)}
-      `;
-      if (!row) throw new Error("invoice insert returned no row");
-      return toInvoice(row);
-    });
+    return withTenant(this.app, i.tenantId, (db) => insertDraftInvoice(db, i));
   }
 
   async find(tenantId: string, invoiceId: string): Promise<Invoice | null> {
@@ -247,20 +292,41 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
 
   async describe(tenantId: string, invoiceId: string): Promise<InvoiceRecord | null> {
     return withTenant(this.app, tenantId, async (db) => {
-      const [head] = await db<(InvoiceRow & { party_name: string; entity_name: string })[]>`
+      const [head] = await db<
+        (InvoiceRow & {
+          party_name: string;
+          entity_name: string;
+          manager_name: string | null;
+          manager_email: string | null;
+        })[]
+      >`
         SELECT i.id, i.tenant_id, i.party_id, i.entity_party_id, i.number, i.financial_year,
                i.sequence_number, i.status, i.currency, i.fx_rate, i.fx_rate_date, i.issued_on,
-               i.due_on, i.irn, i.irn_registered_at, i.notes,
+               i.due_on, i.irn, i.irn_registered_at, i.notes, i.manager_user_id,
                -- Both by NAME, in the query. An invoice prints an address block
                -- and a letterhead, and a uuid prints as nothing.
                p.display_name AS party_name,
-               e.display_name AS entity_name
+               e.display_name AS entity_name,
+               mu.display_name AS manager_name,
+               mu.email::text  AS manager_email
         FROM crm.invoice i
         JOIN core.party p ON p.id = i.party_id
         JOIN core.party e ON e.id = i.entity_party_id
+        LEFT JOIN tenancy.user_account mu ON mu.id = i.manager_user_id
         WHERE i.id = ${invoiceId}
       `;
       if (!head) return null;
+
+      // The letters the lines bill (0318), so the invoice traces to what the
+      // client signed. Ordered by reference for a stable read.
+      const letters = await db<{ id: string; ref: string }[]>`
+        SELECT DISTINCT l.id, l.ref
+          FROM crm.invoice_line il
+          JOIN crm.engagement eg ON eg.id = il.engagement_id AND eg.tenant_id = il.tenant_id
+          JOIN crm.engagement_letter l ON l.id = eg.engagement_letter_id AND l.tenant_id = eg.tenant_id
+         WHERE il.invoice_id = ${invoiceId} AND il.removed_at IS NULL
+         ORDER BY l.ref
+      `;
 
       const lines = await db<(InvoiceLineRow & { net: string; tax: string })[]>`
         SELECT ${db.unsafe(LINE_COLUMNS.split(", ").map((c) => `l.${c}`).join(", "))},
@@ -278,10 +344,31 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
         FROM crm.invoice_totals WHERE invoice_id = ${invoiceId}
       `;
 
+      // THE RATE A LINE TYPED BY HAND STARTS AT (CA#5): 0322's rule for the
+      // automatic advance, offered to a person. The last rate on each of this
+      // client's engagements billed before, and the issuing company's default.
+      const lastRates = await db<{ engagement_id: string; tax_percent: string }[]>`
+        SELECT DISTINCT ON (il.engagement_id) il.engagement_id, il.tax_percent::text
+          FROM crm.invoice_line il
+          JOIN crm.invoice ii ON ii.id = il.invoice_id AND ii.tenant_id = il.tenant_id
+         WHERE ii.party_id = ${head.party_id}
+           AND il.engagement_id IS NOT NULL
+           AND il.removed_at IS NULL
+           AND ii.status <> 'cancelled'
+         ORDER BY il.engagement_id, ii.created_at DESC, il.position DESC
+      `;
+      const [companyRate] = await db<{ tax_percent: string }[]>`
+        SELECT tax_percent::text FROM crm.issuer_tax_default WHERE entity_party_id = ${head.entity_party_id}
+      `;
+
       return {
         invoice: toInvoice(head),
         party: { id: head.party_id, displayName: head.party_name },
         entity: { id: head.entity_party_id, displayName: head.entity_name },
+        taxSuggestions: {
+          companyDefault: companyRate?.tax_percent ?? null,
+          byEngagement: lastRates.map((r) => ({ engagementId: r.engagement_id, taxPercent: r.tax_percent })),
+        },
         lines: lines.map((r): InvoiceLineRecord => ({ line: toLine(r), net: r.net, tax: r.tax })),
         // An invoice with no live lines has no row in the totals view at all —
         // `sum()` over nothing is NULL and `GROUP BY` emits no group. Zeroes are
@@ -296,6 +383,11 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
           total: totals?.total ?? "0",
           currency: head.currency,
         },
+        manager:
+          head.manager_user_id === null || head.manager_email === null
+            ? null
+            : { userId: head.manager_user_id, displayName: head.manager_name, email: head.manager_email },
+        letters: letters.map((l) => ({ id: l.id, ref: l.ref })),
       };
     });
   }
@@ -380,25 +472,7 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
   }
 
   async addLine(l: NewInvoiceLine): Promise<InvoiceLine> {
-    return withTenant(this.app, l.tenantId, async (db) => {
-      const [row] = await db<InvoiceLineRow[]>`
-        INSERT INTO crm.invoice_line
-          (id, tenant_id, invoice_id, engagement_id, description, position, quantity,
-           unit_amount, currency, discount_percent, tax_percent)
-        SELECT ${l.id}, ${l.tenantId}, ${l.invoiceId}, ${l.engagementId}, ${l.description},
-               -- The next position, computed in the INSERT rather than read and
-               -- then written: two lines added at once would otherwise both
-               -- read the same maximum and collide on the UNIQUE constraint.
-               COALESCE(MAX(position), 0) + 1,
-               ${l.quantity}, ${l.unitAmount}, ${l.currency}, ${l.discountPercent},
-               ${l.taxPercent}
-        FROM crm.invoice_line
-        WHERE invoice_id = ${l.invoiceId} AND removed_at IS NULL
-        RETURNING ${db.unsafe(LINE_COLUMNS)}
-      `;
-      if (!row) throw new Error("invoice line insert returned no row");
-      return toLine(row);
-    });
+    return withTenant(this.app, l.tenantId, (db) => insertInvoiceLine(db, l));
   }
 
   async removeLine(tenantId: string, invoiceId: string, lineId: string): Promise<void> {
@@ -453,30 +527,162 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
     });
   }
 
-  async issue(tenantId: string, invoiceId: string, issuedOn: string): Promise<Invoice> {
-    return this.updateOne(
-      tenantId,
-      invoiceId,
-      (db) => db`
-        UPDATE crm.invoice SET status = 'issued', issued_on = ${issuedOn}
+  /**
+   * Issue AND number, in one transaction (0322). The draft is locked first, so
+   * two issues of it serialise and the second finds it issued; then the
+   * series' counter row under `FOR UPDATE`, then the counter moves and the
+   * draft takes the number, the status and the date in one UPDATE. A draft
+   * made before 0322 already holds a number: it keeps it (and its year) and
+   * counts nothing, unless that number is now OUT OF ORDER (B51): then nothing
+   * is written and the outcome says why. That is decided under the series'
+   * row lock, the one an unnumbered issue takes to draw the next number, so a
+   * later number cannot be issued between the check and the write.
+   *
+   * THE YEAR IS THE ISSUE DATE'S (B03, 0326): an unnumbered draft moves to the
+   * series of `on.financialYear` in the same write that numbers it. It was the
+   * draft's year, so a March draft issued in April took last year's series.
+   */
+  async issue(tenantId: string, invoiceId: string, on: IssueOn): Promise<IssueOutcome> {
+    const issuedOn = on.issuedOn;
+    return withTenant(this.app, tenantId, async (db): Promise<IssueOutcome> => {
+      const [draft] = await db<
+        { entity_party_id: string; financial_year: number; number: string | null; sequence_number: number | null }[]
+      >`
+        SELECT entity_party_id, financial_year, number, sequence_number FROM crm.invoice
         WHERE id = ${invoiceId} AND status = 'draft'
+        FOR UPDATE
+      `;
+      if (!draft) {
+        throw new Error(
+          `could not issue invoice ${invoiceId}: no draft matched. It has moved on since it was ` +
+            `read — another request got there first.`,
+        );
+      }
+
+      let number = draft.number;
+      let sequence: number | null = null;
+      let financialYear = draft.financial_year;
+      if (number !== null && draft.sequence_number !== null) {
+        // NUMBERED BEFORE 0322 (B51). Its series' counter row, under the same
+        // lock an unnumbered issue takes, so nothing in this series is issued
+        // between the question and the answer.
+        await ensureInvoiceSeries(db, tenantId, draft.entity_party_id, draft.financial_year);
+        await db`
+          SELECT 1 FROM crm.invoice_series
+          WHERE tenant_id = ${tenantId}
+            AND entity_party_id = ${draft.entity_party_id}
+            AND financial_year = ${draft.financial_year}
+            AND document_type = 'invoice'
+          FOR UPDATE
+        `;
+        const order = preDrawnNumberOrder({
+          draft: { financialYear: draft.financial_year, sequenceNumber: draft.sequence_number },
+          issueFinancialYear: on.financialYear,
+          latestIssued: await latestIssued(db, tenantId, draft.entity_party_id, draft.financial_year, invoiceId),
+        });
+        if (!order.inOrder) return { outOfOrder: { number, order } };
+      }
+      if (number === null) {
+        financialYear = on.financialYear;
+        await ensureInvoiceSeries(db, tenantId, draft.entity_party_id, financialYear);
+        // THE LOCK. Everything this file exists for is this line. A second
+        // writer waits here until the first transaction ends, and then reads
+        // what is stored rather than a snapshot taken at its own BEGIN.
+        const [series] = await db<{ last_number: number; prefix: string }[]>`
+          SELECT last_number, prefix FROM crm.invoice_series
+          WHERE tenant_id = ${tenantId}
+            AND entity_party_id = ${draft.entity_party_id}
+            AND financial_year = ${financialYear}
+            AND document_type = 'invoice'
+          FOR UPDATE
+        `;
+        if (!series) {
+          // Unreachable through the insert above unless RLS hid the row, which
+          // would mean the tenant context is wrong — a fault worth naming
+          // rather than a null to carry forward.
+          throw new Error(
+            `no invoice series for entity ${draft.entity_party_id} in FY ${String(financialYear)} — ` +
+              `the row was just inserted, so this means the tenant context is not this tenant.`,
+          );
+        }
+        sequence = series.last_number + 1;
+        number = formatInvoiceNumber({
+          prefix: series.prefix,
+          financialYear,
+          sequence,
+          startMonth: on.fiscalYearStartMonth,
+        });
+        // The counter moves and the invoice takes the number below, in this
+        // same transaction. Either both happen or neither does.
+        await db`
+          UPDATE crm.invoice_series SET last_number = ${sequence}
+          WHERE tenant_id = ${tenantId}
+            AND entity_party_id = ${draft.entity_party_id}
+            AND financial_year = ${financialYear}
+            AND document_type = 'invoice'
+        `;
+      }
+
+      const [row] = await db<InvoiceRow[]>`
+        UPDATE crm.invoice
+           SET status = 'issued', issued_on = ${issuedOn},
+               number = ${number}, sequence_number = coalesce(sequence_number, ${sequence}),
+               financial_year = ${financialYear},
+               due_on = coalesce(due_on, ${on.dueOnIfUnset}::date),
+               -- WHO IT IS FROM AND TO, FROZEN (0334): the supplier and the
+               -- client as they stand today on the firm's calendar, in this same write
+               -- (the only one the trigger lets set it). A correction made
+               -- tomorrow does not reach an issued invoice's paper.
+               printed_parties = (
+                 SELECT jsonb_build_object(
+                          'issuer', crm.print_identity(crm.invoice.entity_party_id, (now() AT TIME ZONE t.time_zone)::date),
+                          'recipient', crm.print_identity(crm.invoice.party_id, (now() AT TIME ZONE t.time_zone)::date))
+                   FROM tenancy.tenant t WHERE t.id = crm.invoice.tenant_id)
+         WHERE id = ${invoiceId} AND status = 'draft'
         RETURNING ${db.unsafe(INVOICE_COLUMNS)}
-      `,
-      "issue",
+      `;
+      if (!row) throw new Error(`could not issue invoice ${invoiceId}: no draft matched.`);
+      return { issued: toInvoice(row) };
+    });
+  }
+
+  async latestIssuedInSeries(
+    tenantId: string,
+    series: { readonly entityPartyId: string; readonly financialYear: number },
+    exceptInvoiceId: string,
+  ): Promise<{ readonly number: string; readonly sequenceNumber: number } | null> {
+    return withTenant(this.app, tenantId, (db) =>
+      latestIssued(db, tenantId, series.entityPartyId, series.financialYear, exceptInvoiceId),
     );
   }
 
-  async cancel(tenantId: string, invoiceId: string): Promise<Invoice> {
-    return this.updateOne(
-      tenantId,
-      invoiceId,
-      (db) => db`
+  async cancel(tenantId: string, invoiceId: string): Promise<CancelOutcome> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // The row first, so a payment recorded at this moment waits for us (its
+      // trigger reads the status FOR SHARE, 0326) or we wait for it.
+      const [current] = await db<{ status: string }[]>`
+        SELECT status FROM crm.invoice WHERE id = ${invoiceId} FOR UPDATE
+      `;
+      if (current?.status === "issued") {
+        const [money] = await db<{ paid: string; any: boolean }[]>`
+          SELECT coalesce(sum(amount), 0)::text AS paid, coalesce(sum(amount), 0) <> 0 AS any
+            FROM crm.payment WHERE invoice_id = ${invoiceId}
+        `;
+        if (money?.any === true) return { paid: money.paid };
+      }
+      const [row] = await db<InvoiceRow[]>`
         UPDATE crm.invoice SET status = 'cancelled'
         WHERE id = ${invoiceId} AND status IN ('draft', 'issued')
         RETURNING ${db.unsafe(INVOICE_COLUMNS)}
-      `,
-      "cancel",
-    );
+      `;
+      if (!row) {
+        throw new Error(
+          `could not cancel invoice ${invoiceId}: no row matched. It has moved on since it was ` +
+            `read — another request got there first.`,
+        );
+      }
+      return { cancelled: toInvoice(row) };
+    });
   }
 
   async registerIrn(
@@ -494,6 +700,33 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
         RETURNING ${db.unsafe(INVOICE_COLUMNS)}
       `,
       "register an IRN against",
+    );
+  }
+
+  async setDueOn(tenantId: string, invoiceId: string, dueOn: string | null): Promise<Invoice> {
+    return this.updateOne(
+      tenantId,
+      invoiceId,
+      (db) => db`
+        UPDATE crm.invoice SET due_on = ${dueOn}::date
+        WHERE id = ${invoiceId} AND status = 'draft'
+        RETURNING ${db.unsafe(INVOICE_COLUMNS)}
+      `,
+      "set the due date of",
+    );
+  }
+
+  async setManager(tenantId: string, invoiceId: string, managerUserId: string | null): Promise<Invoice> {
+    // A draft only: 0318's trigger refuses the same change on anything else.
+    return this.updateOne(
+      tenantId,
+      invoiceId,
+      (db) => db`
+        UPDATE crm.invoice SET manager_user_id = ${managerUserId}
+        WHERE id = ${invoiceId} AND status = 'draft'
+        RETURNING ${db.unsafe(INVOICE_COLUMNS)}
+      `,
+      "set the manager of",
     );
   }
 
@@ -567,8 +800,19 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
   }
   // ── Money against an invoice (T3.5) ──────────────────────────────────────
 
-  async recordPayment(p: NewPayment): Promise<Payment> {
-    return withTenant(this.app, p.tenantId, async (db) => {
+  async recordPayment(p: NewPayment): Promise<PaymentOutcome> {
+    return withTenant(this.app, p.tenantId, async (db): Promise<PaymentOutcome> => {
+      // A REVERSAL NO LARGER THAN WHAT WAS PAID (audit 2026-10-03), decided in
+      // this transaction: the invoice row first, so a second payment on it
+      // waits for this one and reads the balance this one leaves. More than is
+      // owed is recorded on purpose (a credit).
+      await db`SELECT 1 FROM crm.invoice WHERE id = ${p.invoiceId} FOR UPDATE`;
+      const [b] = await db<{ paid: string; reversesTooMuch: boolean }[]>`
+        SELECT paid::text AS paid,
+               (${p.amount}::numeric < 0 AND -${p.amount}::numeric > paid) AS "reversesTooMuch"
+          FROM crm.invoice_balance WHERE invoice_id = ${p.invoiceId}
+      `;
+      if (b?.reversesTooMuch === true) return { paid: b.paid };
       const [row] = await db<PaymentRow[]>`
         INSERT INTO crm.payment
           (id, tenant_id, invoice_id, amount, currency, received_on, method, reference, note)
@@ -577,7 +821,7 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
         RETURNING ${db.unsafe(PAYMENT_COLUMNS)}
       `;
       if (!row) throw new Error("payment insert returned no row");
-      return toPayment(row);
+      return { payment: toPayment(row) };
     });
   }
 
@@ -601,9 +845,40 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
    * sequence, which is worse than a gap: an invoice number missing because it
    * went to a credit note is a number an auditor cannot account for.
    */
-  async issueCreditNote(c: NewCreditNote): Promise<CreditNote> {
-    const financialYear = financialYearOf(c.seriesDate);
-    return withTenant(this.app, c.tenantId, async (db) => {
+  async issueCreditNote(c: NewCreditNote): Promise<CreditNoteOutcome> {
+    const financialYear = c.financialYear;
+    return withTenant(this.app, c.tenantId, async (db): Promise<CreditNoteOutcome> => {
+      // THE CAP, IN THIS TRANSACTION (B15). The invoice row first, so a second
+      // credit note on it waits for this one; then the advance's lock, the one
+      // a bill taking from this advance holds (`takeFromPool`), so a raise and
+      // a credit cannot both spend the last of it.
+      await db`SELECT 1 FROM crm.invoice WHERE id = ${c.invoiceId} FOR UPDATE`;
+      await db`SELECT pg_advisory_xact_lock(hashtext(${`advance:${c.invoiceId}`}))`;
+      // What may still be credited: what has not been credited, and on an
+      // advance only what later bills have not taken (B06), with its share of
+      // the tax: exactly the refund's own figure (`refundCandidates`), so
+      // "Give it back" is never refused by a paisa.
+      const [cap] = await db<{ max_credit: string; taken: string | null; ok: boolean }[]>`
+        WITH m AS (
+          SELECT CASE WHEN ap.invoice_id IS NULL THEN b.invoiced - b.credited
+                      ELSE least(round(ap.remaining * t.total / nullif(t.net, 0), 2), b.invoiced - b.credited)
+                 END AS max_credit,
+                 CASE WHEN coalesce(ap.applied, 0) > 0
+                      THEN round(ap.applied * t.total / nullif(t.net, 0), 2) END AS taken
+            FROM crm.invoice_balance b
+            JOIN crm.invoice_totals t ON t.invoice_id = b.invoice_id AND t.tenant_id = b.tenant_id
+            LEFT JOIN (
+              SELECT invoice_id, sum(remaining) AS remaining, sum(applied) AS applied
+                FROM crm.advance_pool GROUP BY invoice_id
+            ) ap ON ap.invoice_id = b.invoice_id
+           WHERE b.invoice_id = ${c.invoiceId}
+        )
+        SELECT greatest(m.max_credit, 0)::text AS max_credit, m.taken::text AS taken,
+               ${c.amount}::numeric <= m.max_credit AS ok
+          FROM m
+      `;
+      if (cap !== undefined && !cap.ok) return { maxCredit: cap.max_credit, takenByBills: cap.taken };
+
       await db`
         INSERT INTO crm.invoice_series
           (tenant_id, entity_party_id, financial_year, document_type, prefix)
@@ -628,7 +903,12 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
       }
 
       const sequence = series.last_number + 1;
-      const number = formatInvoiceNumber({ prefix: series.prefix, financialYear, sequence });
+      const number = formatInvoiceNumber({
+        prefix: series.prefix,
+        financialYear,
+        sequence,
+        startMonth: c.fiscalYearStartMonth,
+      });
 
       await db`
         UPDATE crm.invoice_series SET last_number = ${sequence}
@@ -648,7 +928,7 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
         RETURNING ${db.unsafe(CREDIT_NOTE_COLUMNS)}
       `;
       if (!row) throw new Error("credit note insert returned no row");
-      return toCreditNote(row);
+      return { credit: toCreditNote(row) };
     });
   }
 

@@ -94,4 +94,20 @@ describe("InMemoryRateLimiter", () => {
 
     expect((await rl.check("attacker", 1, 60)).allowed).toBe(false);
   });
+
+  it("peeks without counting: the answer the next check would give, and nothing spent", async () => {
+    // The edge reads an address's bucket BEFORE a session lookup and only
+    // charges it once the lookup has failed (api/ratelimit.ts). A peek that
+    // counted would charge every signed-in request to the office's address.
+    const { rl, clock } = limiter();
+    for (let i = 0; i < 5; i += 1) expect((await rl.peek("k", 2, 60)).allowed).toBe(true);
+    await rl.check("k", 2, 60);
+    expect((await rl.peek("k", 2, 60)).allowed).toBe(true);
+    await rl.check("k", 2, 60);
+    const refused = await rl.peek("k", 2, 60);
+    expect(refused.allowed).toBe(false);
+    expect(refused.retryAfterSeconds).toBeGreaterThan(0);
+    clock.advanceMinutes(1.1);
+    expect((await rl.peek("k", 2, 60)).allowed).toBe(true);
+  });
 });

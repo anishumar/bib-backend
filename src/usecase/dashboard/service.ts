@@ -6,17 +6,26 @@
 // not cached columns", so the arithmetic lives in the views (migration 0038)
 // where the rows are. What is left here is the two things a view cannot do:
 // assemble the figures into one answer, and apply the DSO definition.
-import type { CompanyBilling, MonthBilling, Slice } from "../../domain/dashboard/model";
+import type {
+  CompanyBilling,
+  ManagerMonth,
+  ManagerRevenue,
+  MonthBilling,
+  Slice,
+} from "../../domain/dashboard/model";
 import { billingWindow, daysSalesOutstanding } from "../../domain/dashboard/model";
 import { defaultCurrencyFor } from "../../domain/document/model";
 import { dayInZone } from "../../domain/scheduler/zone";
 import type { Clock } from "../../platform/clock";
-import type { DashboardRepository, FirmTimeZone } from "./ports";
+import type { DashboardRepository, FirmTimeZone, FiscalYearSource, ManagerMonthRow } from "./ports";
 
 export interface Deps {
   readonly dashboards: DashboardRepository;
-  /** For the one figure cut by month: which month the FIRM is in (T6.14). */
+  /** For the figures cut by month: which month the FIRM is in (T6.14). */
   readonly timeZones: FirmTimeZone;
+  /** The firm's own financial year, so revenue can be read "this financial
+   *  year" in any country (India April, the UK April, the US January). */
+  readonly fiscalYears: FiscalYearSource;
   readonly clock: Clock;
 }
 
@@ -32,6 +41,26 @@ export interface RevenueByCompany {
     readonly invoiceCount: number;
   }[];
   readonly companies: readonly CompanyBilling[];
+}
+
+/** What `revenueByManager` answers. Every amount in `reportingCurrency`. */
+export interface RevenueByManager {
+  readonly reportingCurrency: string;
+  /** Oldest first, `YYYY-MM`, the last one the month the firm is in now. */
+  readonly months: readonly string[];
+  /** The month (1-12) the firm's financial year starts, from its compliance
+   *  policy; null when the firm has not said. */
+  readonly financialYearStartMonth: number | null;
+  /** The whole firm: what every manager's row (and the no-manager row) adds up to. */
+  readonly total: {
+    readonly months: readonly ManagerMonth[];
+    readonly outstanding: string;
+    readonly outstandingInvoices: number;
+  };
+  /** By name, the invoices naming nobody last. Only people with something in
+   *  the window or something owed now: a firm's ladder is its own, so who
+   *  counts as "a manager" is whoever invoices name. */
+  readonly managers: readonly ManagerRevenue[];
 }
 
 /**
@@ -80,11 +109,14 @@ export class DashboardService {
   async overview(tenantId: string): Promise<Overview> {
     // Fetched together: this is one screen, and five sequential round trips to
     // render one page is the shape that makes a dashboard feel slow.
+    // ONE day for both, the firm's (B29): ageing and the DSO window used
+    // CURRENT_DATE, the database's day, which is not the firm's.
+    const today = await this.firmDay(tenantId);
     const [currency, mrr, receivables, sales] = await Promise.all([
       this.deps.dashboards.reportingCurrency(tenantId),
       this.deps.dashboards.mrr(tenantId),
-      this.deps.dashboards.receivables(tenantId),
-      this.deps.dashboards.creditSales(tenantId, DSO_WINDOW_DAYS),
+      this.deps.dashboards.receivables(tenantId, today),
+      this.deps.dashboards.creditSales(tenantId, DSO_WINDOW_DAYS, today),
     ]);
 
     return {
@@ -128,7 +160,7 @@ export class DashboardService {
 
   /** Who owes the firm money, biggest first. */
   async receivablesByClient(tenantId: string): Promise<readonly Slice[]> {
-    return this.deps.dashboards.receivablesByClient(tenantId);
+    return this.deps.dashboards.receivablesByClient(tenantId, await this.firmDay(tenantId));
   }
 
   /**
@@ -143,9 +175,93 @@ export class DashboardService {
    * being a month of nothing, written "0" rather than left out, so every
    * company's series has every month.
    */
-  async revenueByCompany(tenantId: string, months: number): Promise<RevenueByCompany> {
+  /**
+   * Revenue by manager (auto-invoice T4): what each manager's invoices billed
+   * and collected, month by month over the last `months` months, and what they
+   * are owed now. Grouped on `crm.invoice.manager_user_id`, the manager frozen
+   * on the invoice at issue. The definitions are `ManagerMonth`'s and
+   * `ManagerRevenue`'s; the adding up is SQL's, and this assembles: names,
+   * zeros for empty months, and the order.
+   */
+  async revenueByManager(tenantId: string, months: number): Promise<RevenueByManager> {
+    const window = await this.window(tenantId, months);
+    const [reportingCurrency, rows, owed, financialYearStartMonth] = await Promise.all([
+      this.deps.dashboards.reportingCurrency(tenantId),
+      this.deps.dashboards.billingByManager(tenantId, window),
+      this.deps.dashboards.owedByManager(tenantId, await this.firmDay(tenantId)),
+      this.deps.fiscalYears.fiscalYearStartMonth(tenantId),
+    ]);
+
+    const managerRows = rows.filter((r) => r.scope === "manager");
+    const owedRows = owed.filter((r) => r.scope === "manager");
+    const ids = new Set<string | null>([
+      ...managerRows.map((r) => r.managerUserId),
+      ...owedRows.map((r) => r.managerUserId),
+    ]);
+    const named = [...ids].filter((id): id is string => id !== null);
+    const names = new Map(
+      (await this.deps.dashboards.managerNames(tenantId, named)).map((n) => [n.userId, n]),
+    );
+
+    const series = (pick: (r: ManagerMonthRow) => boolean): ManagerMonth[] =>
+      window.months.map((month) => {
+        const row = rows.find((r) => r.month === month && pick(r));
+        return {
+          month,
+          billed: row?.billed ?? "0",
+          collected: row?.collected ?? "0",
+          invoiceCount: row?.invoices ?? 0,
+        };
+      });
+
+    const managers: ManagerRevenue[] = [...ids].map((userId) => {
+      const person = userId === null ? undefined : names.get(userId);
+      const due = owedRows.find((r) => r.managerUserId === userId);
+      return {
+        userId,
+        name: person?.name ?? null,
+        activeStaff: person?.activeStaff ?? false,
+        months: series((r) => r.scope === "manager" && r.managerUserId === userId),
+        outstanding: due?.outstanding ?? "0",
+        outstandingInvoices: due?.invoices ?? 0,
+      };
+    });
+    // By name, case-blind; the row naming nobody last, and an id the roster
+    // cannot name just before it.
+    const rank = (m: ManagerRevenue): number => (m.userId === null ? 2 : m.name === null ? 1 : 0);
+    managers.sort(
+      (a, b) =>
+        rank(a) - rank(b) ||
+        (a.name ?? "").localeCompare(b.name ?? "", "en", { sensitivity: "base" }),
+    );
+
+    const firmOwed = owed.find((r) => r.scope === "firm");
+    return {
+      reportingCurrency,
+      months: window.months,
+      financialYearStartMonth,
+      total: {
+        months: series((r) => r.scope === "firm"),
+        outstanding: firmOwed?.outstanding ?? "0",
+        outstandingInvoices: firmOwed?.invoices ?? 0,
+      },
+      managers,
+    };
+  }
+
+  /** The last `months` months on the FIRM's calendar (T6.14). */
+  private async window(tenantId: string, months: number) {
+    return billingWindow(await this.firmDay(tenantId), months);
+  }
+
+  /** Today on the firm's calendar (0071). */
+  private async firmDay(tenantId: string): Promise<string> {
     const zone = await this.deps.timeZones.timeZoneFor(tenantId);
-    const window = billingWindow(dayInZone(this.deps.clock.now().toISOString(), zone), months);
+    return dayInZone(this.deps.clock.now().toISOString(), zone);
+  }
+
+  async revenueByCompany(tenantId: string, months: number): Promise<RevenueByCompany> {
+    const window = await this.window(tenantId, months);
     const [reportingCurrency, companies] = await Promise.all([
       this.deps.dashboards.reportingCurrency(tenantId),
       this.deps.dashboards.billingCompanies(tenantId, window),

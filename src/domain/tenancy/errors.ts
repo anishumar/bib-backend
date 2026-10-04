@@ -18,6 +18,8 @@ export type TenancyErrorCode =
   | "INVALID_SLUG"
   | "INVALID_CURRENCY"
   | "INVALID_AUDIENCE"
+  | "INVALID_TIME_ZONE"
+  | "INVALID_COUNTRY"
   | "SLUG_TAKEN"
   | "EMAIL_TAKEN"
   | "TENANT_NOT_FOUND"
@@ -40,12 +42,35 @@ export class InvalidCurrency extends TenancyError {
     // rather than 180 codes nobody will read.
     super(
       "INVALID_CURRENCY",
-      `Reporting currency ${JSON.stringify(currency)} is not an ISO 4217 code — three letters, ` +
+      `Reporting currency ${JSON.stringify(currency)} is not an ISO 4217 code: three letters, ` +
         `like "INR" or "AED". It is what this firm's books are kept in, and it cannot be changed ` +
         `afterwards, because every exchange rate stored later is struck against it.`,
     );
   }
 }
+/** A zone named at provisioning that this runtime does not know, or an
+ *  offset (`+05:30`), which cannot follow daylight saving (`isTimeZone`). */
+export class InvalidTimeZone extends TenancyError {
+  constructor(timeZone: string) {
+    super(
+      "INVALID_TIME_ZONE",
+      `Time zone ${JSON.stringify(timeZone)} is not a zone name this server knows, like ` +
+        `"Asia/Kolkata" or "Europe/London". An offset such as "+05:30" is refused: it cannot ` +
+        `follow daylight saving.`,
+    );
+  }
+}
+
+/** A country named at provisioning that is not an ISO 3166-1 alpha-2 code. */
+export class InvalidCountry extends TenancyError {
+  constructor(country: string) {
+    super(
+      "INVALID_COUNTRY",
+      `Country ${JSON.stringify(country)} is not a two-letter ISO 3166-1 code, like "IN" or "AE".`,
+    );
+  }
+}
+
 export class InvalidAudience extends TenancyError {
   constructor(audience: string) {
     super("INVALID_AUDIENCE", `Audience ${JSON.stringify(audience)} must be STAFF or CLIENT_PORTAL`);
@@ -97,7 +122,7 @@ export class RoleNotDefined extends TenancyError {
       "ROLE_NOT_DEFINED",
       defined.length === 0
         ? `this firm has published no roles, so there is none to assign. Its configuration ` +
-          `registry was never seeded — every member is locked out until it is.`
+          `registry was never seeded: every member is locked out until it is.`
         : `${JSON.stringify(role)} is not a role this firm has published, so assigning it would ` +
           `leave the person able to sign in and do nothing. This firm's roles: ${defined.join(", ")}. ` +
           `Define it in the configuration registry first, or pick one of these.`,
@@ -114,7 +139,7 @@ export class SignatoryNotAMember extends TenancyError {
       "SIGNATORY_NOT_A_MEMBER",
       `User ${JSON.stringify(userId)} has no active staff membership at this firm, so they ` +
         `cannot be named as the person who binds it. Whoever signs the firm's engagement ` +
-        `letters has to work here — add them to the roster first, or reinstate their access.`,
+        `letters has to work here: add them to the roster first, or reinstate their access.`,
     );
   }
 }
@@ -123,7 +148,7 @@ export class LastAdministrator extends TenancyError {
   constructor(adminPermission: string) {
     super(
       "LAST_ADMINISTRATOR",
-      `This would leave the firm with nobody who can administer it — no active member holding a ` +
+      `This would leave the firm with nobody who can administer it: no active member holding a ` +
         `role that carries ${JSON.stringify(adminPermission)}. That permission is what lets anyone ` +
         `change roles or memberships at all, including undoing this, so nobody could put it back ` +
         `from inside the product. Give somebody else an administrator role first.`,

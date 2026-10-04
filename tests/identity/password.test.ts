@@ -32,9 +32,11 @@ import {
 } from "../../src/testfakes/identity";
 import type { Mailer } from "../../src/usecase/identity/ports";
 import {
+  CurrentPasswordIncorrect,
   InvalidCredentials,
   InvalidMagicLink,
   NoPasswordSet,
+  PasswordAlreadySet,
   PasswordUnchanged,
   TooManyAttempts,
   WeakPassword,
@@ -384,9 +386,11 @@ describe("changePassword", () => {
 
   it("refuses a wrong current password, and a session does not stand in for it", async () => {
     const userId = await seedUser(h);
-    await expect(
-      h.service.changePassword(userId, "not the password", NEW_PASSWORD, TENANT_A),
-    ).rejects.toBeInstanceOf(InvalidCredentials);
+    // Its own sentence (F26): this form has no email box, so the sign-in
+    // page's "Email or password is incorrect" sent people looking for one.
+    const refused = h.service.changePassword(userId, "not the password", NEW_PASSWORD, TENANT_A);
+    await expect(refused).rejects.toBeInstanceOf(CurrentPasswordIncorrect);
+    await expect(refused).rejects.toThrow(/^That is not your current password\./);
     // Nothing was written: the old one still works.
     await expect(h.service.login(EMAIL, PASSWORD)).resolves.toBeDefined();
   });
@@ -420,7 +424,7 @@ describe("changePassword", () => {
     for (let i = 0; i < PASSWORD_CHANGE_ATTEMPTS_PER_WINDOW - 1; i += 1) {
       await expect(
         h.service.changePassword(userId, `wrong ${String(i)}`, NEW_PASSWORD, TENANT_A),
-      ).rejects.toBeInstanceOf(InvalidCredentials);
+      ).rejects.toBeInstanceOf(CurrentPasswordIncorrect);
     }
     // The budget's last unit goes on the attempt that WORKS, which then clears
     // it — somebody who has just produced their own password is the best
@@ -438,13 +442,14 @@ describe("changePassword", () => {
     for (let i = 0; i < PASSWORD_CHANGE_ATTEMPTS_PER_WINDOW; i += 1) {
       await expect(
         h.service.changePassword(userId, `wrong ${String(i)}`, NEW_PASSWORD, TENANT_A),
-      ).rejects.toBeInstanceOf(InvalidCredentials);
+      ).rejects.toBeInstanceOf(CurrentPasswordIncorrect);
     }
     // Even the RIGHT one, which is what stops the route being a network-hopped
     // oracle for a password somebody reuses elsewhere.
-    await expect(
-      h.service.changePassword(userId, PASSWORD, NEW_PASSWORD, TENANT_A),
-    ).rejects.toBeInstanceOf(TooManyAttempts);
+    const refused = h.service.changePassword(userId, PASSWORD, NEW_PASSWORD, TENANT_A);
+    await expect(refused).rejects.toBeInstanceOf(TooManyAttempts);
+    // About THIS act: nobody was signing in.
+    await expect(refused).rejects.toThrow(/^Too many tries at your current password\. Try again in /);
   });
 });
 
@@ -456,5 +461,94 @@ describe("hasPassword", () => {
 
     await h.service.setPassword(userId, PASSWORD);
     expect(await h.service.hasPassword(userId)).toBe(true);
+  });
+});
+
+describe("the welcome link chooses the first password (CA#38)", () => {
+  // A new colleague used to be signed in by the welcome link and never asked
+  // for a password; the only way to set one was "Email me a link to set one",
+  // which arrived as "Reset your BiB password" for a password they never had.
+  // The welcome link itself is the proof of the mailbox, so the first password
+  // is chosen on it, in the same call that signs them in.
+  let h: Harness;
+  beforeEach(() => {
+    h = harness();
+  });
+
+  function welcomeToken(): string {
+    const last = h.mailer.welcomes.at(-1);
+    if (last === undefined) throw new Error("no welcome was sent");
+    const token = new URL(last.url).searchParams.get("token");
+    if (token === null) throw new Error(`no token in ${last.url}`);
+    return token;
+  }
+
+  it("points a colleague with no password at the page that chooses one", async () => {
+    const userId = await seedPasswordless(h);
+    await h.service.welcomeStaff(userId, "Sharma Mehta & Co");
+    expect(h.mailer.welcomes[0]?.url).toContain("/auth/welcome?token=");
+    expect(h.mailer.welcomes[0]?.choosePassword).toBe(true);
+  });
+
+  it("points a colleague who already has a password at the sign-in page", async () => {
+    const userId = await seedUser(h);
+    await h.service.welcomeStaff(userId, "Sharma Mehta & Co");
+    expect(h.mailer.welcomes[0]?.url).toContain("/auth/magic-link?token=");
+    expect(h.mailer.welcomes[0]?.choosePassword).toBe(false);
+  });
+
+  it("names the colleague who added them (CA#50)", async () => {
+    const adder = await h.users.create({ id: uuidFor("user:rajesh"), email: "rajesh@sharmamehta.in", displayName: "Rajesh Sharma" });
+    const userId = await seedPasswordless(h);
+    await h.service.welcomeStaff(userId, "Sharma Mehta & Co", null, adder.id);
+    expect(h.mailer.welcomes[0]?.addedBy).toBe("Rajesh Sharma");
+  });
+
+  it("sets the password and signs in, in one call", async () => {
+    const userId = await seedPasswordless(h);
+    await h.service.welcomeStaff(userId, "Sharma Mehta & Co");
+    const result = await h.service.redeemWelcome(welcomeToken(), PASSWORD);
+
+    expect(result.principal.tenantId).toBe(TENANT_A);
+    expect(await h.service.resolveSession(result.token)).not.toBeNull();
+    expect(await h.service.hasPassword(userId)).toBe(true);
+    await expect(h.service.login(EMAIL, PASSWORD)).resolves.toBeDefined();
+  });
+
+  it("works exactly once, and skipping spends it the same way", async () => {
+    const userId = await seedPasswordless(h);
+    await h.service.welcomeStaff(userId, "Sharma Mehta & Co");
+    const token = welcomeToken();
+    await h.service.redeemMagicLink(token);
+    await expect(h.service.redeemWelcome(token, PASSWORD)).rejects.toBeInstanceOf(InvalidMagicLink);
+  });
+
+  it("does not spend the link when the password is refused for length", async () => {
+    const userId = await seedPasswordless(h);
+    await h.service.welcomeStaff(userId, "Sharma Mehta & Co");
+    const token = welcomeToken();
+    await expect(h.service.redeemWelcome(token, "short")).rejects.toBeInstanceOf(WeakPassword);
+    await expect(h.service.redeemWelcome(token, PASSWORD)).resolves.toBeDefined();
+  });
+
+  it("never REPLACES a password, and leaves the link to sign in with", async () => {
+    // A welcome to a second firm reaches somebody who may have a password
+    // already. Replacing it would sign them out everywhere on a letter they had
+    // every reason to open.
+    const userId = await seedUser(h);
+    await h.service.welcomeStaff(userId, "Sharma Mehta & Co");
+    const token = welcomeToken();
+    await expect(h.service.redeemWelcome(token, NEW_PASSWORD)).rejects.toBeInstanceOf(PasswordAlreadySet);
+    await expect(h.service.login(EMAIL, PASSWORD)).resolves.toBeDefined();
+    await expect(h.service.redeemMagicLink(token)).resolves.toBeDefined();
+  });
+
+  it("refuses a sign-in link, a reset link and an invitation: only a welcome", async () => {
+    await seedPasswordless(h);
+    await h.service.requestMagicLink(EMAIL);
+    const signIn = new URL(h.mailer.sent.at(-1)?.url ?? "").searchParams.get("token") ?? "";
+    await expect(h.service.redeemWelcome(signIn, PASSWORD)).rejects.toBeInstanceOf(InvalidMagicLink);
+    await h.service.requestPasswordReset(EMAIL);
+    await expect(h.service.redeemWelcome(resetToken(h), PASSWORD)).rejects.toBeInstanceOf(InvalidMagicLink);
   });
 });

@@ -16,6 +16,7 @@
 // exactly once — and it does not know what the firm's clause library contains.
 import type { Amount, CurrencyCode } from "../money/model";
 import type { BillingFrequency, OutOfPocketEstimate } from "../document/model";
+import { isCalendarDay } from "../day";
 
 /**
  * Where a letter has got to.
@@ -296,6 +297,23 @@ export interface EngagementLetter {
   readonly copiedFromId: string | null;
 }
 
+/**
+ * WHEN A RECURRING FEE IS INVOICED, as the letter agrees it (0319): after each
+ * period (the firm's default), at its start, or from a date the firm chose.
+ * Null on a letter written before 0319 or a line nobody chose for; billing
+ * reads that as after each period. The billing domain has the same three words
+ * (`BillingTiming`); domains do not import each other, so it is stated twice.
+ */
+export const LETTER_BILLING_TIMINGS = ["arrears", "advance", "on_date"] as const;
+export type LetterBillingTiming = (typeof LETTER_BILLING_TIMINGS)[number];
+
+export function isLetterBillingTiming(value: unknown): value is LetterBillingTiming {
+  return typeof value === "string" && (LETTER_BILLING_TIMINGS as readonly string[]).includes(value);
+}
+
+/** The frequencies a billing timing means anything for: one billed per period. */
+export const TIMED_FREQUENCIES: readonly string[] = ["monthly", "quarterly", "annually"];
+
 export interface LetterLine {
   readonly id: string;
   readonly tenantId: string;
@@ -343,6 +361,16 @@ export interface LetterLine {
    *  `recurrence` and freely different from it: a monthly service billed
    *  quarterly is an arrangement the firm has today. */
   readonly billingFrequency: BillingFrequency | null;
+  /** When it is invoiced (0319); null = not chosen (after each period). Only
+   *  for a monthly, quarterly or yearly fee. A grouped line is billed with its
+   *  group, whose timing is the one that counts. */
+  readonly billingTiming: LetterBillingTiming | null;
+  /** The first invoice date, with `on_date` and only with it. */
+  readonly billingOn: string | null;
+  /** This service's OWN advance, before tax (0320), or null. Never on a grouped
+   *  line, and never on a letter that asks for one advance for the whole of it:
+   *  the engagement it becomes waits for this advance alone. */
+  readonly advanceAmount: Amount | null;
   /**
    * THE FOUR OVERRIDES — this letter's own wording for the four scope blocks,
    * or null to print the pinned catalogue version's words.
@@ -411,6 +439,9 @@ export interface FeeGroup {
   /** How often the fee is billed. Required — a fee with no period is not one
    *  anybody can invoice. */
   readonly billingFrequency: BillingFrequency;
+  /** When the group's fee is invoiced (0319), as on a line. */
+  readonly billingTiming: LetterBillingTiming | null;
+  readonly billingOn: string | null;
   /** PER BILLING PERIOD: 5,000 on a monthly group is 5,000 a month. */
   readonly amount: Amount;
   readonly currency: CurrencyCode;
@@ -502,6 +533,16 @@ export interface Engagement {
   /** The firm's day it last resumed after a pause. A recurring period that
    *  ended before it fell inside the pause and is never spawned. */
   readonly resumedOn: string | null;
+  /** The firm's day the LAST pause began (0318). Kept after the resume, unlike
+   *  `pausedAt`, so a period half served before a pause is billed pro-rata. */
+  readonly pausedOn: string | null;
+  /** The first day of the FIRST period billed (0318). Nothing before it is
+   *  billed, which makes it this client's billing go-live. Null with
+   *  `firstInvoiceOn`: billing not set up. */
+  readonly billingFrom: string | null;
+  /** The date the invoice for the period starting `billingFrom` falls due;
+   *  each later period one billing span after it (0318). */
+  readonly firstInvoiceOn: string | null;
 }
 
 /** The longest reason an end may carry, as the database's CHECK says (0314). */
@@ -526,20 +567,10 @@ export function isLive(status: EngagementStatus): boolean {
 }
 
 // ── Pure rules ───────────────────────────────────────────────────────────────
-
-/**
- * Whether an engagement may start work.
- *
- * The fee gate, stated once. A letter that requires an advance releases its
- * engagements only when the advance has been recorded; one that does not
- * releases them at signature. Nothing else opens it — which is why this is a
- * function of the LETTER and not a flag somebody sets on the engagement.
- */
-export function mayActivate(
-  letter: Pick<EngagementLetter, "advanceRequired" | "advanceRecordedAt">,
-): boolean {
-  return !letter.advanceRequired || letter.advanceRecordedAt !== null;
-}
+//
+// (The fee gate `mayActivate` lived here until 0322: a letter that required an
+// advance released its engagements only once it was recorded. Since 0322 the
+// signature starts the work and the advance is chased, not waited for.)
 
 /**
  * What an engagement is doing TODAY.
@@ -595,34 +626,28 @@ export function resolveEffectiveFrom(
   return lineEffectiveFrom ?? letterEffectiveFrom ?? signatureDay;
 }
 
-/** An ISO calendar day, as this product stores and compares one. */
-const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
-
-export function isDay(v: string): boolean {
-  return DAY_PATTERN.test(v) && !Number.isNaN(Date.parse(`${v}T00:00:00Z`));
-}
-
 /**
- * A day that EXISTS (V2.3). `isDay` takes 2026-02-31, because V8 parses it and
- * rolls it into March; an engagement's last day is a date somebody will act
- * on, so it must survive the round trip unchanged.
- */
-export function isCalendarDay(v: string): boolean {
-  if (!DAY_PATTERN.test(v)) return false;
-  const at = new Date(`${v}T00:00:00Z`);
-  return !Number.isNaN(at.getTime()) && at.toISOString().slice(0, 10) === v;
-}
-
-/**
- * The UTC day of an instant.
+ * An ISO calendar day that EXISTS, as this product stores and compares one.
  *
- * UTC and not the server's zone, for the same reason `refYear` is: two pods in
- * two regions must not disagree about which day a contract started. The cost is
- * the same and is equally visible — a letter signed late on 31 December in
- * Sydney starts on 1 January.
+ * It took 2026-02-31 until 2026-10-03 (B43): V8 parses it and rolls it into
+ * March, Postgres then refused the cast (22008) and the caller got a 500. Both
+ * names are the shared rule in `domain/day.ts` now; `isCalendarDay` was the
+ * strict one V2.3 added beside it.
  */
-export function utcDay(at: Date): string {
-  return at.toISOString().slice(0, 10);
+export function isDay(v: string): boolean {
+  return isCalendarDay(v);
+}
+
+export { isCalendarDay };
+
+/** The billing timing as a hash field, or nothing at all when none was
+ *  chosen, so a letter from before 0319 keeps its hash. */
+function timingField(x: {
+  readonly billingTiming: LetterBillingTiming | null;
+  readonly billingOn: string | null;
+}): string[] {
+  if (x.billingTiming === null) return [];
+  return [`billing:${x.billingTiming}${x.billingOn === null ? "" : ` ${x.billingOn}`}`];
 }
 
 /**
@@ -692,7 +717,7 @@ export function canonicalContent(input: {
     | "firmSignatoryUserId"
     | "firmSignatoryTitle"
   >;
-  readonly lines: readonly Pick<
+  readonly lines: readonly (Pick<
     LetterLine,
     | "position"
     | "entityPartyId"
@@ -711,7 +736,10 @@ export function canonicalContent(input: {
     | "oopEstimate"
     | "pricingNote"
     | "feeGroupId"
-  >[];
+    | "billingTiming"
+    | "billingOn"
+  > &
+    Partial<Pick<LetterLine, "advanceAmount">>)[];
   readonly feeGroups: readonly Pick<
     FeeGroup,
     | "id"
@@ -724,6 +752,8 @@ export function canonicalContent(input: {
     | "intro"
     | "deliverables"
     | "clientObligations"
+    | "billingTiming"
+    | "billingOn"
   >[];
   readonly clauses: readonly Pick<LetterClause, "position" | "clauseVersionId">[];
 }): string {
@@ -798,6 +828,12 @@ export function canonicalContent(input: {
           ? ""
           : `${l.oopEstimate.currency} ${l.oopEstimate.min} ${l.oopEstimate.max}`,
         l.pricingNote ?? "",
+        // WHEN it is invoiced (0319) is a term too, and added ONLY WHEN SET, as
+        // the fee-group rows were in 0083: a letter signed before 0319 hashes
+        // exactly as it did.
+        ...timingField(l),
+        // The service's own advance (0320), the same way: only when set.
+        ...(l.advanceAmount === undefined || l.advanceAmount === null ? [] : [`advance:${l.advanceAmount}`]),
       ].join("\t"),
     );
 
@@ -823,6 +859,7 @@ export function canonicalContent(input: {
           .map((l) => l.position)
           .sort((a, b) => a - b)
           .join(","),
+        ...timingField(g),
       ].join("\t"),
     );
 

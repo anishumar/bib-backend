@@ -6,6 +6,8 @@
 // a table or a clock: given a number it formats a reference, and given the
 // firm's preference rows it names an entity. Both halves are decisions, and a
 // decision is the thing worth testing without infrastructure.
+import { isCountryCode } from "../country";
+
 /**
  * The two documents that carry a reference and an issuing entity. These string
  * literals are also the values in the `document_type` CHECK on
@@ -260,8 +262,10 @@ export function normalizeJurisdiction(raw: string): string {
   return raw.trim().toUpperCase();
 }
 
+/** Two capital letters AND a country ISO assigns today (F04): a retired code
+ *  such as DD, or UK for GB, is matched by no rule and is refused. */
 export function isJurisdiction(v: string): boolean {
-  return JURISDICTION_PATTERN.test(v);
+  return JURISDICTION_PATTERN.test(v) && isCountryCode(v);
 }
 
 /**
@@ -515,18 +519,31 @@ export function defaultCurrencyFor(jurisdiction: string | null, reportingCurrenc
  */
 export interface RegisteredAddress {
   readonly lines: readonly string[];
+  /** The state or region, which a tax invoice names on its own (audit
+   *  2026-10-03, B12): "Maharashtra". Absent on an address written before. */
+  readonly region?: string | null | undefined;
+  /** The postal code: "411001". */
+  readonly postalCode?: string | null | undefined;
 }
 
 export const REGISTERED_ADDRESS_MAX_LINES = 8;
 export const REGISTERED_ADDRESS_LINE_MAX = 200;
+export const REGISTERED_ADDRESS_REGION_MAX = 100;
+export const REGISTERED_ADDRESS_POSTAL_MAX = 20;
 
 /** Read the stored jsonb back in the shape above, or null for anything else —
- *  a row written before this shape existed is not guessed at. */
+ *  a row written before this shape existed is not guessed at. The state and
+ *  postal code are present only when stored. */
 export function readRegisteredAddress(raw: unknown): RegisteredAddress | null {
   if (typeof raw !== "object" || raw === null) return null;
-  const lines = (raw as { lines?: unknown }).lines;
+  const r = raw as { lines?: unknown; region?: unknown; postalCode?: unknown };
+  const lines = r.lines;
   if (!Array.isArray(lines) || !lines.every((l): l is string => typeof l === "string")) return null;
-  return { lines };
+  return {
+    lines,
+    ...(typeof r.region === "string" && r.region !== "" ? { region: r.region } : {}),
+    ...(typeof r.postalCode === "string" && r.postalCode !== "" ? { postalCode: r.postalCode } : {}),
+  };
 }
 
 /** Why an address cannot be stored, or null when it can. Blank lines are
@@ -538,6 +555,12 @@ export function registeredAddressProblem(address: RegisteredAddress): string | n
   }
   if (address.lines.some((l) => l.length > REGISTERED_ADDRESS_LINE_MAX)) {
     return `each address line is at most ${String(REGISTERED_ADDRESS_LINE_MAX)} characters`;
+  }
+  if ((address.region ?? "").length > REGISTERED_ADDRESS_REGION_MAX) {
+    return `the state or region is at most ${String(REGISTERED_ADDRESS_REGION_MAX)} characters`;
+  }
+  if ((address.postalCode ?? "").length > REGISTERED_ADDRESS_POSTAL_MAX) {
+    return `the postal code is at most ${String(REGISTERED_ADDRESS_POSTAL_MAX)} characters`;
   }
   return null;
 }

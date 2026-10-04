@@ -11,10 +11,13 @@
 //   with no engagements is a client committed to work nobody scheduled, and
 //   engagements with no signature is work nobody agreed to.
 //
-//   ACTIVATION is gated on the advance. An engagement starts `pending_advance`
-//   whenever the letter requires one, and `contract.activated` — the event the
-//   scheduler consumes from T2.4 — is not emitted until it is recorded. That is
-//   what makes the fee gate real rather than advisory.
+//   ACTIVATION is the signature (0322). Until then the advance gated it: an
+//   engagement started `pending_advance` whenever the letter required one, and
+//   `contract.activated` — the event the scheduler consumes from T2.4 — waited
+//   for the advance. Ashish (2026-10-02): "work can be started and parallelly
+//   the system should keep on notifying", because the advance "generally comes
+//   within 5 to 15 days of starting of work". So every engagement starts active
+//   and the advance is drafted and chased by the billing use case instead.
 import type { IdGen } from "../../platform/ids";
 import type { Clock } from "../../platform/clock";
 import type { Actor } from "../../domain/ledger/model";
@@ -28,6 +31,7 @@ import type {
   LetterLine,
   LetterStatus,
 } from "../../domain/engagement/model";
+import { isLetterBillingTiming, TIMED_FREQUENCIES, type LetterBillingTiming } from "../../domain/engagement/model";
 import {
   CURRENT_LETTER_LAYOUT,
   canTransition,
@@ -39,13 +43,13 @@ import {
   isJurisdiction,
   isLetterCopyable,
   letterDeletionBlock,
-  mayActivate,
   normalizeJurisdiction,
   resolveEffectiveFrom,
 } from "../../domain/engagement/model";
 import type { ClauseBody } from "../../domain/config/model";
 import { readClauseBody, readServiceBody } from "../../domain/config/model";
-import { isAmount, isExchangeRate, isCurrencyCode, normalizeCurrency } from "../../domain/money/model";
+import { compareAmounts, isAmount, isExchangeRate, isCurrencyCode, normalizeCurrency } from "../../domain/money/model";
+import type { Amount } from "../../domain/money/model";
 import {
   isBillingFrequency,
   outOfPocketProblem,
@@ -53,16 +57,18 @@ import {
 } from "../../domain/document/model";
 import type { BillingFrequency, OutOfPocketEstimate } from "../../domain/document/model";
 import {
-  AdvanceAlreadyRecorded,
+  InvalidLetterBillingTiming,
   AdvanceAmountRequired,
-  AdvanceNotRequired,
   AlreadySuperseded,
   ClauseLawNotIssuers,
   ClauseNotFound,
   ClauseNotPublished,
   ClauseWrongJurisdiction,
   EmptyLetter,
+  LetterHasNoBody,
   InvalidAmount,
+  InvalidLineAdvance,
+  OneKindOfAdvance,
   InvalidDate,
   InvalidJurisdiction,
   QuoteHasNoLines,
@@ -88,6 +94,7 @@ import {
   EnvelopeAlreadySigned,
   UnpricedLineHasDiscount,
   UnpricedLineNeedsReason,
+  ServiceHasNoListPrice,
   AddresseeNotAPerson,
   AddresseeNotLinked,
   EntityOutsideClient,
@@ -129,6 +136,9 @@ import type {
   BillableEngagement,
   ClientStructureDirectory,
   FirmTimeZone,
+  GoLiveBilling,
+  AdvanceBilling,
+  CalendarFiller,
   EngagementRecord,
   EngagementRepository,
   FeeGroupEdit,
@@ -204,6 +214,18 @@ export interface Deps {
    *  envelope completes. Null where no document store is composed. */
   readonly signedCopies: SignedCopyFiler | null;
   readonly tenants: SignatureTenants;
+  /** The billing desk, to set the schedules the letter's terms give when the
+   *  work goes live (0319). Optional: a composition without billing (and most
+   *  tests) sets none, and the engagements wait on "Billing not set up". */
+  readonly goLiveBilling?: GoLiveBilling | null;
+  /** The billing desk, to write the advance bill a signed letter owes (0320).
+   *  Optional for the same reason: a composition without billing writes none,
+   *  and the daily sweep writes it later. */
+  readonly advanceBilling?: AdvanceBilling | null;
+  /** The compliance calendar, filled when a letter is signed (CA#24).
+   *  Optional for the billing ports' reason: a composition without it leaves
+   *  the filling to the nightly sweep. */
+  readonly calendar?: CalendarFiller | null;
   readonly ids: IdGen;
   readonly clock: Clock;
   readonly events: EventSink;
@@ -310,6 +332,13 @@ export interface AddLetterLineInput {
   /** How often this DEAL is billed. Absent falls back to the PINNED service's
    *  `recurrence`. */
   readonly billingFrequency?: string | undefined;
+  /** When it is invoiced (0319): "arrears" | "advance" | "on_date" (with
+   *  `billingOn`). Only for a monthly, quarterly or yearly fee. */
+  readonly billingTiming?: string | undefined;
+  readonly billingOn?: string | undefined;
+  /** This service's own advance, before tax (0320). Not on a grouped line, and
+   *  not on a letter that asks for one advance for the whole of it. */
+  readonly advanceAmount?: string | undefined;
   /** This letter's own wording for any of the four scope blocks. Absent prints
    *  the pinned catalogue version's words. */
   readonly scopeOverride?: string | undefined;
@@ -335,6 +364,8 @@ export interface AddLetterLineInput {
 export interface FeeGroupInput {
   readonly title: string;
   readonly billingFrequency: string;
+  readonly billingTiming?: string | undefined;
+  readonly billingOn?: string | undefined;
   readonly amount: string;
   readonly paymentTerms?: string | undefined;
   readonly feeDescription?: string | undefined;
@@ -348,6 +379,9 @@ export interface FeeGroupInput {
 export interface FeeGroupChange {
   readonly title?: string | undefined;
   readonly billingFrequency?: string | undefined;
+  /** Null clears it (back to after each period). */
+  readonly billingTiming?: string | null | undefined;
+  readonly billingOn?: string | null | undefined;
   readonly amount?: string | undefined;
   readonly paymentTerms?: string | undefined;
   readonly feeDescription?: string | undefined;
@@ -498,6 +532,10 @@ export interface UpdateLetterLineInput {
   readonly unitAmount?: string | null | undefined;
   readonly discountPercent?: string | undefined;
   readonly billingFrequency?: string | null | undefined;
+  readonly billingTiming?: string | null | undefined;
+  readonly billingOn?: string | null | undefined;
+  /** This service's own advance, before tax (0320); null clears it. */
+  readonly advanceAmount?: string | null | undefined;
   readonly pricingNote?: string | null | undefined;
   readonly effectiveFrom?: string | null | undefined;
   readonly jurisdiction?: string | null | undefined;
@@ -520,6 +558,9 @@ const LETTER_LINE_FIELDS = [
   "unitAmount",
   "discountPercent",
   "billingFrequency",
+  "billingTiming",
+  "billingOn",
+  "advanceAmount",
   "pricingNote",
   "effectiveFrom",
   "jurisdiction",
@@ -661,6 +702,8 @@ export class EngagementService {
       const made = await this.addFeeGroup(tenantId, letter.id, {
         title: g.title,
         billingFrequency: g.billingFrequency,
+        ...(g.billingTiming === null ? {} : { billingTiming: g.billingTiming }),
+        ...(g.billingOn === null ? {} : { billingOn: g.billingOn }),
         amount: g.amount,
         ...(g.paymentTerms === null ? {} : { paymentTerms: g.paymentTerms }),
         ...(g.feeDescription === null ? {} : { feeDescription: g.feeDescription }),
@@ -691,6 +734,9 @@ export class EngagementService {
           ...(lineStart === undefined ? {} : { effectiveFrom: lineStart }),
           ...(line.jurisdiction === null ? {} : { jurisdiction: line.jurisdiction }),
           ...(line.billingFrequency === null ? {} : { billingFrequency: line.billingFrequency }),
+          ...(line.billingTiming === null ? {} : { billingTiming: line.billingTiming }),
+          ...(line.billingOn === null ? {} : { billingOn: line.billingOn }),
+          ...(line.advanceAmount === null ? {} : { advanceAmount: line.advanceAmount }),
           ...(line.scopeOverride === null ? {} : { scopeOverride: line.scopeOverride }),
           ...(line.clientObligationsOverride === null
             ? {}
@@ -1076,7 +1122,7 @@ export class EngagementService {
           description: line.description,
           reason:
             "This line does not say which company the work is for. A letter line has to, " +
-            "because signing it creates an engagement — one service for one legal entity. " +
+            "because signing it creates an engagement: one service for one legal entity. " +
             "Add it to the letter by hand, naming the company.",
         });
         continue;
@@ -1275,20 +1321,6 @@ export class EngagementService {
     if (feeGroupId !== null) {
       await this.liveFeeGroupOrThrow(input.tenantId, letter.id, feeGroupId);
     }
-    const { unitAmount, pricingNote } = this.pricingOrThrow({
-      grouped: feeGroupId !== null,
-      unitAmount: input.unitAmount,
-      discountPercent: input.discountPercent,
-      pricingNote: input.pricingNote,
-    });
-    if (input.effectiveFrom !== undefined && !isDay(input.effectiveFrom)) {
-      throw new InvalidDate("effective date", input.effectiveFrom);
-    }
-
-    const jurisdiction = this.lineJurisdiction(input.jurisdiction);
-    const billingFrequency = this.statedBillingFrequency(input.billingFrequency);
-    const oopEstimate = this.outOfPocket(input.oopEstimate);
-
     const pinned = await this.deps.library.readPinnedVersion(
       input.tenantId,
       input.serviceVersionId,
@@ -1304,6 +1336,33 @@ export class EngagementService {
       );
     }
 
+    // NEITHER A FEE NOR A REASON, outside a section: quoted at the pinned
+    // version's list price in the letter's currency (B09, audit 2026-10-03), as
+    // ProposalService.addLine does and for its reason: a login that cannot see
+    // fees reads every list price as null.
+    let stated = input.unitAmount;
+    if (feeGroupId === null && stated === undefined && blankToNull(input.pricingNote) === null) {
+      const service = readServiceBody(pinned.body);
+      if (service.listPrice === null || service.listPrice.currency !== letter.currency) {
+        throw new ServiceHasNoListPrice(service.name === "" ? input.description : service.name, letter.currency);
+      }
+      stated = service.listPrice.amount;
+    }
+    const { unitAmount, pricingNote } = this.pricingOrThrow({
+      grouped: feeGroupId !== null,
+      unitAmount: stated,
+      discountPercent: input.discountPercent,
+      pricingNote: input.pricingNote,
+    });
+    if (input.effectiveFrom !== undefined && !isDay(input.effectiveFrom)) {
+      throw new InvalidDate("effective date", input.effectiveFrom);
+    }
+
+    const jurisdiction = this.lineJurisdiction(input.jurisdiction);
+    const billingFrequency = this.statedBillingFrequency(input.billingFrequency);
+    const oopEstimate = this.outOfPocket(input.oopEstimate);
+
+    const resolvedFrequency = billingFrequency ?? readServiceBody(pinned.body).recurrence;
     return this.deps.letters.addLine({
       id: this.deps.ids.newId(),
       tenantId: input.tenantId,
@@ -1321,7 +1380,9 @@ export class EngagementService {
       // ProposalService.addLine. On a letter it matters more: the value is part
       // of what the client signs, so it must be the one decided at drafting and
       // not one re-derived from a catalogue that has since moved.
-      billingFrequency: billingFrequency ?? readServiceBody(pinned.body).recurrence,
+      billingFrequency: resolvedFrequency,
+      ...this.timingOrThrow(resolvedFrequency, input.billingTiming, input.billingOn),
+      advanceAmount: this.lineAdvanceOrThrow(letter, feeGroupId, input.advanceAmount),
       scopeOverride: blankToNull(input.scopeOverride),
       clientObligationsOverride: blankToNull(input.clientObligationsOverride),
       volumeLimitsOverride: blankToNull(input.volumeLimitsOverride),
@@ -1439,6 +1500,7 @@ export class EngagementService {
       currency: letter.currency,
       title: terms.title,
       billingFrequency: terms.billingFrequency,
+      ...this.timingOrThrow(terms.billingFrequency, input.billingTiming, input.billingOn),
       amount: terms.amount,
       paymentTerms: blankToNull(input.paymentTerms),
       feeDescription: blankToNull(input.feeDescription),
@@ -1461,9 +1523,20 @@ export class EngagementService {
       billingFrequency: change.billingFrequency ?? current.billingFrequency,
       amount: change.amount ?? current.amount,
     });
+    // The timing as it will be: sent, or kept, or cleared when the frequency
+    // stops being one billed per period.
+    const timingSent = change.billingTiming !== undefined || change.billingOn !== undefined;
+    const timing = this.timingOrThrow(
+      terms.billingFrequency,
+      timingSent ? change.billingTiming : current.billingTiming,
+      timingSent ? change.billingOn : current.billingOn,
+      !timingSent,
+    );
     const edit: FeeGroupEdit = {
       title: terms.title,
       billingFrequency: terms.billingFrequency,
+      billingTiming: timing.billingTiming,
+      billingOn: timing.billingOn,
       amount: terms.amount,
       // Absent keeps the words; a blank clears them. Null and "" are not the
       // same thing to the reader of a contract, and the column refuses "".
@@ -1533,6 +1606,63 @@ export class EngagementService {
     const normalised = normalizeJurisdiction(raw);
     if (!isJurisdiction(normalised)) throw new InvalidJurisdiction(raw);
     return normalised;
+  }
+
+  /**
+   * A service's own advance (0320), as it will be stored: an amount above zero,
+   * before tax. A grouped line has none (the group's advance is the letter's),
+   * and a letter that asks for one advance for the whole of it cannot ask for a
+   * service's as well: that service's work would wait for two payments.
+   */
+  private lineAdvanceOrThrow(
+    letter: Pick<EngagementLetter, "advanceRequired">,
+    feeGroupId: string | null,
+    advance: string | null | undefined,
+  ): Amount | null {
+    if (advance === undefined || advance === null) return null;
+    const amount = advance.trim();
+    if (feeGroupId !== null) throw new InvalidLineAdvance("a service in a fee group has no advance of its own");
+    if (!isAmount(amount) || compareAmounts(amount, "0") <= 0) {
+      throw new InvalidLineAdvance(`${JSON.stringify(advance)} is not an amount above zero`);
+    }
+    if (letter.advanceRequired) throw new OneKindOfAdvance("letter");
+    return amount;
+  }
+
+  /**
+   * When a recurring fee is invoiced (0319), as it will be stored. A timing
+   * only for a fee billed per period; a date with "on_date" and only with it.
+   * `kept` is a value already on the row being carried through an edit of
+   * something else: when the frequency stopped being one billed per period it
+   * is cleared rather than refused, because nobody asked to change it.
+   */
+  private timingOrThrow(
+    frequency: string | null,
+    timing: string | null | undefined,
+    on: string | null | undefined,
+    kept = false,
+  ): { billingTiming: LetterBillingTiming | null; billingOn: string | null } {
+    if (timing === undefined || timing === null || timing.trim() === "") {
+      if (on !== undefined && on !== null && on.trim() !== "") {
+        throw new InvalidLetterBillingTiming("a first invoice date needs the timing \"on_date\"");
+      }
+      return { billingTiming: null, billingOn: null };
+    }
+    if (!isLetterBillingTiming(timing)) throw new InvalidLetterBillingTiming(`${JSON.stringify(timing)} is not one`);
+    if (!TIMED_FREQUENCIES.includes(frequency ?? "")) {
+      if (kept) return { billingTiming: null, billingOn: null };
+      throw new InvalidLetterBillingTiming(`a ${frequency ?? "frequency-less"} fee is not billed per period`);
+    }
+    if (timing === "on_date") {
+      if (on === undefined || on === null || !isDay(on)) {
+        throw new InvalidLetterBillingTiming("\"on_date\" needs \"billingOn\", a calendar day");
+      }
+      return { billingTiming: timing, billingOn: on };
+    }
+    if (on !== undefined && on !== null && on.trim() !== "") {
+      throw new InvalidLetterBillingTiming(`a date goes with "on_date" only, not ${JSON.stringify(timing)}`);
+    }
+    return { billingTiming: timing, billingOn: null };
   }
 
   private statedBillingFrequency(raw: string | undefined): BillingFrequency | null {
@@ -1618,6 +1748,11 @@ export class EngagementService {
         : null;
       if (required && amount === null) throw new AdvanceAmountRequired();
       if (amount !== null && !isAmount(amount)) throw new InvalidAmount("advance amount", amount);
+      // One kind of advance per letter (0320).
+      if (required && !letter.advanceRequired) {
+        const lines = await this.deps.letters.listLines(input.tenantId, letter.id);
+        if (lines.some((l) => l.advanceAmount !== null)) throw new OneKindOfAdvance("services");
+      }
       change.advanceRequired = required;
       change.advanceAmount = amount;
     }
@@ -1792,6 +1927,21 @@ export class EngagementService {
       billingFrequency = this.statedBillingFrequency(input.billingFrequency);
     }
 
+    const timingSent = input.billingTiming !== undefined || input.billingOn !== undefined;
+    const timing = this.timingOrThrow(
+      billingFrequency,
+      timingSent ? input.billingTiming : current.billingTiming,
+      timingSent ? input.billingOn : current.billingOn,
+      !timingSent,
+    );
+    // Its own advance (0320): kept unless sent; a grouped line never has one.
+    const advanceAmount =
+      input.advanceAmount === undefined
+        ? current.feeGroupId === null
+          ? current.advanceAmount
+          : null
+        : this.lineAdvanceOrThrow(letter, current.feeGroupId, input.advanceAmount);
+
     const override = (next: string | null | undefined, now: string | null): string | null =>
       next === undefined ? now : blankToNull(next ?? undefined);
     const oopEstimate =
@@ -1808,6 +1958,9 @@ export class EngagementService {
       effectiveFrom,
       jurisdiction,
       billingFrequency,
+      billingTiming: timing.billingTiming,
+      billingOn: timing.billingOn,
+      advanceAmount,
       scopeOverride: override(input.scopeOverride, current.scopeOverride),
       clientObligationsOverride: override(
         input.clientObligationsOverride,
@@ -2117,6 +2270,18 @@ export class EngagementService {
     // `canTransition` check here would be unreachable.
     const letter = await this.editableOrThrow(tenantId, letterId);
     await this.requireCompleteTerms(tenantId, letterId);
+    // AND SOMETHING TO SAY (CA#2, audit 2026-10-03). Checked here and not in
+    // `requireCompleteTerms`, which also computes the hash a signature is
+    // verified against: a letter already out with an empty cover must still
+    // sign. Only the Annexure letter has a cover page; the classic layout is
+    // never drafted (0083). Not for a MIGRATED letter (T6.12): the import
+    // records one the client already signed on paper, nobody is sent its
+    // cover, and a new firm's first import has no standard opening yet.
+    if (letter.layout === "annexure" && options.migrated !== true) {
+      const blocks = await this.deps.documents.listBlocks(tenantId, { kind: "engagement_letter", id: letterId });
+      const says = blocks.some((b) => b.kind === "cover" && !b.isHeading && b.body.trim() !== "");
+      if (!says) throw new LetterHasNoBody();
+    }
     // THE DATE ON THE LETTER, when the drafter left it blank: the caller's
     // today, or the firm's. It was Greenwich's, which dated a letter sent at
     // 01:00 in Delhi the day before it went out. Settled before anything is
@@ -2443,7 +2608,7 @@ export class EngagementService {
           tenantId,
           letterId: letter.id,
           partyId: letter.partyId,
-          title: `${letter.ref} — signed by ${request.signer.name}`,
+          title: `${letter.ref}: signed by ${request.signer.name}`,
           which: "signed",
           document: copies.signed,
         });
@@ -2451,7 +2616,7 @@ export class EngagementService {
           tenantId,
           letterId: letter.id,
           partyId: letter.partyId,
-          title: `${letter.ref} — ${dispatch.method} certificate of completion`,
+          title: `${letter.ref}: ${dispatch.method} certificate of completion`,
           which: "certificate",
           document: copies.certificate,
         });
@@ -2609,13 +2774,12 @@ export class EngagementService {
     // engagement the letter creates.
     //
     // The DATE gate is deliberately not a second status. `active` means the
-    // commercial gates are open — signed, and paid when an advance was
-    // required; whether work has STARTED is `effectiveFrom` against the
-    // calendar, reported as `pending_start` by `engagementState`. Storing that
-    // as a status would need something to move the row on the day, and nothing
-    // here runs on a timer: a state nothing can leave is worse than a date
-    // nothing has reached. See migration 0022.
-    const releasedNow = mayActivate(letter);
+    // commercial gate is open — signed (since 0322 the advance holds nothing);
+    // whether work has STARTED is `effectiveFrom` against the calendar,
+    // reported as `pending_start` by `engagementState`. Storing that as a
+    // status would need something to move the row on the day, and nothing here
+    // runs on a timer: a state nothing can leave is worse than a date nothing
+    // has reached. See migration 0022.
     // BOTH parties, and from different places on purpose. The CLIENT comes from
     // the letter — it is who the firm is billing, and it is the same for every
     // line. The ENTITY comes from the LINE, because an engagement is
@@ -2629,8 +2793,10 @@ export class EngagementService {
       engagementLetterLineId: line.id,
       partyId: letter.partyId,
       entityPartyId: line.entityPartyId,
-      status: releasedNow ? ("active" as const) : ("pending_advance" as const),
-      activatedAt: releasedNow ? at : null,
+      // Every engagement starts active (0322): the advance, the letter's or a
+      // service's own, is drafted and chased, and holds no work.
+      status: "active" as const,
+      activatedAt: at,
       effectiveFrom: resolveEffectiveFrom(
         line.effectiveFrom,
         letter.effectiveFrom,
@@ -2682,16 +2848,85 @@ export class EngagementService {
       },
     });
 
-    // One `contract.activated` per engagement that is actually released — the
-    // scheduler consumes these from T2.4, and an engagement waiting on an
-    // advance must not produce one.
+    // One `contract.activated` per engagement — the scheduler consumes these
+    // from T2.4, and spawns the work the letter agreed (0322: at once).
     for (const engagement of result.engagements) {
       if (engagement.status === "active") await this.recordActivation(engagement, actor);
+    }
+    // The letter's billing terms, for the work that started today.
+    await this.scheduleGoLive(
+      input.tenantId,
+      result.engagements.filter((e) => e.status === "active").map((e) => e.id),
+      signatureDay,
+      actor,
+    );
+    // The advance (0320, 0322): a bill, and its tax invoice drafted at once.
+    if (letter.advanceRequired || lines.some((l) => l.advanceAmount !== null)) {
+      await this.billAdvances(input.tenantId, letter.id, actor);
+    }
+    // The filings the work owes, on the calendar now rather than tonight
+    // (CA#24): "Nothing is on the calendar" right after signing was untrue.
+    if (result.engagements.some((e) => e.status === "active")) {
+      await this.fillCalendar(input.tenantId, actor);
     }
     return {
       letter: result.letter,
       engagements: await this.withState(input.tenantId, result.engagements),
     };
+  }
+
+  /**
+   * Ask the billing desk for the advance bill(s) a signed letter owes and
+   * their draft invoices (0320, 0322). After the signature is committed and
+   * never undoing it, for the reason `scheduleGoLive` gives: if it fails, the
+   * daily catch-up writes and drafts it, and the work has started either way.
+   */
+  private async billAdvances(tenantId: string, letterId: string, actor: Actor): Promise<void> {
+    const billing = this.deps.advanceBilling ?? null;
+    if (billing === null) return;
+    try {
+      await billing.billAdvances({ tenantId, letterId }, actor);
+    } catch {
+      // Deliberately swallowed: see above.
+    }
+  }
+
+  /**
+   * Ask the compliance calendar to fill itself for work that went live
+   * (CA#24). After the signature is committed and never undoing it, for
+   * `scheduleGoLive`'s reason: if it fails, the nightly sweep fills it.
+   */
+  private async fillCalendar(tenantId: string, actor: Actor): Promise<void> {
+    const calendar = this.deps.calendar ?? null;
+    if (calendar === null) return;
+    try {
+      await calendar.fillCalendar(tenantId, actor);
+    } catch {
+      // Deliberately swallowed: see above.
+    }
+  }
+
+  /**
+   * Ask the billing desk to schedule the engagements that went live on
+   * `liveOn` (0319). AFTER the signature or the advance is committed, and it
+   * never undoes either: if it fails, those engagements are simply not
+   * scheduled and wait on "Billing not set up", which is the state a person
+   * already deals with. A failed bill schedule must not read as a failed
+   * signature, which the client has already given.
+   */
+  private async scheduleGoLive(
+    tenantId: string,
+    engagementIds: readonly string[],
+    liveOn: string,
+    actor: Actor,
+  ): Promise<void> {
+    const billing = this.deps.goLiveBilling ?? null;
+    if (billing === null || engagementIds.length === 0) return;
+    try {
+      await billing.scheduleActivated({ tenantId, engagementIds, liveOn }, actor);
+    } catch {
+      // Deliberately swallowed: see above. The engagements stay unscheduled.
+    }
   }
 
   /**
@@ -2772,43 +3007,38 @@ export class EngagementService {
   }
 
   /**
-   * Record the advance, and release everything waiting on it.
-   *
-   * THE HONEST LIMIT, stated where somebody will read it: a person asserts the
-   * money arrived, because billing (T3.4) and payments (T3.5) do not exist yet.
-   * The GATE is real — no advance, no `contract.activated`, no jobs — but its
-   * confirmation is an attestation until the payments module can replace it.
+   * WORK SIGNED BEFORE 0322 THAT STILL WAITS ON ITS ADVANCE STARTS (the user,
+   * 2026-10-02: the letters stuck at deploy get "kaam shuru + draft"). The
+   * billing catch-up calls this, then drafts the advance. Each engagement
+   * records its `contract.activated` (the scheduler spawns its work) and its
+   * billing is scheduled from today: billing from the signature would bill
+   * months nobody worked. `status = 'pending_advance'` in the write is the
+   * lock, so a second call starts nothing and records nothing.
    */
-  async recordAdvance(
-    tenantId: string,
-    letterId: string,
-    recordedByUserId: string,
-    actor: Actor,
-  ): Promise<{ letter: EngagementLetter; released: readonly EngagementRecord[] }> {
+  async startWaitingWork(tenantId: string, letterId: string, actor: Actor): Promise<{ readonly started: number }> {
     const letter = await this.findOrThrow(tenantId, letterId);
-    if (!letter.advanceRequired) throw new AdvanceNotRequired();
-    if (letter.advanceRecordedAt !== null) {
-      throw new AdvanceAlreadyRecorded(letter.advanceRecordedAt);
-    }
-
+    const waiting = (await this.deps.letters.listEngagements(tenantId, letterId))
+      .filter((e) => e.status === "pending_advance")
+      .map((e) => e.id);
+    if (waiting.length === 0) return { started: 0 };
     const at = this.deps.clock.now().toISOString();
-    const result = await this.deps.letters.recordAdvance(tenantId, letterId, recordedByUserId, at);
-
+    const released = await this.deps.letters.releaseEngagements(tenantId, waiting, at);
+    if (released.length === 0) return { started: 0 };
     await this.deps.events.recordEvent({
       tenantId,
-      verb: "engagement_letter.advance_recorded",
+      verb: "engagement_letter.work_started_before_advance",
       objectId: letter.id,
       actor,
-      payload: {
-        partyId: letter.partyId,
-        amount: letter.advanceAmount,
-        currency: letter.currency,
-        recordedByUserId,
-        releasedEngagements: result.released.length,
-      },
+      payload: { partyId: letter.partyId, startedEngagements: released.length },
     });
-    for (const engagement of result.released) await this.recordActivation(engagement, actor);
-    return { letter: result.letter, released: await this.withState(tenantId, result.released) };
+    for (const engagement of released) await this.recordActivation(engagement, actor);
+    await this.scheduleGoLive(
+      tenantId,
+      released.map((e) => e.id),
+      await this.firmDay(tenantId),
+      actor,
+    );
+    return { started: released.length };
   }
 
   /**
@@ -2831,8 +3061,8 @@ export class EngagementService {
    * back down — more typing than it saved.
    *
    * EVERY engagement comes back, including the ones that cannot be billed yet:
-   * `pending_advance` means the letter asked for an advance nobody has
-   * recorded. Filtering them out here would leave a screen unable to explain
+   * `pending_advance` means work signed before 0322 that still waits on its
+   * advance. Filtering them out here would leave a screen unable to explain
    * why a service the client signed for is missing from the picker, which is
    * the blank-versus-absent failure this codebase has now paid for several
    * times. The caller decides what to OFFER; this says what is true.
@@ -3016,7 +3246,7 @@ function signerOrThrow(signer: SignatureSigner | undefined): SignatureSigner {
   const email = signer?.email.trim().toLowerCase() ?? "";
   if (name === "") {
     throw new SignatureIncomplete(
-      "the name of the person DocuSign should ask to sign, in signer.name — the client's " +
+      "the name of the person DocuSign should ask to sign, in signer.name: the client's " +
         "signatory, as the envelope will address them",
     );
   }

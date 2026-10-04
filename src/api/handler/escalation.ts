@@ -76,6 +76,11 @@ const EscalationRowSchema = z
     daysPast: z.number().int().openapi({
       description: "How far past the watched date it was on the day this fired.",
     }),
+    daysPastNow: z.number().int().openapi({
+      description:
+        "How far past the watched date it is TODAY, on the firm's calendar: `daysPast` plus " +
+        "the days since `raisedOn`. What a screen shows as days late.",
+    }),
     target: Target,
     raisedToUserId: z.string().uuid().nullable(),
     raisedTo: Person.nullable().openapi({
@@ -198,7 +203,7 @@ export function registerEscalationRoutes(app: OpenAPIHono<AppEnv>, deps: Escalat
 }
 
 function toWire(
-  r: EscalationRecord,
+  r: EscalationRecord & { readonly daysPastNow: number },
   labels: ReadonlyMap<string, string>,
 ): z.infer<typeof EscalationRowSchema> {
   return {
@@ -213,6 +218,7 @@ function toWire(
     watch: r.watch as "work_item_due" | "work_item_unassigned" | "obligation_target",
     afterDays: r.afterDays,
     daysPast: r.daysPast,
+    daysPastNow: r.daysPastNow,
     target: r.target as "assignee" | "manager" | "grade_at_least",
     raisedToUserId: r.raisedToUserId,
     raisedTo: r.raisedTo,

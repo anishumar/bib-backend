@@ -25,9 +25,17 @@ import type { ClientImportService, UploadedSheet } from "../../usecase/clientimp
 import { errorResponse, z } from "../openapi";
 import type { AppEnv } from "../guards";
 import { scopeOf } from "../scope";
+import type { AuthzService } from "../../usecase/authz/service";
+import type { Principal } from "../../platform/callctx";
 
 export interface ClientImportDeps {
   readonly service: ClientImportService;
+  /**
+   * The FEE AXIS only (B50, audit 2026-10-03): the report shows each letter
+   * line's fee, null for an administrator who does not see fees. Gate 3 is
+   * middleware.
+   */
+  readonly authz: AuthzService;
 }
 
 // ── Wire schemas ─────────────────────────────────────────────────────────────
@@ -75,7 +83,9 @@ const LetterLinePlanSchema = z
     serviceVersionId: z.string().uuid(),
     startedOn: z.string(),
     billingFrequency: z.string(),
-    unitAmount: z.string().nullable(),
+    unitAmount: z.string().nullable().openapi({
+      description: "The line's fee from the sheet. Null when the sheet gave none, and null for a login that does not see fees.",
+    }),
     jurisdiction: z.string().nullable(),
     basis: z.string().nullable(),
   })
@@ -291,7 +301,7 @@ const ImportParam = z.object({ importId: z.string().uuid() });
 
 // ── Mapping ──────────────────────────────────────────────────────────────────
 
-function reportToWire(r: ImportReport): z.infer<typeof ReportSchema> {
+function reportToWire(r: ImportReport, fees: boolean): z.infer<typeof ReportSchema> {
   return {
     findings: r.findings.map((f) => ({ ...f })),
     blocking: r.blocking,
@@ -305,7 +315,21 @@ function reportToWire(r: ImportReport): z.infer<typeof ReportSchema> {
       currency: l.currency,
       effectiveFrom: l.effectiveFrom,
       signatory: l.signatory,
-      lines: l.lines.map((x) => ({ ...x })),
+      // Field by field (B48), and the fee is money (B50).
+      lines: l.lines.map((x) => ({
+        engagementLineNo: x.engagementLineNo,
+        entityLineNo: x.entityLineNo,
+        entityPartyId: x.entityPartyId,
+        entityName: x.entityName,
+        serviceCode: x.serviceCode,
+        serviceName: x.serviceName,
+        serviceVersionId: x.serviceVersionId,
+        startedOn: x.startedOn,
+        billingFrequency: x.billingFrequency,
+        unitAmount: fees ? x.unitAmount : null,
+        jurisdiction: x.jurisdiction,
+        basis: x.basis,
+      })),
     })),
     portalInvites: r.portalInvites.map((p) => ({ ...p })),
     counts: { ...r.counts },
@@ -332,12 +356,12 @@ function outcomeToWire(o: ImportOutcome): z.infer<typeof OutcomeSchema> {
   };
 }
 
-function toWire(s: StagedImport): z.infer<typeof ClientImportSchema> {
+function toWire(s: StagedImport, fees: boolean): z.infer<typeof ClientImportSchema> {
   return {
     id: s.id,
     status: s.status,
     fileNames: { ...s.fileNames },
-    report: reportToWire(s.report),
+    report: reportToWire(s.report, fees),
     outcome: s.outcome === null ? null : outcomeToWire(s.outcome),
     stagedBy: { ...s.stagedBy },
     stagedAt: s.stagedAt,
@@ -462,6 +486,9 @@ const confirmRoute = createRoute({
 });
 
 export function registerClientImportRoutes(app: OpenAPIHono<AppEnv>, deps: ClientImportDeps): void {
+  const seesFees = (principal: Principal | null): boolean =>
+    principal !== null && deps.authz.seesFees(principal);
+
   app.openapi(stageRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
@@ -478,7 +505,7 @@ export function registerClientImportRoutes(app: OpenAPIHono<AppEnv>, deps: Clien
       { tenantId: s.tenantId, stagedBy: s.userId, clients, people, engagements },
       s.actor,
     );
-    return c.json(toWire(staged), 201);
+    return c.json(toWire(staged, seesFees(c.get("principal"))), 201);
   });
 
   app.openapi(listRoute, async (c) => {
@@ -511,7 +538,7 @@ export function registerClientImportRoutes(app: OpenAPIHono<AppEnv>, deps: Clien
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const found = await deps.service.get(s.tenantId, c.req.valid("param").importId);
-    return c.json(toWire(found), 200);
+    return c.json(toWire(found, seesFees(c.get("principal"))), 200);
   });
 
   app.openapi(confirmRoute, async (c) => {
@@ -521,7 +548,7 @@ export function registerClientImportRoutes(app: OpenAPIHono<AppEnv>, deps: Clien
       { tenantId: s.tenantId, importId: c.req.valid("param").importId, confirmedBy: s.userId },
       s.actor,
     );
-    return c.json(toWire(confirmed), 200);
+    return c.json(toWire(confirmed, seesFees(c.get("principal"))), 200);
   });
 }
 

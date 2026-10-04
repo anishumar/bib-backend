@@ -275,6 +275,8 @@ function probeValueFor(column: ColumnRow, currentlyNull: boolean): string {
       return `'2001-02-03T04:05:06+00'::${column.type}`;
     case "U":
       if (column.type === "uuid") return `'11111111-1111-4111-8111-111111111111'::uuid`;
+      // `printed_parties` (0334): what the letter printed, frozen with it.
+      if (column.type === "jsonb") return `'{"probe": true}'::jsonb`;
       break;
     default:
       break;
@@ -569,8 +571,25 @@ describe("and EVERY child of a signed letter is frozen, not just the ones we rem
    * the freeze lands. Nothing in it is evidence of the agreement: the envelope
    * id that IS evidence is copied onto the letter's own frozen
    * `signature_reference` at signature.
+   *
+   * `crm.recorded_acceptance` (0317) is the third, for the same reason as the
+   * second: it is how the client's yes was OBTAINED when it came by email or on
+   * a call, not a term of what they agreed to. It is written inside the very
+   * transaction that signs the letter (`signAndFanOut`), so a freeze on it
+   * would refuse the act of signing the way it would for `crm.engagement`. And
+   * it needs no trigger to stay put: it is append-only by GRANT (`bib_app`
+   * holds SELECT and INSERT only), which binds every writer a trigger would.
+   *
+   * `crm.billing_due` (0320) is the fourth, and it is the first's kind: what
+   * the letter CAUSED. An advance bill names its letter because the letter's
+   * advance is what it bills, and it can only exist AFTER the signature (it is
+   * written when the letter is signed); a freeze would refuse it the moment it
+   * is due. Nothing in it is a term: the advance's amount is copied from the
+   * letter's own frozen columns, and the bill's settlement (raised, covered,
+   * released) is what must move. What a person may change on it is limited by
+   * a column GRANT, as 0318 set for every bill.
    */
-  const NOT_TERMS = ["crm.engagement", "crm.letter_signature_request"];
+  const NOT_TERMS = ["crm.engagement", "crm.letter_signature_request", "crm.recorded_acceptance", "crm.billing_due"];
 
   it("finds no child table of an engagement letter without the freeze trigger", async () => {
     const unguarded = await owner<{ table: string }[]>`

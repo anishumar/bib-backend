@@ -89,11 +89,11 @@ export interface AppEnv {
  *   · being in this set puts it in the tight rate-limit bucket automatically —
  *     see the note in router.ts, which derives that bucket from this list
  */
-export const PUBLIC_PATHS: ReadonlySet<string> = new Set([
-  "/api/v1/auth/login",
-  "/api/v1/auth/magic-link",
-  "/api/v1/auth/magic-link/redeem",
-  "/api/v1/proposals/shared",
+export const PUBLIC_ROUTES: ReadonlySet<string> = new Set([
+  "POST /api/v1/auth/login",
+  "POST /api/v1/auth/magic-link",
+  "POST /api/v1/auth/magic-link/redeem",
+  "POST /api/v1/proposals/shared",
   // ── THE FIFTH, and it earns its place the way the fourth did ─────────────
   //
   // Everything else on this list exists to OBTAIN a session, and so does this:
@@ -116,7 +116,7 @@ export const PUBLIC_PATHS: ReadonlySet<string> = new Set([
   // entry needs an argument at least this good, and
   // `tests/api/auth-coverage.test.ts` holds the build red until somebody writes
   // one.
-  "/api/v1/portal-invites/accept",
+  "POST /api/v1/portal-invites/accept",
   // ── THE SIXTH AND SEVENTH, AND THEY ARE ONE ARGUMENT (0082) ──────────────
   //
   // The forgotten-password pair. They are here because of what the product
@@ -152,8 +152,8 @@ export const PUBLIC_PATHS: ReadonlySet<string> = new Set([
   // right. An eighth entry needs an argument at least this good, and
   // `tests/api/auth-coverage.test.ts` holds the build red until somebody
   // writes one.
-  "/api/v1/auth/password-reset",
-  "/api/v1/auth/password-reset/confirm",
+  "POST /api/v1/auth/password-reset",
+  "POST /api/v1/auth/password-reset/confirm",
   // ── THE EIGHTH AND NINTH: THE CLIENT ANSWERS THE PROPOSAL (0085) ─────────
   //
   // Decided 2026-09-26 (user): bib emails the proposal and the client accepts
@@ -184,9 +184,28 @@ export const PUBLIC_PATHS: ReadonlySet<string> = new Set([
   //     email and PDF, the address and browser, in an erasable row — and the
   //     firm's own colleague still records answers given any other way.
   // A tenth entry needs an argument at least this good.
-  "/api/v1/proposals/shared/answer",
-  "/api/v1/proposals/shared/pdf",
+  "POST /api/v1/proposals/shared/answer",
+  "POST /api/v1/proposals/shared/pdf",
 ]);
+
+/**
+ * The PATHS of the public routes, for the rate limiter's tight bucket, which is
+ * keyed by path (a public path's bucket is tight whatever the method). The
+ * session guard does NOT use this: it asks `isPublicRoute`, method and path.
+ */
+export const PUBLIC_PATHS: ReadonlySet<string> = new Set(
+  [...PUBLIC_ROUTES].map((key) => key.slice(key.indexOf(" ") + 1)),
+);
+
+/**
+ * Whether a request may skip the session guard: its METHOD and its path
+ * (B49, audit 2026-10-03). The list was matched on the path alone, so any
+ * method to a public path was exempt; a GET added beside a public POST would
+ * have been public without anybody deciding it. Every entry is a POST today.
+ */
+export function isPublicRoute(method: string, path: string): boolean {
+  return PUBLIC_ROUTES.has(`${method.toUpperCase()} ${path}`);
+}
 
 /**
  * The routes a CLIENT_PORTAL session may reach. Everything else on /api/v1 is
@@ -433,7 +452,7 @@ export function internalGuard(clients: readonly InternalClient[]): MiddlewareHan
  */
 export function sessionGuard(principalOf: PrincipalResolver): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
-    if (PUBLIC_PATHS.has(c.req.path)) {
+    if (isPublicRoute(c.req.method, c.req.path)) {
       c.set("principal", null);
       c.set("internalClient", null);
       await next();
@@ -496,7 +515,7 @@ function constantTimeEquals(a: Buffer, b: Buffer): boolean {
  */
 export function permissionGuard(authz: AuthzService): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
-    if (PUBLIC_PATHS.has(c.req.path)) {
+    if (isPublicRoute(c.req.method, c.req.path)) {
       await next();
       return undefined;
     }

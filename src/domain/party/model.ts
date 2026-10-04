@@ -4,6 +4,8 @@
 // RELATIONSHIPS between parties, never separate tables.
 
 import { isValidPhone, normalizePhone } from "./phone";
+import { isCalendarDay } from "../day";
+import type { PostalAddress } from "./address";
 
 export type PartyKind = "organization" | "person";
 
@@ -34,6 +36,12 @@ export interface Party {
    * the party module's to decide.
    */
   readonly isOwnCompany: boolean;
+  /**
+   * Where this party is billed (0334, audit 2026-10-03, CA#22): the lines an
+   * invoice's "Billed to" prints, the state, the postal code and the country.
+   * Null when none is recorded.
+   */
+  readonly billingAddress: PostalAddress | null;
 }
 
 export interface Organization {
@@ -246,5 +254,30 @@ export function isValidDateRange(validFrom: string, validTo: string | null): boo
 }
 
 export function isIsoDate(s: string): boolean {
-  return /^\d{4}-\d{2}-\d{2}$/.test(s);
+  // A day that EXISTS, not just the shape (audit 2026-10-03, B43): 2026-13-45
+  // passed the shape and reached Postgres as an unmapped 22008, a 500.
+  return isCalendarDay(s);
+}
+
+/**
+ * Whether a relationship can be true of these two kinds of party, this way
+ * round (CA#53). Only the plainly impossible is refused: nobody is a director
+ * or a shareholder OF a person, only a person is somebody's employee or
+ * authorised signatory, and a parent and its subsidiary are both companies. A
+ * company as a director stays allowed, because some countries allow it. A code
+ * this table does not know (the product's list is open) fits either way.
+ */
+export function relationshipFits(type: string, fromKind: PartyKind, toKind: PartyKind): boolean {
+  switch (type) {
+    case "director_of":
+    case "shareholder_of":
+      return toKind === "organization";
+    case "employee_of":
+    case "authorised_signatory_of":
+      return fromKind === "person";
+    case "parent_of":
+      return fromKind === "organization" && toKind === "organization";
+    default:
+      return true;
+  }
 }

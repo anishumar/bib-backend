@@ -20,6 +20,9 @@ import type {
   BillingWindowDays,
   CompanyMonthRow,
   DashboardRepository,
+  ManagerMonthRow,
+  ManagerName,
+  ManagerOwedRow,
   MrrTotals,
   ReceivableTotals,
 } from "../../usecase/dashboard/ports";
@@ -116,7 +119,7 @@ export class PostgresDashboardRepository implements DashboardRepository {
     });
   }
 
-  async receivables(tenantId: string): Promise<ReceivableTotals> {
+  async receivables(tenantId: string, day: string): Promise<ReceivableTotals> {
     return withTenant(this.app, tenantId, async (db) => {
       // GROUPING SETS, so the per-bucket rows AND the grand total come from ONE
       // pass over the view. Two queries could disagree if a payment landed
@@ -127,7 +130,7 @@ export class PostgresDashboardRepository implements DashboardRepository {
         SELECT bucket,
                COALESCE(sum(outstanding_reporting), 0)::text AS total,
                count(*)::text                                AS n
-        FROM crm.receivable_ageing
+        FROM crm.receivable_ageing_on(${day}::date)
         GROUP BY GROUPING SETS ((bucket), ())
       `;
       const byBucket = new Map(
@@ -153,14 +156,14 @@ export class PostgresDashboardRepository implements DashboardRepository {
     });
   }
 
-  async receivablesByClient(tenantId: string): Promise<readonly Slice[]> {
+  async receivablesByClient(tenantId: string, day: string): Promise<readonly Slice[]> {
     return withTenant(this.app, tenantId, async (db) => {
       const rows = await db<{ key: string; label: string; total: string; n: string }[]>`
         SELECT a.party_id       AS key,
                p.display_name   AS label,
                sum(a.outstanding_reporting)::text AS total,
                count(*)::text   AS n
-        FROM crm.receivable_ageing a
+        FROM crm.receivable_ageing_on(${day}::date) a
         JOIN core.party p ON p.id = a.party_id
         GROUP BY 1, 2
         ORDER BY sum(a.outstanding_reporting) DESC
@@ -169,7 +172,7 @@ export class PostgresDashboardRepository implements DashboardRepository {
     });
   }
 
-  async creditSales(tenantId: string, sinceDays: number): Promise<string> {
+  async creditSales(tenantId: string, sinceDays: number, day: string): Promise<string> {
     return withTenant(this.app, tenantId, async (db) => {
       // ONE query, and the subtraction happens in SQL. Fetching gross and
       // credits separately and subtracting in TypeScript would be the same
@@ -196,7 +199,8 @@ export class PostgresDashboardRepository implements DashboardRepository {
         JOIN crm.invoice_totals t ON t.invoice_id = i.id AND t.tenant_id = i.tenant_id
         WHERE i.status NOT IN ('draft', 'cancelled')
           AND i.issued_on IS NOT NULL
-          AND i.issued_on >= CURRENT_DATE - ${sinceDays}::int
+          AND i.issued_on >= ${day}::date - ${sinceDays}::int
+          AND i.issued_on <= ${day}::date
       `;
       return row?.total ?? "0";
     });
@@ -315,6 +319,133 @@ export class PostgresDashboardRepository implements DashboardRepository {
         invoices: r.invoices,
         otherCurrencyInvoices: r.other_invoices,
       }));
+    });
+  }
+
+  async billingByManager(
+    tenantId: string,
+    window: BillingWindowDays,
+  ): Promise<readonly ManagerMonthRow[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // BILLED is `billingByMonth`'s, document for document, and rounded the
+      // same way (the credit note's pre-tax share to four places, then each
+      // document converted and rounded again), so the managers of a month add
+      // up to the "All companies" figure to the paisa. COLLECTED is cash by
+      // `received_on`, with tax, at the invoice's stored rate (a payment is in
+      // the invoice's currency, 0028). Only ISSUED invoices: a draft was
+      // never sent, and a cancelled one leaves every figure, its payments too.
+      //
+      // ONE pass, two grouping sets: (manager, month) and (month) for the whole
+      // firm. `GROUPING(manager)` tells the firm row from the row of invoices
+      // that name nobody, whose manager is also null.
+      const rows = await db<
+        {
+          manager: string | null;
+          whole: number;
+          month: string;
+          billed: string;
+          collected: string;
+          invoices: number;
+        }[]
+      >`
+        WITH docs AS (
+          SELECT i.manager_user_id AS manager,
+                 to_char(i.issued_on, 'YYYY-MM') AS month,
+                 round(coalesce(t.net, 0) * i.fx_rate, 4) AS billed,
+                 0::numeric AS collected,
+                 1 AS invoices
+          FROM crm.invoice i
+          LEFT JOIN crm.invoice_totals t ON t.invoice_id = i.id AND t.tenant_id = i.tenant_id
+          WHERE i.status = 'issued'
+            AND i.issued_on >= ${window.from}::date
+            AND i.issued_on <  ${window.until}::date
+          UNION ALL
+          SELECT i.manager_user_id,
+                 to_char(c.issued_on, 'YYYY-MM'),
+                 round(-round(CASE WHEN coalesce(t.total, 0) = 0 THEN c.amount
+                                   ELSE c.amount * t.net / t.total END, 4) * i.fx_rate, 4),
+                 0,
+                 0
+          FROM crm.credit_note c
+          JOIN crm.invoice i ON i.id = c.invoice_id AND i.tenant_id = c.tenant_id
+          LEFT JOIN crm.invoice_totals t ON t.invoice_id = i.id AND t.tenant_id = i.tenant_id
+          WHERE i.status = 'issued'
+            AND c.issued_on >= ${window.from}::date
+            AND c.issued_on <  ${window.until}::date
+          UNION ALL
+          SELECT i.manager_user_id,
+                 to_char(p.received_on, 'YYYY-MM'),
+                 0,
+                 round(p.amount * i.fx_rate, 4),
+                 0
+          FROM crm.payment p
+          JOIN crm.invoice i ON i.id = p.invoice_id AND i.tenant_id = p.tenant_id
+          WHERE i.status = 'issued'
+            AND p.received_on >= ${window.from}::date
+            AND p.received_on <  ${window.until}::date
+        )
+        SELECT manager,
+               GROUPING(manager)::int        AS whole,
+               month,
+               coalesce(sum(billed), 0)::text    AS billed,
+               coalesce(sum(collected), 0)::text AS collected,
+               sum(invoices)::int            AS invoices
+        FROM docs
+        GROUP BY GROUPING SETS ((manager, month), (month))
+      `;
+      return rows.map((r) => ({
+        scope: r.whole === 1 ? ("firm" as const) : ("manager" as const),
+        managerUserId: r.manager,
+        month: r.month,
+        billed: r.billed,
+        collected: r.collected,
+        invoices: r.invoices,
+      }));
+    });
+  }
+
+  async owedByManager(tenantId: string, day: string): Promise<readonly ManagerOwedRow[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // The rows "Owed to the firm" sums (`receivables`), split by manager:
+      // issued invoices still owed, overpayments left out, each at its stored
+      // rate. The empty grouping set always answers, so a firm owed nothing
+      // gets a total of "0" rather than no row.
+      const rows = await db<{ manager: string | null; whole: number; total: string; n: number }[]>`
+        SELECT i.manager_user_id AS manager,
+               GROUPING(i.manager_user_id)::int AS whole,
+               coalesce(sum(a.outstanding_reporting), 0)::text AS total,
+               count(a.invoice_id)::int AS n
+        FROM crm.receivable_ageing_on(${day}::date) a
+        JOIN crm.invoice i ON i.id = a.invoice_id AND i.tenant_id = a.tenant_id
+        GROUP BY GROUPING SETS ((i.manager_user_id), ())
+      `;
+      return rows.map((r) => ({
+        scope: r.whole === 1 ? ("firm" as const) : ("manager" as const),
+        managerUserId: r.manager,
+        outstanding: r.total,
+        invoices: r.n,
+      }));
+    });
+  }
+
+  async managerNames(tenantId: string, userIds: readonly string[]): Promise<readonly ManagerName[]> {
+    if (userIds.length === 0) return [];
+    return withTenant(this.app, tenantId, async (db) => {
+      // FROM the membership, which is behind the tenant wall: `user_account` is
+      // global (ADR-02), so a name is only given for somebody on THIS firm's
+      // roster. No display name falls back to the email, as the invoice page
+      // already shows a manager's email to the same readers.
+      const rows = await db<{ user_id: string; name: string; active: boolean }[]>`
+        SELECT m.user_id,
+               coalesce(nullif(btrim(u.display_name), ''), u.email::text) AS name,
+               bool_or(m.is_active) AS active
+        FROM tenancy.membership m
+        JOIN tenancy.user_account u ON u.id = m.user_id
+        WHERE m.user_id = ANY(${userIds as string[]}::uuid[])
+          AND m.audience = 'STAFF'
+        GROUP BY m.user_id, u.display_name, u.email
+      `;
+      return rows.map((r) => ({ userId: r.user_id, name: r.name, activeStaff: r.active }));
     });
   }
 

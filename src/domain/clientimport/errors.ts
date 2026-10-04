@@ -33,7 +33,7 @@ export class SheetUnreadable extends ClientImportError {
   constructor(filename: string, why: string) {
     super(
       "SHEET_UNREADABLE",
-      `"${filename}" is not a spreadsheet this reads — ${why}. Upload a .csv or a .xlsx.`,
+      `"${filename}" is not a spreadsheet this reads: ${why}. Upload a .csv or a .xlsx.`,
     );
   }
 }
@@ -43,7 +43,7 @@ export class SheetHeaderMissing extends ClientImportError {
   constructor(filename: string, marker: string) {
     super(
       "SHEET_HEADER_MISSING",
-      `"${filename}" has no header row — no row carries a column called "${marker}". Is this the right sheet?`,
+      `"${filename}" has no header row: no row carries a column called "${marker}". Is this the right sheet?`,
     );
   }
 }
@@ -58,7 +58,7 @@ export class SheetEmpty extends ClientImportError {
 /** The people and engagement sheets are optional; the client sheet is the import. */
 export class ClientSheetRequired extends ClientImportError {
   constructor() {
-    super("CLIENT_SHEET_REQUIRED", 'The "clients" file is required — it is the sheet the other two refer to');
+    super("CLIENT_SHEET_REQUIRED", 'The "clients" file is required: it is the sheet the other two refer to');
   }
 }
 
@@ -72,7 +72,7 @@ export class ClientImportAlreadyConfirmed extends ClientImportError {
   constructor(importId: string, confirmedAt: string) {
     super(
       "CLIENT_IMPORT_ALREADY_CONFIRMED",
-      `Client import ${importId} was confirmed at ${confirmedAt} — upload the sheet again to load anything more`,
+      `Client import ${importId} was confirmed at ${confirmedAt}: upload the sheet again to load anything more`,
     );
   }
 }
@@ -84,8 +84,8 @@ export class ClientImportBlocked extends ClientImportError {
     super(
       "CLIENT_IMPORT_BLOCKED",
       staleSinceStaging
-        ? `The firm's records changed since this sheet was checked and ${String(blocking)} row${blocking === 1 ? "" : "s"} would now be refused — upload it again to see the current report`
-        : `${String(blocking)} blocking finding${blocking === 1 ? "" : "s"} remain${blocking === 1 ? "s" : ""} — fix the sheet and upload it again`,
+        ? `The firm's records changed since this sheet was checked and ${String(blocking)} row${blocking === 1 ? "" : "s"} would now be refused: upload it again to see the current report`
+        : `${String(blocking)} blocking finding${blocking === 1 ? "" : "s"} remain${blocking === 1 ? "s" : ""}: fix the sheet and upload it again`,
     );
   }
 }

@@ -26,6 +26,7 @@ import {
   InvalidSource,
   InvalidLeadJurisdiction,
   InvalidEstimatedValue,
+  InvalidLeadContact,
   InvalidStage,
   LeadClosed,
   LeadNotFound,
@@ -402,7 +403,7 @@ describe("what capture refuses, before it writes anything", () => {
       )
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(AmbiguousMatch);
-    expect((err as Error).message).toContain("2 different parties");
+    expect((err as Error).message).toContain("2 different clients or contacts");
     expect(leads.rows).toHaveLength(2); // nothing new written
   });
 
@@ -1336,6 +1337,20 @@ describe("T2.1b — a territory rule overrides the rotation", () => {
       ),
     ).rejects.toBeInstanceOf(InvalidLeadJurisdiction);
   });
+
+  it("refuses a retired or reserved code, and says which one was meant (F04)", async () => {
+    // The old picker saved DD for the first "Germany" and could save UK, which
+    // the GB rule never matches. Both are two capital letters.
+    const s = firmWithTerritory();
+    const dd = s.service.capture(capture({ jurisdiction: "DD" }), ACTOR);
+    await expect(dd).rejects.toBeInstanceOf(InvalidLeadJurisdiction);
+    await expect(dd).rejects.toThrow(`"DD" is no longer a country code. For Germany, use DE.`);
+    const uk = s.service.setTerritoryRule(
+      { tenantId: TENANT, jurisdiction: "UK", ownerUserId: SPECIALIST },
+      ACTOR,
+    );
+    await expect(uk).rejects.toThrow(`"UK" is not the code for the United Kingdom. Use GB.`);
+  });
 });
 
 describe("the day a captured contact detail is in force from (item 4, 2026-09-25)", () => {
@@ -1453,6 +1468,25 @@ describe("0310 — a lead says where the prospect is and what it could be worth"
     expect(cleared.estimatedValue).toBeNull();
   });
 
+  it("keeps the value when the save does not mention it (B33: a login that cannot see it changes the country)", async () => {
+    const { service, events } = setup();
+    const { lead } = await service.capture(
+      capture({ jurisdiction: "IN", estimatedValue: "100000" }),
+      ACTOR,
+    );
+    const saved = await service.setDetails(
+      { tenantId: TENANT, leadId: lead.id, jurisdiction: "AE", estimatedValue: undefined },
+      ACTOR,
+    );
+    expect(saved.jurisdiction).toBe("AE");
+    expect(saved.estimatedValue).toEqual({ amount: "100000.00", currency: "INR" });
+    expect(events.recorded.at(-1)?.payload).toMatchObject({
+      jurisdictionTo: "AE",
+      estimatedValueFrom: "100000.00",
+      estimatedValueTo: "100000.00",
+    });
+  });
+
   it("refuses a country that is not an upper-case ISO code, and an unknown lead", async () => {
     const { service } = setup();
     const { lead } = await service.capture(capture(), ACTOR);
@@ -1500,5 +1534,93 @@ describe("0310 — a lead says where the prospect is and what it could be worth"
       ACTOR,
     );
     expect(saved.ownerUserId).toBe(STAFF);
+  });
+});
+
+describe("the contact person at a company (CA#20)", () => {
+  // The email typed at capture used to become the COMPANY's identifier, so the
+  // director, recorded later as a person, could not have his own email ("already
+  // exists for this tenant"). With a contact named, the email and phone are the
+  // contact's: a person, linked to the company in the role given. The company
+  // keeps what is the company's (PAN, GSTIN).
+  const CONTACT = { name: "Anil Deshpande", role: "director_of" as const };
+
+  function firm() {
+    const fakes = makeLeadFakes();
+    fakes.staff.add(TENANT, STAFF);
+    return { fakes, service: new LeadService(fakes) };
+  }
+
+  const withContact = (over: Record<string, unknown> = {}) =>
+    capture({
+      identifiers: [
+        { type: "email" as const, value: EMAIL },
+        { type: "phone" as const, value: PHONE },
+        { type: "pan" as const, value: PAN },
+      ],
+      contact: CONTACT,
+      ...over,
+    });
+
+  it("puts the email and phone on the contact, and the PAN on the company", async () => {
+    const { fakes, service } = firm();
+    const { lead } = await service.capture(withContact(), ACTOR);
+
+    const company = await fakes.party.partyProfile(TENANT, lead.partyId);
+    expect(company.identifiers.map((i) => i.type)).toEqual(["pan"]);
+    const director = company.relationships.find((r) => r.relationship.type === "director_of");
+    expect(director?.direction).toBe("incoming");
+    expect(director?.counterparty.displayName).toBe("Anil Deshpande");
+
+    const person = await fakes.party.partyProfile(TENANT, director?.counterparty.id ?? "");
+    expect(person.party.kind).toBe("person");
+    expect(person.identifiers.map((i) => i.type).sort()).toEqual(["email", "phone"]);
+  });
+
+  it("still finds the company's open lead from the contact's email", async () => {
+    const { service } = firm();
+    const first = await service.capture(withContact(), ACTOR);
+    const again = await service.capture(
+      capture({ identifiers: [{ type: "email" as const, value: EMAIL }], contact: CONTACT, title: "Second ask" }),
+      ACTOR,
+    );
+    expect(again.merged).toBe(true);
+    expect(again.lead.id).toBe(first.lead.id);
+  });
+
+  it("does not make a second person for the same contact", async () => {
+    const { fakes, service } = firm();
+    const { lead } = await service.capture(withContact(), ACTOR);
+    await service.capture(capture({ identifiers: [{ type: "phone" as const, value: PHONE }], contact: CONTACT }), ACTOR);
+    const company = await fakes.party.partyProfile(TENANT, lead.partyId);
+    expect(company.relationships.filter((r) => r.counterparty.kind === "person")).toHaveLength(1);
+  });
+
+  it("keeps the old shape when nobody is named: the details are the company's", async () => {
+    const { fakes, service } = firm();
+    const { lead } = await service.capture(capture(), ACTOR);
+    const company = await fakes.party.partyProfile(TENANT, lead.partyId);
+    expect(company.identifiers.map((i) => i.type).sort()).toEqual(["email", "pan"]);
+  });
+
+  it("refuses a contact for a PERSON prospect, and a role that is not a contact's", async () => {
+    const { service } = firm();
+    await expect(
+      service.capture(withContact({ kind: "person", name: "Meera Joshi" }), ACTOR),
+    ).rejects.toBeInstanceOf(InvalidLeadContact);
+    await expect(
+      service.capture(withContact({ contact: { name: "Anil", role: "parent_of" } }), ACTOR),
+    ).rejects.toBeInstanceOf(InvalidLeadContact);
+    await expect(
+      service.capture(withContact({ contact: { name: "  ", role: "director_of" } }), ACTOR),
+    ).rejects.toBeInstanceOf(InvalidLeadContact);
+  });
+
+  it("records THAT a contact was named, never who", async () => {
+    const { fakes, service } = firm();
+    await service.capture(withContact(), ACTOR);
+    const captured = fakes.events.recorded.find((e) => e.verb === "lead.captured");
+    expect(captured?.payload).toMatchObject({ contactRecorded: true });
+    expect(JSON.stringify(captured?.payload)).not.toContain("Anil");
   });
 });

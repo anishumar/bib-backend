@@ -29,6 +29,7 @@ import { Sha256ByteDigest } from "../../src/infrastructure/storage/filesystem-bl
 import { PdfLibRenderer } from "../../src/infrastructure/render/pdf-renderer";
 import { LedgerService } from "../../src/usecase/ledger/service";
 import { InvoiceService } from "../../src/usecase/invoice/service";
+import { PostgresInvoiceFirmSettings } from "../../src/infrastructure/postgres/invoice-settings";
 import { FileStoreService } from "../../src/usecase/filestore/service";
 import { invoiceIssuedCopies } from "../../src/setup/invoice-copies";
 import { FakeBlobStore } from "../../src/testfakes/filestore";
@@ -37,6 +38,7 @@ import { systemIds } from "../../src/platform/ids";
 import { systemClock } from "../../src/platform/clock";
 import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
 import type { Logger } from "../../src/platform/log";
+import { FakeStaffDirectory } from "../../src/testfakes/lead";
 
 const cfg = load();
 const app = postgres(cfg.db.appUrl, { max: 4 });
@@ -74,6 +76,8 @@ const invoices = new InvoiceService({
   clock: systemClock,
   events: ledger,
   issuedCopies: invoiceIssuedCopies(files, log),
+  staff: new FakeStaffDirectory(),
+  settings: new PostgresInvoiceFirmSettings(app),
 });
 
 const stamp = Date.now().toString(36);

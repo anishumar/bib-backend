@@ -33,6 +33,7 @@ import { AcceptanceError } from "../domain/acceptance/errors";
 import { EngagementError } from "../domain/engagement/errors";
 import { InvoiceError } from "../domain/invoice/errors";
 import { DocumentError } from "../domain/document/errors";
+import { BillingError } from "../domain/billing/errors";
 import { FileStoreError } from "../domain/filestore/errors";
 import { RenderError } from "../domain/render/errors";
 
@@ -116,6 +117,8 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_DISPLAY_NAME":
       case "INVALID_CURRENCY":
       case "INVALID_AUDIENCE":
+      case "INVALID_TIME_ZONE":
+      case "INVALID_COUNTRY":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       case "SLUG_TAKEN":
       case "EMAIL_TAKEN":
@@ -369,6 +372,7 @@ export function mapError(err: unknown): MappedError {
       case "CONFLICTING_STATE_FLAGS":
       case "LAST_INITIAL_STATE":
       case "LAST_DESTINATION_STATE":
+      case "FILING_NOT_LINKABLE":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
@@ -601,6 +605,9 @@ export function mapError(err: unknown): MappedError {
       case "CONFLICTING_STATE_FLAGS":
       case "BLOCK_REASON_REQUIRED":
       case "REVIEW_REJECTION_NEEDS_NOTE":
+      case "REVIEW_RULE_NEEDED":
+      case "NOTE_REQUIRED":
+      case "NOTE_TOO_LONG":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       case "WORK_ITEM_NOT_FOUND":
       case "ROUTING_LETTER_NOT_FOUND":
@@ -642,6 +649,7 @@ export function mapError(err: unknown): MappedError {
       case "DEPENDENCY_EXISTS":
       case "REVIEW_ALREADY_OPEN":
       case "REVIEW_ALREADY_DECIDED":
+      case "CHECKLIST_OPEN": // a line on the task's own list is open (CA#30)
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
@@ -664,6 +672,7 @@ export function mapError(err: unknown): MappedError {
       case "RELATIONSHIP_ALREADY_ENDED":
       case "IDENTIFIER_CLOSED":
       case "NOT_A_LEGAL_ENTITY":
+      case "ALREADY_REGISTERED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       case "NOT_AN_ORGANIZATION":
       case "INVALID_PARTY_DETAILS":
@@ -671,6 +680,7 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_IDENTIFIER":
       case "INVALID_IDENTIFIER_TYPE":
       case "INVALID_RELATIONSHIP_TYPE":
+      case "RELATIONSHIP_DOES_NOT_FIT":
       case "INVALID_DATE_RANGE":
       case "RELATIONSHIP_ENDS_BEFORE_IT_BEGAN":
       case "SELF_RELATIONSHIP":
@@ -693,6 +703,7 @@ export function mapError(err: unknown): MappedError {
       case "BLANK_TITLE":
       case "INVALID_LEAD_JURISDICTION":
       case "INVALID_ESTIMATED_VALUE":
+      case "INVALID_LEAD_CONTACT":
       case "NOT_CALLERS_TODAY":
       case "LOST_REASON_REQUIRED":
       case "LOST_REASON_NOT_APPLICABLE":
@@ -765,6 +776,7 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_QUANTITY":
       case "INVALID_UNIT_AMOUNT":
       case "UNPRICED_LINE_NEEDS_REASON":
+      case "SERVICE_HAS_NO_LIST_PRICE":
       case "UNPRICED_LINE_HAS_DISCOUNT":
       case "INVALID_BILLING_FREQUENCY":
       case "INVALID_LINE_JURISDICTION":
@@ -863,8 +875,11 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_JURISDICTION":
       case "INVALID_AMOUNT":
       case "UNPRICED_LINE_NEEDS_REASON":
+      case "SERVICE_HAS_NO_LIST_PRICE":
       case "UNPRICED_LINE_HAS_DISCOUNT":
       case "INVALID_BILLING_FREQUENCY":
+      case "INVALID_BILLING_TIMING":
+      case "INVALID_LINE_ADVANCE":
       case "INVALID_OOP_ESTIMATE":
       case "NOT_A_CLAUSE":
       case "CLAUSE_NOT_PUBLISHED":
@@ -931,9 +946,11 @@ export function mapError(err: unknown): MappedError {
       case "LETTER_NOT_SIGNABLE":
       case "EMPTY_LETTER":
       case "NO_CLAUSES":
+      case "LETTER_HAS_NO_BODY":
       case "INVALID_LETTER_TRANSITION":
       case "ADVANCE_NOT_REQUIRED":
       case "ADVANCE_ALREADY_RECORDED":
+      case "ONE_KIND_OF_ADVANCE":
       case "ENGAGEMENT_NOT_ACTIVE":
       case "ENGAGEMENT_ENDED":
       case "ENGAGEMENT_NOT_PAUSED":
@@ -974,6 +991,10 @@ export function mapError(err: unknown): MappedError {
       case "ISSUER_NOT_A_FIRM_ENTITY":
       case "BILLS_THE_FIRM":
       case "ENGAGEMENT_OF_ANOTHER_CLIENT":
+      case "CREDIT_NOTE_DATE_OUT_OF_RANGE":
+      case "FX_RATE_REQUIRED":
+      case "FX_RATE_NOT_ONE":
+      case "DUE_DATE_IN_THE_PAST":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       case "INVOICE_NOT_FOUND":
       case "INVOICE_LINE_NOT_FOUND":
@@ -989,19 +1010,63 @@ export function mapError(err: unknown): MappedError {
       // that signed the work, and its number is already in that company's
       // series. The fix is another invoice, not another request.
       // ENGAGEMENT_IN_ANOTHER_CURRENCY likewise: the invoice is in another
-      // currency than the letter priced the work in.
+      // currency than the letter priced the work in. MANAGER_NOT_STAFF is 409
+      // like OWNER_NOT_STAFF and ASSIGNEE_NOT_STAFF: the id is well formed, the
+      // roster says no. A manager is frozen once the invoice is issued.
+      // INVOICE_NUMBER_OUT_OF_ORDER (B51): a draft numbered before 0322 whose
+      // number would now go out of order; answered by cancelling it and raising
+      // it again, never by retrying.
       case "INVOICE_NOT_EDITABLE":
       case "EMPTY_INVOICE":
       case "INVALID_INVOICE_TRANSITION":
       case "IRN_ALREADY_REGISTERED":
       case "INVOICE_NOT_ISSUED":
       case "CREDIT_EXCEEDS_INVOICE":
+      case "REVERSAL_EXCEEDS_PAID":
+      case "CREDIT_EXCEEDS_UNUSED_ADVANCE":
       case "DUNNING_NOT_AWAITING_APPROVAL":
       case "DUNNING_ALREADY_DECIDED":
       case "PARTY_ARCHIVED":
       case "ENGAGEMENT_OF_ANOTHER_ISSUER":
       case "ENGAGEMENT_IN_ANOTHER_CURRENCY":
+      case "MANAGER_NOT_STAFF":
+      case "INVOICE_MANAGER_FROZEN":
+      case "INVOICE_HAS_PAYMENTS":
+      case "DUNNING_NOTHING_OWED":
+      case "DUE_BEFORE_ISSUE":
+      case "INVOICE_NUMBER_OUT_OF_ORDER":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
+    }
+  }
+  if (err instanceof BillingError) {
+    switch (err.code) {
+      case "DUES_DO_NOT_SHARE_AN_INVOICE":
+      case "DUES_OF_DIFFERENT_MANAGERS":
+      case "DUE_NEEDS_AN_AMOUNT":
+      case "INVALID_BILLING_INPUT":
+      case "FX_RATE_NEEDED":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      case "BILLING_DUE_NOT_FOUND":
+      case "BILLING_INVOICE_NOT_FOUND":
+      case "BILLING_ENGAGEMENT_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      case "BILLING_DUE_NOT_OPEN":
+      case "INVOICE_DOES_NOT_FIT_DUE":
+      case "NOT_BILLED_ON_A_SCHEDULE":
+      case "FISCAL_YEAR_NEEDED":
+      case "ADVANCE_NOT_SKIPPABLE":
+      case "START_NOT_APPROVABLE":
+      case "BILL_NOW_REFUSED":
+      case "AUTO_BILLING_OFF":
+      case "NOTHING_TO_REFUND":
+      case "BILL_BUSY":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // Who may do it, not the request's shape: 403, and the sentence says who can.
+      case "ADVANCE_LINK_NEEDS_ADMIN":
+      case "PRICE_NOT_VISIBLE":
+        return { status: 403, code: "FORBIDDEN", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
     }
@@ -1069,6 +1134,7 @@ export function mapError(err: unknown): MappedError {
       case "LINK_NOT_FOUND":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
       case "COPY_OF_RECORD_STAYS":
+      case "DRAFT_NOT_SHAREABLE":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       case "ALREADY_ATTACHED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
@@ -1171,6 +1237,14 @@ export function mapError(err: unknown): MappedError {
       // different flow, which the message names.
       case "NO_PASSWORD_SET":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // 400, not the sign-in page's 401: the session is fine, and a 401 is
+      // what a screen reads as "signed out". The value in the field is wrong.
+      case "CURRENT_PASSWORD_INCORRECT":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      // 409: the account is in the wrong state for this act (it already has a
+      // password), and the link that was presented still works for signing in.
+      case "PASSWORD_ALREADY_SET":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       // 404, and it only ever reaches a provisioning caller — see the error's
       // own note for why naming it is safe there. It answered 500 before, from
       // an unmapped foreign-key violation two layers down.
@@ -1199,13 +1273,26 @@ export function mapError(err: unknown): MappedError {
   // Deliberately last, after every domain family: a service that has its own
   // word for this conflict (`MembershipExists`, `AlreadyAttached`) has already
   // been matched above and says something far more useful. This is the floor.
+  // A date Postgres could not make a day of (22008 datetime_field_overflow,
+  // 22007 invalid_datetime_format): the caller's typo, never ours (audit
+  // 2026-10-03, B43). The validators refuse these first; this is the floor
+  // for any path that still reaches the database with one.
+  if (isBadDateFromDatabase(err)) {
+    return {
+      status: 400,
+      code: "VALIDATION",
+      message: "That is not a real date. Check the day and the month.",
+      reason: "INVALID_DATE",
+    };
+  }
+
   const violation = uniqueViolationOf(err);
   if (violation !== null) {
     return {
       status: 409,
       code: "CONFLICT",
       message:
-        "that already exists — something else created it between this request being " +
+        "that already exists: something else created it between this request being " +
         "checked and being written",
       reason: violation,
     };
@@ -1236,6 +1323,13 @@ export function mapError(err: unknown): MappedError {
  * The constraint name goes in `reason` and never in `message` — it is a schema
  * detail, useful in a log and not the caller's business.
  */
+/** SQLSTATE 22008 or 22007, duck-typed for `uniqueViolationOf`'s reason. */
+function isBadDateFromDatabase(err: unknown): boolean {
+  if (typeof err !== "object" || err === null) return false;
+  const code = (err as { code?: unknown }).code;
+  return code === "22008" || code === "22007";
+}
+
 function uniqueViolationOf(err: unknown): string | null {
   if (typeof err !== "object" || err === null) return null;
   const candidate = err as { code?: unknown; constraint_name?: unknown };

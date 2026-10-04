@@ -1,0 +1,811 @@
+// The advance and the final bill against a REAL database (auto-invoice, phase
+// 2, 0320), because every claim below is about SQL a fake cannot reproduce.
+//
+// ── WHAT IS PROVED HERE AND NOWHERE ELSE ───────────────────────────────────
+//
+//   1. THE ADVANCE BILL: a signed letter waiting on its advance owes one bill,
+//      read by the catch-up, written once; a service's own advance is its own.
+//   2. THE WORK STARTS when the advance invoice is PAID IN FULL (the payment
+//      itself tells the gate), and on a part payment only by an admin's
+//      Approve start; the engagements move, the letter records it.
+//   3. THE FINAL BILL: a one-time service's job finishing writes it, at the
+//      letter's price, dated the day the job finished.
+//   4. FIFO, BEFORE TAX: `crm.advance_pool` says what is left; the earliest
+//      bill takes it first; the invoice line bills the balance; a bill the
+//      advance pays in full raises no invoice (covered).
+//   5. THE REFUND: once the work is finished, what is left comes back as a
+//      credit note with the reason `advance_refund`, tax included.
+//   6. THE WALLS: no advance on a grouped line, never both kinds on a letter.
+//
+// Run with:  npx vitest run --config vitest.integration.config.ts tests/billing/advance.integration.test.ts
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { AdvanceNotSkippable, InvoiceDoesNotFitDue } from "../../src/domain/billing/errors";
+import postgres from "postgres";
+import { load } from "../../src/config/config";
+import {
+  PostgresBillingDueWriter,
+  PostgresBillingManagerFacts,
+} from "../../src/infrastructure/postgres/billing-repository";
+import {
+  PostgresAutoBillingSetting,
+  PostgresBillingDueDesk,
+  PostgresBillingSchedules,
+} from "../../src/infrastructure/postgres/billing-desk";
+import { PostgresAdvanceBillFacts, PostgresFinalBillFacts } from "../../src/infrastructure/postgres/billing-facts";
+import { PostgresEngagementRepository } from "../../src/infrastructure/postgres/engagement-repository";
+import { PostgresInvoiceRepository } from "../../src/infrastructure/postgres/invoice-repository";
+import { systemIds } from "../../src/platform/ids";
+import { RecordingEventSink } from "../../src/testfakes/ledger";
+import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
+import { FakeAutoBillingFirms, FakeFiscalYearSource } from "../../src/testfakes/billing";
+import { AdvanceBiller, AdvanceDesk } from "../../src/usecase/billing/advance";
+import {
+  PostgresAdvancePolicy,
+  PostgresAdvanceReminderFacts,
+  PostgresIssuerTaxDefaults,
+} from "../../src/infrastructure/postgres/advance-reminders";
+import { FinalBiller } from "../../src/usecase/billing/final";
+import { BillingDeskService } from "../../src/usecase/billing/desk";
+import { InvoiceService } from "../../src/usecase/invoice/service";
+import { PostgresInvoiceFirmSettings } from "../../src/infrastructure/postgres/invoice-settings";
+import type { Actor } from "../../src/domain/ledger/model";
+import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
+import { FakeStaffDirectory } from "../../src/testfakes/lead";
+
+const cfg = load();
+const app = postgres(cfg.db.appUrl, { max: 4 });
+const owner = postgres(cfg.db.ownerUrl, { max: 2 });
+
+const stamp = Date.now().toString(36);
+let tenantId = "";
+let firm = "";
+let client = "";
+let manager = "";
+let admin = "";
+let audit = "";
+let books = "";
+let letterA = "";
+let auditA = "";
+let booksA = "";
+let letterB = "";
+let auditB = "";
+let me: Actor = SYSTEM_ACTOR;
+
+const clock = { now: () => new Date("2026-12-05T06:00:00Z") };
+const zone = new FakeFirmTimeZone("Asia/Kolkata");
+const events = new RecordingEventSink();
+const writer = new PostgresBillingDueWriter(app);
+const managers = new PostgresBillingManagerFacts(app);
+const engagements = new PostgresEngagementRepository(app);
+const invoiceRepository = new PostgresInvoiceRepository(app);
+const deskAdapter = new PostgresBillingDueDesk(app);
+
+const taxDefaults = new PostgresIssuerTaxDefaults(app);
+const policy = new PostgresAdvancePolicy(app);
+const advanceFacts = new PostgresAdvanceBillFacts(app);
+const advances = new AdvanceBiller({
+  facts: advanceFacts,
+  dues: writer,
+  managers,
+  ids: systemIds,
+  events,
+  drafter: { draftAdvance: (t, dueId, actor) => desk.draftAdvance(t, dueId, actor) },
+  // The engagement use case's start, at the adapter: the rows it moves.
+  work: {
+    startWaitingWork: async (t, letterId) => {
+      const waiting = (await engagements.listEngagements(t, letterId))
+        .filter((e) => e.status === "pending_advance")
+        .map((e) => e.id);
+      return { started: (await engagements.releaseEngagements(t, waiting, clock.now().toISOString())).length };
+    },
+  },
+});
+const advanceDesk = new AdvanceDesk({
+  desk: deskAdapter,
+  policy,
+  people: new PostgresAdvanceReminderFacts(app),
+  taxDefaults,
+  timeZones: zone,
+  clock,
+});
+const invoicing = new InvoiceService({
+  invoices: invoiceRepository,
+  timeZones: zone,
+  firmEntities: { isFirmEntity: (_t: string, partyId: string) => Promise.resolve(partyId === firm) },
+  parties: { findParty: () => Promise.resolve(null) },
+  ids: systemIds,
+  clock,
+  events,
+  issuedCopies: { file: () => Promise.resolve() },
+  staff: new FakeStaffDirectory(),
+  settings: new PostgresInvoiceFirmSettings(app),
+});
+const desk = new BillingDeskService({
+  desk: deskAdapter,
+  invoices: {
+    prepareDraft: (input) => invoicing.prepareDraft(input),
+    prepareLine: (draft, input) => invoicing.prepareLine(draft, input),
+    recordRaised: (invoice, actor) => invoicing.recordRaised(invoice, actor),
+    find: (t, id) => invoiceRepository.find(t, id),
+    issueCreditNote: (input, actor) => invoicing.issueCreditNote(input, actor),
+  },
+  schedules: new PostgresBillingSchedules(app),
+  setting: new PostgresAutoBillingSetting(app),
+  fiscalYears: new FakeFiscalYearSource(4),
+  timeZones: zone,
+  clock,
+  events,
+  taxDefaults,
+  policy,
+  firmEntities: { isFirmEntity: (_t: string, partyId: string) => Promise.resolve(partyId === firm) },
+});
+const finals = new FinalBiller({
+  facts: new PostgresFinalBillFacts(app),
+  dues: writer,
+  managers,
+  setting: new PostgresAutoBillingSetting(app),
+  firms: new FakeAutoBillingFirms([]),
+  timeZones: zone,
+  clock,
+  ids: systemIds,
+  events,
+});
+
+async function user(name: string, role: string): Promise<string> {
+  const [u] = await owner<{ id: string }[]>`
+    INSERT INTO tenancy.user_account (email, display_name)
+    VALUES (${`${name}-${stamp}@example.test`}, ${name}) RETURNING id
+  `;
+  if (!u) throw new Error("user seed failed");
+  await owner`INSERT INTO tenancy.membership (tenant_id, user_id, audience, role) VALUES (${tenantId}, ${u.id}, 'STAFF', ${role})`;
+  return u.id;
+}
+
+async function company(name: string): Promise<string> {
+  const [p] = await owner<{ id: string }[]>`
+    INSERT INTO core.party (tenant_id, kind, display_name) VALUES (${tenantId}, 'organization', ${name}) RETURNING id
+  `;
+  if (!p) throw new Error("party seed failed");
+  await owner`INSERT INTO core.organization (party_id, tenant_id, legal_name) VALUES (${p.id}, ${tenantId}, ${name})`;
+  return p.id;
+}
+
+async function service(key: string, recurrence: string): Promise<string> {
+  const [entry] = await owner<{ id: string }[]>`
+    INSERT INTO config.entry (tenant_id, kind, key) VALUES (${tenantId}, 'service', ${`${key}-${stamp}`}) RETURNING id
+  `;
+  if (!entry) throw new Error("service seed failed");
+  const [version] = await owner<{ id: string }[]>`
+    INSERT INTO config.version (tenant_id, entry_id, version, body, status, published_at)
+    VALUES (${tenantId}, ${entry.id}, 1, ${owner.json({ name: key, recurrence, module: "FRC" })}, 'published', now())
+    RETURNING id
+  `;
+  if (!version) throw new Error("version seed failed");
+  return version.id;
+}
+
+let refs = 0;
+async function letter(advance: string | null): Promise<string> {
+  refs += 1;
+  const [l] = await owner<{ id: string }[]>`
+    INSERT INTO crm.engagement_letter
+      (tenant_id, party_id, status, currency, fx_rate, fx_rate_date, ref, issuing_entity_party_id,
+       jurisdiction, title, advance_required, advance_amount)
+    VALUES (${tenantId}, ${client}, 'draft', 'INR', 1, CURRENT_DATE, ${`EL-2026-${String(refs).padStart(4, "0")}`},
+            ${firm}, 'IN', 'Engagement', ${advance !== null}, ${advance}::numeric)
+    RETURNING id
+  `;
+  if (!l) throw new Error("letter seed failed");
+  return l.id;
+}
+
+async function line(
+  letterId: string,
+  position: number,
+  version: string,
+  frequency: string,
+  amount: number,
+  advance: number | null = null,
+): Promise<string> {
+  const [ln] = await owner<{ id: string }[]>`
+    INSERT INTO crm.engagement_letter_line
+      (tenant_id, engagement_letter_id, position, service_version_id, quantity, unit_amount, currency,
+       discount_percent, billing_frequency, entity_party_id, description, advance_amount)
+    VALUES (${tenantId}, ${letterId}, ${position}, ${version}, 1, ${amount}, 'INR', 0, ${frequency},
+            ${client}, ${frequency === "one_time" ? "Statutory audit FY 2025-26" : "Bookkeeping"}, ${advance})
+    RETURNING id
+  `;
+  if (!ln) throw new Error("line seed failed");
+  return ln.id;
+}
+
+async function signAndFanOut(letterId: string, lines: readonly string[]): Promise<string[]> {
+  await owner`
+    UPDATE crm.engagement_letter
+       SET status = 'signed', sent_at = now(), signed_at = now(), signed_by_name = 'A Director',
+           signature_method = 'attested', signed_content_hash = ${"c".repeat(64)}
+     WHERE id = ${letterId}
+  `;
+  const ids: string[] = [];
+  for (const lineId of lines) {
+    const [e] = await owner<{ id: string }[]>`
+      INSERT INTO crm.engagement
+        (tenant_id, party_id, entity_party_id, engagement_letter_id, engagement_letter_line_id, effective_from, status)
+      VALUES (${tenantId}, ${client}, ${client}, ${letterId}, ${lineId}, '2026-10-01'::date, 'pending_advance')
+      RETURNING id
+    `;
+    if (!e) throw new Error("engagement seed failed");
+    ids.push(e.id);
+  }
+  return ids;
+}
+
+async function finishJob(engagementId: string, finishedAt: string): Promise<string> {
+  const [j] = await owner<{ id: string }[]>`
+    INSERT INTO delivery.job (tenant_id, source_kind, source_ref, status, started_at, finished_at)
+    VALUES (${tenantId}, 'engagement', ${engagementId}, 'done', ${finishedAt}::timestamptz, ${finishedAt}::timestamptz)
+    RETURNING id
+  `;
+  if (!j) throw new Error("job seed failed");
+  await owner`INSERT INTO delivery.job_engagement (tenant_id, job_id, engagement_id) VALUES (${tenantId}, ${j.id}, ${engagementId})`;
+  return j.id;
+}
+
+async function advanceDue(letterId: string) {
+  return (await desk.list({ tenantId, filters: { status: "all" } })).dues.find((d) => d.kind === "advance" && d.letter.id === letterId);
+}
+
+async function statuses(ids: readonly string[]): Promise<string[]> {
+  const rows = await owner<{ id: string; status: string }[]>`
+    SELECT id, status FROM crm.engagement WHERE id = ANY(${owner.array(ids as string[])}::uuid[])
+  `;
+  return ids.map((id) => rows.find((r) => r.id === id)?.status ?? "?");
+}
+
+beforeAll(async () => {
+  const [t] = await owner<{ id: string }[]>`
+    INSERT INTO tenancy.tenant (slug, name, reporting_currency, auto_billing)
+    VALUES (${`advance-${stamp}`}, 'Advance Test', 'INR', true) RETURNING id
+  `;
+  if (!t) throw new Error("tenant seed failed");
+  tenantId = t.id;
+
+  const spoc = await user("spoc", "manager");
+  manager = await user("manager", "manager");
+  admin = await user("admin", "partner");
+  me = { type: "human", id: manager };
+  await owner`UPDATE tenancy.membership SET reports_to_user_id = ${manager} WHERE tenant_id = ${tenantId} AND user_id = ${spoc}`;
+
+  firm = await company("The Firm");
+  await owner`INSERT INTO crm.firm_entity (tenant_id, party_id) VALUES (${tenantId}, ${firm})`;
+  client = await company(`Kaveri Foods ${stamp}`);
+  const [axis] = await owner<{ id: string }[]>`
+    INSERT INTO tenancy.service_axis (tenant_id, axis, code, name) VALUES (${tenantId}, 'dept', 'FRC', 'Financial Reporting')
+    RETURNING id
+  `;
+  if (!axis) throw new Error("axis seed failed");
+  await owner`
+    INSERT INTO crm.client_assignment (tenant_id, client_party_id, role, axis_id, user_id, valid_from)
+    VALUES (${tenantId}, ${client}, 'spoc', ${axis.id}, ${spoc}, '2026-01-01')
+  `;
+
+  audit = await service("audit", "one_time");
+  books = await service("books", "monthly");
+
+  // Letter A: one advance of 50,000 for the whole letter; an audit and
+  // monthly bookkeeping.
+  letterA = await letter("50000");
+  const auditLine = await line(letterA, 1, audit, "one_time", 100000);
+  const booksLine = await line(letterA, 2, books, "monthly", 30000);
+  [auditA = "", booksA = ""] = await signAndFanOut(letterA, [auditLine, booksLine]);
+
+  // Letter B: no letter advance; the audit has its OWN advance of 40,000 on a
+  // fee of 30,000, so the advance covers the bill and 10,000 is left over.
+  letterB = await letter(null);
+  const auditLineB = await line(letterB, 1, audit, "one_time", 30000, 40000);
+  [auditB = ""] = await signAndFanOut(letterB, [auditLineB]);
+});
+
+afterAll(async () => {
+  await owner`
+    UPDATE crm.engagement SET status = 'cancelled', activated_at = coalesce(activated_at, now())
+     WHERE tenant_id = ${tenantId} AND ended_at IS NULL
+  `;
+  await owner`UPDATE tenancy.tenant SET auto_billing = false WHERE id = ${tenantId}`;
+  await app.end();
+  await owner.end();
+});
+
+describe("the advance on a real database (0322: work started, invoice drafted)", () => {
+  it("catches up letters signed before 0322: starts their work, writes each bill once, drafts it unnumbered", async () => {
+    // The letters were signed under the 0320 gate (their work pending_advance).
+    const owing = await advanceFacts.lettersOwingAdvance(tenantId);
+    expect(new Set(owing)).toEqual(new Set([letterA, letterB]));
+    // No tax rate anywhere yet: the bills are written, not drafted.
+    for (const letterId of owing) {
+      await advances.billAdvances({ tenantId, letterId }, SYSTEM_ACTOR);
+    }
+    expect((await advanceDesk.list(tenantId)).advances.map((x) => x.draftBlocked)).toEqual(["no_tax_rate", "no_tax_rate"]);
+    // The firm sets its company's default rate; the next catch-up drafts them
+    // and starts the work that waited.
+    await desk.setTaxDefault({ tenantId, entityPartyId: firm, taxPercent: "18" }, { type: "human", id: admin });
+    const before = await advanceFacts.lettersOwingAdvance(tenantId);
+    expect(new Set(before)).toEqual(new Set([letterA, letterB]));
+    for (const letterId of before) {
+      await advances.billAdvances({ tenantId, letterId }, SYSTEM_ACTOR);
+    }
+    expect(await statuses([auditA, booksA, auditB])).toEqual(["pending_advance", "pending_advance", "pending_advance"]);
+    // The work itself is the catch-up's first step; the fake-free adapter here.
+    for (const letterId of [letterA, letterB]) {
+      const waiting = (await engagements.listEngagements(tenantId, letterId)).filter((e) => e.status === "pending_advance");
+      await engagements.releaseEngagements(tenantId, waiting.map((e) => e.id), clock.now().toISOString());
+    }
+    expect(await statuses([auditA, booksA, auditB])).toEqual(["active", "active", "active"]);
+    expect(await advanceFacts.lettersOwingAdvance(tenantId)).toEqual([]);
+
+    const a = await advanceDue(letterA);
+    expect(a).toMatchObject({
+      kind: "advance",
+      engagementLetterId: letterA,
+      engagementId: null,
+      serviceName: "All services",
+      fullAmount: "50000.0000",
+      amount: "50000.00",
+      status: "drafted",
+      invoice: { number: null, status: "draft" },
+    });
+    expect(a?.engagementIds).toHaveLength(2);
+    const b = await advanceDue(letterB);
+    expect(b).toMatchObject({ engagementId: auditB, serviceName: "Statutory audit FY 2025-26", amount: "40000.00", status: "drafted" });
+    // Written and drafted once.
+    expect(await advances.billAdvances({ tenantId, letterId: letterA }, SYSTEM_ACTOR)).toEqual({ created: 0, drafted: 0 });
+  });
+
+  it("reads where each stands as it is issued and paid, and who is reminded (the SPOC, on real SQL)", async () => {
+    const a = await advanceDue(letterA);
+    const invoiceId = a?.invoice?.id ?? "";
+    expect((await advanceDesk.list(tenantId)).advances.find((x) => x.id === a?.id)).toMatchObject({
+      stage: "on_draft",
+      reminder: { pending: true, pendingSince: a?.billOn },
+      people: { keyManager: null, partner: null },
+    });
+    const issued = await invoicing.issue(tenantId, invoiceId, me, "2026-12-05");
+    expect(issued.number).not.toBeNull();
+    await invoicing.recordPayment(
+      { tenantId, invoiceId, amount: "20000", receivedOn: "2026-12-05", method: "bank_transfer" },
+      me,
+    );
+    const listed = (await advanceDesk.list(tenantId)).advances.find((x) => x.id === a?.id);
+    expect(listed).toMatchObject({ stage: "part_paid", invoiceIssuedOn: "2026-12-05", reminder: { pendingSince: "2026-12-05" } });
+    expect(listed?.people.spocs.map((p) => p.displayName)).toEqual(["spoc"]);
+
+    // Letter B's own advance: issued and paid in full (40,000 plus 18%: before tax).
+    const b = await advanceDue(letterB);
+    const bInvoice = b?.invoice?.id ?? "";
+    await invoicing.issue(tenantId, bInvoice, me, "2026-12-05");
+    await invoicing.recordPayment(
+      { tenantId, invoiceId: bInvoice, amount: "47200", receivedOn: "2026-12-05", method: "bank_transfer" },
+      me,
+    );
+    expect((await advanceDesk.list(tenantId)).advances.find((x) => x.id === b?.id)?.stage).toBe("paid");
+  });
+});
+
+describe("the final bill and FIFO on a real database (0320)", () => {
+  it("takes the earliest bill first: a month of bookkeeping off the letter's advance", async () => {
+    // October's bookkeeping, written as the period sweep would.
+    await writer.insert(tenantId, [
+      {
+        id: systemIds.newId(),
+        partyId: client,
+        issuingEntityPartyId: firm,
+        currency: "INR",
+        engagementId: booksA,
+        feeGroupId: null,
+        periodStart: "2026-10-01",
+        periodEnd: "2026-10-31",
+        periodLabel: "Oct 2026",
+        billOn: "2026-11-01",
+        fullAmount: "30000",
+        servedDays: 31,
+        periodDays: 31,
+        managerUserId: manager,
+        managerHow: "spoc_manager",
+        managerNote: null,
+      },
+    ]);
+    const oct = (await desk.list({ tenantId, filters: { status: "all" } })).dues.find((d) => d.engagementId === booksA && d.kind === "period");
+    expect(oct?.advancePool).toMatchObject({ remaining: "50000.00" });
+    const out = await desk.raise({ tenantId, dueIds: [oct?.id ?? ""], lines: [{ dueId: oct?.id ?? "", taxPercent: "18" }] }, me);
+    expect(out.covered).toEqual([oct?.id]);
+    expect(out.invoiceId).toBeNull();
+    const [pool] = await owner<{ remaining: string }[]>`
+      SELECT remaining::text FROM crm.advance_pool WHERE engagement_letter_id = ${letterA}
+    `;
+    expect(pool?.remaining).toBe("20000.00");
+  });
+
+  it("writes the audit's final bill when its job finishes, and bills the balance after the advance", async () => {
+    const jobId = await finishJob(auditA, "2026-11-20T05:00:00Z");
+    expect(await finals.jobDone({ tenantId, jobId }, SYSTEM_ACTOR)).toEqual({ created: 1 });
+    const fin = (await desk.list({ tenantId, filters: { status: "all" } })).dues.find((d) => d.engagementId === auditA && d.kind === "final");
+    expect(fin).toMatchObject({ billOn: "2026-11-20", amount: "100000.00", periodLabel: "Final" });
+    expect(fin?.advancePool).toMatchObject({ remaining: "20000.00" });
+
+    const out = await desk.raise({ tenantId, dueIds: [fin?.id ?? ""], lines: [{ dueId: fin?.id ?? "", taxPercent: "18" }] }, me);
+    const [ln] = await owner<{ unit_amount: string; description: string }[]>`
+      SELECT unit_amount::text, description FROM crm.invoice_line WHERE invoice_id = ${out.invoiceId ?? ""}
+    `;
+    expect(ln?.unit_amount).toBe("80000.0000");
+    // No amounts in the words (0321): the description is read without fees.
+    expect(ln?.description).toMatch(/^Statutory audit FY 2025-26, final bill, less advance \(INV\//);
+    expect(await finals.jobDone({ tenantId, jobId }, SYSTEM_ACTOR)).toEqual({ created: 0 });
+  });
+
+  it("refuses, under the lock, to take more than is left of an advance", async () => {
+    const [adv] = await owner<{ invoice_id: string }[]>`
+      SELECT invoice_id FROM crm.advance_pool WHERE engagement_letter_id = ${letterA}
+    `;
+    const [spare] = await owner<{ id: string }[]>`
+      SELECT id FROM crm.billing_due WHERE tenant_id = ${tenantId} AND kind = 'period' AND engagement_id = ${booksA}
+    `;
+    // Nothing is left; the October bill is covered, not open, so it is the
+    // pool, not the bill, that refuses here.
+    expect(await deskAdapter.markCovered(tenantId, spare?.id ?? "", { invoiceId: adv?.invoice_id ?? "", amount: "1" })).toBe(false);
+  });
+
+  it("covers a bill the service's own advance pays in full, and offers the rest back", async () => {
+    const jobId = await finishJob(auditB, "2026-11-25T05:00:00Z");
+    await finals.jobDone({ tenantId, jobId }, SYSTEM_ACTOR);
+    const fin = (await desk.list({ tenantId, filters: { status: "all" } })).dues.find((d) => d.engagementId === auditB && d.kind === "final");
+    const out = await desk.raise({ tenantId, dueIds: [fin?.id ?? ""], lines: [{ dueId: fin?.id ?? "", taxPercent: "18" }] }, me);
+    expect(out).toMatchObject({ invoiceId: null, covered: [fin?.id] });
+    expect((await desk.list({ tenantId, filters: { status: "all" } })).dues.find((d) => d.id === fin?.id)?.status).toBe("covered");
+
+    const refunds = await desk.refunds(tenantId);
+    expect(refunds.map((r) => [r.advance.engagementId, r.remaining, r.refundAmount])).toEqual([
+      // 10,000 left before tax; the credit note gives back its 18% too.
+      [auditB, "10000.00", "11800.00"],
+    ]);
+    // Letter A's advance is used up and its bookkeeping goes on: not listed.
+
+    const note = await desk.refund({ tenantId, dueId: refunds[0]?.advance.id ?? "", asOf: "2026-12-05" }, { type: "human", id: admin });
+    const [cn] = await owner<{ amount: string; reason: string }[]>`
+      SELECT amount::text, reason FROM crm.credit_note WHERE id = ${note.id}
+    `;
+    expect(cn).toEqual({ amount: "11800.0000", reason: "advance_refund" });
+    expect(await desk.refunds(tenantId)).toEqual([]);
+  });
+});
+
+// ── 0321: what the end-to-end review found ──────────────────────────────────
+
+/** October's or November's bookkeeping for `engagementId`, as the sweep writes it. */
+async function periodDue(engagementId: string, month: "10" | "11"): Promise<string> {
+  const id = systemIds.newId();
+  await writer.insert(tenantId, [
+    {
+      id,
+      partyId: client,
+      issuingEntityPartyId: firm,
+      currency: "INR",
+      engagementId,
+      feeGroupId: null,
+      periodStart: `2026-${month}-01`,
+      periodEnd: month === "10" ? "2026-10-31" : "2026-11-30",
+      periodLabel: month === "10" ? "Oct 2026" : "Nov 2026",
+      billOn: month === "10" ? "2026-11-01" : "2026-12-01",
+      fullAmount: "30000",
+      servedDays: month === "10" ? 31 : 30,
+      periodDays: month === "10" ? 31 : 30,
+      managerUserId: manager,
+      managerHow: "spoc_manager",
+      managerNote: null,
+    },
+  ]);
+  return id;
+}
+
+/** A letter with an advance for the whole of it and monthly bookkeeping,
+ *  signed, its advance billed: the advance bill's id and the engagement's. */
+async function advancedLetter(advance: string): Promise<{ letterId: string; advId: string; booksId: string }> {
+  const letterId = await letter(advance);
+  const booksLine = await line(letterId, 1, books, "monthly", 30000);
+  const [booksId = ""] = await signAndFanOut(letterId, [booksLine]);
+  await advances.billAdvances({ tenantId, letterId }, SYSTEM_ACTOR);
+  const adv = await advanceDue(letterId);
+  if (adv === undefined) throw new Error("no advance bill");
+  return { letterId, advId: adv.id, booksId };
+}
+
+async function raiseAndIssue(dueId: string): Promise<string> {
+  // An advance is drafted the moment its bill is written (0322): issue that
+  // draft. Anything else is raised first.
+  const existing = (await desk.list({ tenantId, filters: { status: "all" } })).dues.find((d) => d.id === dueId);
+  let invoiceId = existing?.status === "drafted" ? (existing.invoice?.id ?? "") : "";
+  if (invoiceId === "") {
+    const out = await desk.raise({ tenantId, dueIds: [dueId], lines: [{ dueId, taxPercent: "18" }] }, me);
+    invoiceId = out.invoiceId ?? "";
+  }
+  await invoicing.issue(tenantId, invoiceId, me, "2026-12-05");
+  return invoiceId;
+}
+
+describe("an advance cancelled and raised again (0321)", () => {
+  it("is not taken off later bills a second time", async () => {
+    const { letterId, advId, booksId } = await advancedLetter("20000");
+    const first = await raiseAndIssue(advId);
+    await invoicing.recordPayment({ tenantId, invoiceId: first, amount: "23600", receivedOn: "2026-12-05", method: "bank_transfer" }, me);
+    // October takes the whole 20,000 and bills 10,000.
+    const oct = await periodDue(booksId, "10");
+    // The advance invoice is not October's to be linked to: that money is the advance.
+    await expect(desk.link({ tenantId, dueId: oct, invoiceId: first }, me)).rejects.toBeInstanceOf(InvoiceDoesNotFitDue);
+    await raiseAndIssue(oct);
+
+    // The advance invoice was wrong: its payment is moved off it (a refund on
+    // it, B05: a paid invoice is not cancelled), it is cancelled, and raised
+    // again from its bill.
+    await invoicing.recordPayment({ tenantId, invoiceId: first, amount: "-23600", receivedOn: "2026-12-06", method: "bank_transfer" }, me);
+    await invoicing.cancel(tenantId, first, { type: "human", id: admin });
+    const second = await raiseAndIssue(advId);
+    const [pool] = await owner<{ remaining: string; applied: string }[]>`
+      SELECT remaining::text, applied::text FROM crm.advance_pool WHERE engagement_letter_id = ${letterId}
+    `;
+    expect(pool).toEqual({ remaining: "0.00", applied: "20000.0000" });
+
+    // November is billed in full: the advance was used once, by October.
+    const nov = await periodDue(booksId, "11");
+    const out = await desk.raise({ tenantId, dueIds: [nov], lines: [{ dueId: nov, taxPercent: "18" }] }, me);
+    const [ln] = await owner<{ unit_amount: string; description: string }[]>`
+      SELECT unit_amount::text, description FROM crm.invoice_line WHERE invoice_id = ${out.invoiceId ?? ""}
+    `;
+    expect(ln).toEqual({ unit_amount: "30000.0000", description: "Bookkeeping, Nov 2026" });
+    expect(second).not.toBe(first);
+  });
+
+  it("lets a bill it had covered be raised once it is cancelled, with no number wasted", async () => {
+    const { advId, booksId } = await advancedLetter("50000");
+    const adv = await raiseAndIssue(advId);
+    await invoicing.recordPayment({ tenantId, invoiceId: adv, amount: "59000", receivedOn: "2026-12-05", method: "bank_transfer" }, me);
+    const oct = await periodDue(booksId, "10");
+    expect((await desk.raise({ tenantId, dueIds: [oct], lines: [{ dueId: oct, taxPercent: "18" }] }, me)).covered).toEqual([oct]);
+
+    await invoicing.recordPayment({ tenantId, invoiceId: adv, amount: "-59000", receivedOn: "2026-12-06", method: "bank_transfer" }, me);
+    await invoicing.cancel(tenantId, adv, { type: "human", id: admin });
+    expect((await desk.list({ tenantId, filters: { status: "all" } })).dues.find((d) => d.id === oct)?.status).toBe("open");
+    const out = await desk.raise({ tenantId, dueIds: [oct], lines: [{ dueId: oct, taxPercent: "18" }] }, me);
+    expect(out.conflicts).toEqual([]);
+    expect((await desk.list({ tenantId, filters: { status: "all" } })).dues.find((d) => d.id === oct)).toMatchObject({
+      status: "drafted",
+      invoice: { id: out.invoiceId },
+    });
+  });
+});
+
+describe("two people at once (0321)", () => {
+  it("makes ONE invoice when one bill is raised twice at the same moment", async () => {
+    const { booksId } = await advancedLetter("1000");
+    const oct = await periodDue(booksId, "10");
+    const count = async () =>
+      Number((await owner<{ n: string }[]>`SELECT count(*)::text AS n FROM crm.invoice WHERE tenant_id = ${tenantId}`)[0]?.n);
+    const before = await count();
+    const raise = () => desk.raise({ tenantId, dueIds: [oct], lines: [{ dueId: oct, taxPercent: "18" }] }, me);
+    const results = await Promise.allSettled([raise(), raise()]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(await count()).toBe(before + 1);
+    const [held] = await owner<{ n: string }[]>`
+      SELECT count(*)::text AS n FROM crm.billing_due WHERE tenant_id = ${tenantId} AND claimed_at IS NOT NULL
+    `;
+    expect(held?.n).toBe("0");
+  });
+
+  it("gives an unused advance back ONCE when Give it back is pressed twice", async () => {
+    const letterId = await letter(null);
+    const auditLine = await line(letterId, 1, audit, "one_time", 30000, 40000);
+    const [auditId = ""] = await signAndFanOut(letterId, [auditLine]);
+    await advances.billAdvances({ tenantId, letterId }, SYSTEM_ACTOR);
+    const adv = await advanceDue(letterId);
+    const advInvoice = await raiseAndIssue(adv?.id ?? "");
+    await invoicing.recordPayment({ tenantId, invoiceId: advInvoice, amount: "47200", receivedOn: "2026-12-05", method: "bank_transfer" }, me);
+    const jobId = await finishJob(auditId, "2026-12-01T05:00:00Z");
+    await finals.jobDone({ tenantId, jobId }, SYSTEM_ACTOR);
+    const fin = (await desk.list({ tenantId, filters: { status: "all" } })).dues.find((d) => d.engagementId === auditId && d.kind === "final");
+    await desk.raise({ tenantId, dueIds: [fin?.id ?? ""], lines: [{ dueId: fin?.id ?? "", taxPercent: "18" }] }, me);
+
+    const give = () => desk.refund({ tenantId, dueId: adv?.id ?? "", asOf: "2026-12-05" }, { type: "human", id: admin });
+    await Promise.allSettled([give(), give()]);
+    const notes = await owner<{ amount: string }[]>`
+      SELECT amount::text FROM crm.credit_note WHERE invoice_id = ${advInvoice} AND reason = 'advance_refund'
+    `;
+    expect(notes).toEqual([{ amount: "11800.0000" }]);
+  });
+});
+
+describe("an advance nobody paid (0321)", () => {
+  it("does not start the work when a credit note zeroes it", async () => {
+    const { letterId, advId } = await advancedLetter("10000");
+    const adv = await raiseAndIssue(advId);
+    await invoicing.issueCreditNote({ tenantId, invoiceId: adv, amount: "11800", reason: "billing_error", asOf: "2026-12-05" }, { type: "human", id: admin });
+    expect((await advanceDesk.list(tenantId)).advances.find((a) => a.engagementLetterId === letterId)?.stage).toBe("unpaid");
+  });
+
+  it("may be skipped once no work waits on it, and not before", async () => {
+    const { letterId, advId, booksId } = await advancedLetter("15000");
+    // Its draft is withdrawn first: an advance on a draft is not open to skip.
+    await invoicing.cancel(tenantId, (await advanceDue(letterId))?.invoice?.id ?? "", me);
+    await expect(desk.skip({ tenantId, dueId: advId, reason: "Client did not go ahead" }, me)).rejects.toBeInstanceOf(
+      AdvanceNotSkippable,
+    );
+    await owner`UPDATE crm.engagement SET status = 'cancelled', activated_at = coalesce(activated_at, now()) WHERE id = ${booksId}`;
+    await desk.skip({ tenantId, dueId: advId, reason: "Client did not go ahead" }, me);
+    expect((await desk.list({ tenantId, filters: { status: "all" } })).dues.find((d) => d.id === advId)?.status).toBe("skipped");
+  });
+});
+
+describe("final bills when the switch goes on (0321)", () => {
+  it("are written only for work finished since, and never for work billed by hand", async () => {
+    await new PostgresAutoBillingSetting(app).set(tenantId, true, "2026-12-01");
+    const oneTime = async () => {
+      const l = await letter(null);
+      const ln = await line(l, 1, audit, "one_time", 25000);
+      const [e = ""] = await signAndFanOut(l, [ln]);
+      await owner`UPDATE crm.engagement SET status = 'active', activated_at = now() WHERE id = ${e}`;
+      return e;
+    };
+    const finalOf = async (e: string) =>
+      (await desk.list({ tenantId, filters: { status: "all" } })).dues.find((d) => d.engagementId === e && d.kind === "final");
+
+    const old = await oneTime();
+    await finishJob(old, "2026-11-20T05:00:00Z");
+    const fresh = await oneTime();
+    await finishJob(fresh, "2026-12-03T05:00:00Z");
+    const byHand = await oneTime();
+    const hand = await invoicing.raise(
+      { tenantId, partyId: client, entityPartyId: firm, currency: "INR", fxRate: "1", fxRateDate: "2026-12-05", asOf: "2026-12-05" },
+      me,
+    );
+    await invoicing.addLine({ tenantId, invoiceId: hand.id, engagementId: byHand, description: "Audit, by hand", quantity: "1", unitAmount: "25000" });
+    await finishJob(byHand, "2026-12-04T05:00:00Z");
+
+    await finals.sweepTenant(tenantId);
+    expect(await finalOf(old)).toBeUndefined();
+    expect(await finalOf(fresh)).toMatchObject({ billOn: "2026-12-03" });
+    expect(await finalOf(byHand)).toBeUndefined();
+  });
+});
+
+describe("the walls (0320)", () => {
+  it("refuses an advance on a grouped line, and both kinds of advance on one letter", async () => {
+    const l = await letter("1000");
+    await expect(line(l, 1, audit, "one_time", 5000, 500)).rejects.toThrow(/whole letter/);
+    const n = await letter(null);
+    await line(n, 1, audit, "one_time", 5000, 500);
+    await expect(
+      owner`UPDATE crm.engagement_letter SET advance_required = true, advance_amount = 1000 WHERE id = ${n}`,
+    ).rejects.toThrow(/own advance/);
+    const [g] = await owner<{ id: string }[]>`
+      INSERT INTO crm.engagement_letter_fee_group (tenant_id, engagement_letter_id, currency, position, title, billing_frequency, amount)
+      VALUES (${tenantId}, ${n}, 'INR', 1, 'Retainer', 'monthly', 9000) RETURNING id
+    `;
+    await expect(
+      owner`
+        INSERT INTO crm.engagement_letter_line
+          (tenant_id, engagement_letter_id, position, service_version_id, quantity, currency, discount_percent,
+           billing_frequency, entity_party_id, description, fee_group_id, advance_amount)
+        VALUES (${tenantId}, ${n}, 2, ${books}, 1, 'INR', 0, 'monthly', ${client}, 'Grouped', ${g?.id ?? ""}, 100)
+      `,
+    ).rejects.toThrow(/el_line_grouped_has_no_advance_chk/);
+  });
+});
+
+describe("a claim on a bill that is not there (0321)", () => {
+  it("says not found, not busy", async () => {
+    await expect(
+      desk.skip({ tenantId, dueId: "00000000-0000-4000-8000-000000000001", reason: "probe" }, me),
+    ).rejects.toMatchObject({ code: "BILLING_DUE_NOT_FOUND" });
+  });
+});
+
+describe("a credit note on an advance (B06, B15, audit 2026-10-03)", () => {
+  // The plain credit-note route capped a credit at invoiced - credited and
+  // never asked what the advance had already paid for. Advance 40,000 (47,200
+  // with tax), October takes 30,000 of it: a credit note of 23,600 was issued
+  // and the advance pool went to -10,000: the client got the advance back and
+  // kept the deduction. And the cap was read in one transaction and the credit
+  // note written in another, with no lock.
+  async function advanceWithOctoberTaken() {
+    const { letterId, advId, booksId } = await advancedLetter("40000");
+    const adv = await raiseAndIssue(advId);
+    await invoicing.recordPayment({ tenantId, invoiceId: adv, amount: "47200", receivedOn: "2026-12-05", method: "bank_transfer" }, me);
+    const oct = await periodDue(booksId, "10");
+    expect((await desk.raise({ tenantId, dueIds: [oct], lines: [{ dueId: oct, taxPercent: "18" }] }, me)).covered).toEqual([oct]);
+    return { letterId, adv };
+  }
+
+  it("refuses to credit what bills have already taken, in plain words", async () => {
+    const { letterId, adv } = await advanceWithOctoberTaken();
+    const refused = await invoicing
+      .issueCreditNote({ tenantId, invoiceId: adv, amount: "23600", reason: "advance_refund" }, me)
+      .catch((e: unknown) => e);
+    expect(refused).toMatchObject({ code: "CREDIT_EXCEEDS_UNUSED_ADVANCE" });
+    expect((refused as Error).message).toContain("INR 11,800.00");
+
+    // What is left with its tax may go back, and the pool reaches 0, not below.
+    await invoicing.issueCreditNote({ tenantId, invoiceId: adv, amount: "11800", reason: "advance_refund" }, me);
+    const [pool] = await owner<{ remaining: string }[]>`
+      SELECT remaining::text FROM crm.advance_pool WHERE engagement_letter_id = ${letterId}
+    `;
+    expect(pool?.remaining).toBe("0.00");
+  });
+
+  it("lets only one of two credit notes for the last of it through at the same moment", async () => {
+    const { adv } = await advanceWithOctoberTaken();
+    const both = await Promise.allSettled(
+      [0, 1].map(() => invoicing.issueCreditNote({ tenantId, invoiceId: adv, amount: "11800", reason: "advance_refund" }, me)),
+    );
+    expect(both.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const rejected = both.find((r) => r.status === "rejected");
+    expect(rejected?.status === "rejected" ? rejected.reason : null).toMatchObject({ code: "CREDIT_EXCEEDS_UNUSED_ADVANCE" });
+  });
+});
+
+describe("a claim is let go only by whoever holds it (B35, audit 2026-10-03)", () => {
+  it("does not clear a newer request's claim when an older, slow one finishes", async () => {
+    // A raise that ran past the two-minute claim lifetime cleared whatever
+    // claim was on its bills when it finished, including a newer request's.
+    const { booksId } = await advancedLetter("1000");
+    const oct = await periodDue(booksId, "10");
+    const slow = await deskAdapter.claim(tenantId, [oct]);
+    expect(slow).not.toBeNull();
+    // Two minutes pass: the slow claim has lapsed, and somebody else claims.
+    await owner`UPDATE crm.billing_due SET claimed_at = claimed_at - interval '3 minutes' WHERE id = ${oct}`;
+    const fresh = await deskAdapter.claim(tenantId, [oct]);
+    expect(fresh).not.toBeNull();
+
+    await deskAdapter.release(tenantId, [oct], slow ?? "");
+    const [row] = await owner<{ held: boolean }[]>`SELECT claimed_at IS NOT NULL AS held FROM crm.billing_due WHERE id = ${oct}`;
+    expect(row?.held).toBe(true);
+
+    await deskAdapter.release(tenantId, [oct], fresh ?? "");
+    const [after] = await owner<{ held: boolean }[]>`SELECT claimed_at IS NOT NULL AS held FROM crm.billing_due WHERE id = ${oct}`;
+    expect(after?.held).toBe(false);
+  });
+});
+
+describe("a raise is one transaction (B34, audit 2026-10-03)", () => {
+  it("leaves no draft, no line and no bill marked when a write fails half-way", async () => {
+    // It was several transactions: create the draft, add lines, mark bills.
+    // A crash or a conflict half-way left a draft with some lines, or a bill
+    // marked raised on an invoice that billed something else.
+    const { booksId } = await advancedLetter("1000");
+    const oct = await periodDue(booksId, "10");
+    const nov = await periodDue(booksId, "11");
+    const draft = await invoicing.prepareDraft({
+      tenantId, partyId: client, entityPartyId: firm, currency: "INR", fxRate: "1", fxRateDate: "2026-12-05",
+    });
+    const line = (description: string) =>
+      invoicing.prepareLine(draft, { tenantId, description, quantity: "1", unitAmount: "30000", taxPercent: "18" });
+    const good = await line("Bookkeeping, Oct 2026");
+    // The second line names an engagement that is not there: its insert fails
+    // on the foreign key, after the draft, the first line and October were written.
+    const broken = { ...(await line("Bookkeeping, Nov 2026")), engagementId: systemIds.newId() };
+
+    await expect(
+      deskAdapter.raiseAtomically(tenantId, {
+        draft,
+        covered: [],
+        invoiced: [
+          { dueId: oct, line: good, applied: null },
+          { dueId: nov, line: broken, applied: null },
+        ],
+      }),
+    ).rejects.toThrow();
+
+    const [invoices] = await owner<{ n: number }[]>`SELECT count(*)::int AS n FROM crm.invoice WHERE id = ${draft.id}`;
+    expect(invoices?.n).toBe(0);
+    const [lines] = await owner<{ n: number }[]>`SELECT count(*)::int AS n FROM crm.invoice_line WHERE invoice_id = ${draft.id}`;
+    expect(lines?.n).toBe(0);
+    const [bill] = await owner<{ invoice_id: string | null }[]>`SELECT invoice_id FROM crm.billing_due WHERE id = ${oct}`;
+    expect(bill?.invoice_id).toBeNull();
+  });
+});

@@ -72,13 +72,28 @@ esac
 
 DOMAIN=10xglobal.in
 
+# PYTHON ON WINDOWS ENDS EVERY LINE WITH A CARRIAGE RETURN. Every id below is
+# read out of a response by a one-line Python program inside `$(...)`. Git
+# Bash drops the carriage return at the very end of a `$(...)`, but not one
+# inside an answer of several lines, and other shells drop none: an id that
+# keeps one makes the API answer "not found" for a record that is there
+# (reported by the audit agents, 2026-10-03). Every python3 call goes through
+# this, so the answer is the same on every shell, in UTF-8 on every platform.
+export PYTHONUTF8=1
+python3() { command python3 "$@" | tr -d '\r'; }
+
 J=$(mktemp -d)
 trap 'rm -rf "$J"' EXIT
 
 # Dates the demo depends on. An invoice must be genuinely overdue for the
 # dunning ladder to have climbed it, and a task must be genuinely late for the
 # escalation ladder to have fired — so these are computed, never typed.
-day() { python3 -c "import datetime;print((datetime.date.today()+datetime.timedelta(days=$1)).isoformat())"; }
+#
+# THE FIRM'S DAY, WHICH IS UTC: the seed sets no time zone, so 10x Global runs on
+# UTC, and the API dates an issue or a payment on that day. The machine's own
+# day is a day ahead in India until 05:30, and a payment "received" tomorrow is
+# refused.
+day() { python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc).date()+datetime.timedelta(days=$1)).isoformat())"; }
 TODAY=$(day 0)
 LONG_AGO=$(day -75)
 LAST_MONTH=$(day -32)
@@ -193,7 +208,18 @@ if err:
 
 post()  { curl -s -XPOST "$API$1" -H "$H" -H "$A" -d "$2"; }
 as()    { curl -s -b "$J/$1.txt" "${@:2}"; }
-asp()   { curl -s -b "$J/$1.txt" -XPOST -H "$H" "${@:2}"; }
+# A POST THAT SAYS JSON SENDS JSON. A body-less POST with this content type is
+# a malformed request, and the API refuses it ("Malformed JSON in request
+# body") on every route that has a body to read, even an optional one: that is
+# what stopped this seed at the proposal's Send (audit 2026-10-03). So a call
+# that names no body sends an empty object.
+asp()   {
+  local who=$1; shift
+  case " $* " in
+    *" -d "*|*" --data "*|*" -F "*) curl -s -b "$J/$who.txt" -XPOST -H "$H" "$@" ;;
+    *) curl -s -b "$J/$who.txt" -XPOST -H "$H" -d '{}' "$@" ;;
+  esac
+}
 asput() { curl -s -b "$J/$1.txt" -XPUT  -H "$H" "${@:2}"; }
 aspat() { curl -s -b "$J/$1.txt" -XPATCH -H "$H" "${@:2}"; }
 
@@ -458,7 +484,12 @@ block '{"kind":"team","body":"Engagement Partner","sortOrder":1,"isHeading":true
 block '{"kind":"team","body":"Siddharth Rao - signs off every filing.","sortOrder":2}'
 block '{"kind":"team","body":"Delivery Team","sortOrder":3,"isHeading":true}'
 block '{"kind":"team","body":"Ravi Iyer (Manager), with Ananya Nair and Farhan Qureshi.","sortOrder":4}'
-step "3 exclusions, 2 commercial notes (one India-only), a team block"
+# THE COVER LETTER'S OPENING, in the firm's own words (its July 2026 engagement
+# letter). A letter with nothing on its cover page cannot be sent (CA#2, audit
+# 2026-10-03), and the product writes no letter prose of its own.
+block '{"kind":"cover","body":"This Engagement Letter confirms that you have engaged us to provide the services described in Annexure 1.","sortOrder":1}'
+block '{"kind":"cover","body":"Please sign this letter in the space provided below to indicate your agreement.","sortOrder":2}'
+step "3 exclusions, 2 commercial notes (one India-only), a team block, the cover letter's opening"
 
 say "Territories"
 asp partner "$API/api/v1/territory-rules" \
@@ -613,18 +644,23 @@ asp partner "$API/api/v1/leads" -d '{"source":"inbound","title":"Payroll for 40 
 step "an inbound website enquiry"
 
 say "A quote, agreed"
+# QUANTITY IS HOW MANY EACH BILLING PERIOD (decided 2026-10-03): a monthly line
+# at quantity 12 bills twelve times every month. These lines are one each; how
+# long the work runs is the letter's dates, never the quantity. They read
+# quantity 12 (and 4) until the audit of 2026-10-03, which put the demo's
+# monthly recurring revenue at INR 5,70,000 instead of INR 49,500.
 sv() { as partner "$API/api/v1/config/service/$1" | pick "next(v['id'] for v in d['versions'] if v['version']==1)"; }
 V_GST=$(sv gst-monthly); V_BOOK=$(sv bookkeeping); V_AUDIT=$(sv statutory-audit)
 V_TDS=$(sv tds-quarterly); V_PAY=$(sv payroll)
 
 PROP=$(asp partner "$API/api/v1/proposals" -d "{\"partyId\":\"$COBALT\",\"title\":\"Cobalt Foods - FY27 compliance\",\"clientJurisdiction\":\"IN\",\"currency\":\"INR\",\"fxRate\":\"1\",\"fxRateDate\":\"$TODAY\"}" | field id)
 line() { asp partner "$API/api/v1/proposals/$PROP/lines" -d "$1" > /dev/null; }
-line "{\"serviceVersionId\":\"$V_GST\",\"entityPartyId\":\"$COBALT\",\"description\":\"GST monthly filing - Cobalt Foods, 12 months\",\"quantity\":\"12\",\"unitAmount\":\"6000.00\",\"discountPercent\":\"0\",\"jurisdiction\":\"IN\"}"
-line "{\"serviceVersionId\":\"$V_GST\",\"entityPartyId\":\"$COBALT_LOG\",\"description\":\"GST monthly filing - Cobalt Logistics, 12 months\",\"quantity\":\"12\",\"unitAmount\":\"6000.00\",\"discountPercent\":\"0\",\"jurisdiction\":\"IN\"}"
-line "{\"serviceVersionId\":\"$V_TDS\",\"entityPartyId\":\"$COBALT\",\"description\":\"TDS quarterly return, 4 quarters\",\"quantity\":\"4\",\"unitAmount\":\"9000.00\",\"discountPercent\":\"0\",\"jurisdiction\":\"IN\"}"
-line "{\"serviceVersionId\":\"$V_BOOK\",\"entityPartyId\":\"$COBALT\",\"description\":\"Bookkeeping and MIS, 12 months\",\"quantity\":\"12\",\"unitAmount\":\"25000.00\",\"discountPercent\":\"10\",\"jurisdiction\":\"IN\"}"
+line "{\"serviceVersionId\":\"$V_GST\",\"entityPartyId\":\"$COBALT\",\"description\":\"GST monthly filing - Cobalt Foods\",\"quantity\":\"1\",\"unitAmount\":\"6000.00\",\"discountPercent\":\"0\",\"jurisdiction\":\"IN\"}"
+line "{\"serviceVersionId\":\"$V_GST\",\"entityPartyId\":\"$COBALT_LOG\",\"description\":\"GST monthly filing - Cobalt Logistics\",\"quantity\":\"1\",\"unitAmount\":\"6000.00\",\"discountPercent\":\"0\",\"jurisdiction\":\"IN\"}"
+line "{\"serviceVersionId\":\"$V_TDS\",\"entityPartyId\":\"$COBALT\",\"description\":\"TDS quarterly return\",\"quantity\":\"1\",\"unitAmount\":\"9000.00\",\"discountPercent\":\"0\",\"jurisdiction\":\"IN\"}"
+line "{\"serviceVersionId\":\"$V_BOOK\",\"entityPartyId\":\"$COBALT\",\"description\":\"Bookkeeping and MIS\",\"quantity\":\"1\",\"unitAmount\":\"25000.00\",\"discountPercent\":\"10\",\"jurisdiction\":\"IN\"}"
 line "{\"serviceVersionId\":\"$V_AUDIT\",\"entityPartyId\":\"$COBALT\",\"description\":\"Statutory audit FY27\",\"quantity\":\"1\",\"unitAmount\":\"175000.00\",\"discountPercent\":\"0\",\"jurisdiction\":\"IN\"}"
-line "{\"serviceVersionId\":\"$V_PAY\",\"entityPartyId\":\"$COBALT\",\"description\":\"Payroll processing, 12 months\",\"quantity\":\"12\",\"unitAmount\":\"12000.00\",\"discountPercent\":\"0\",\"jurisdiction\":\"IN\"}"
+line "{\"serviceVersionId\":\"$V_PAY\",\"entityPartyId\":\"$COBALT\",\"description\":\"Payroll processing\",\"quantity\":\"1\",\"unitAmount\":\"12000.00\",\"discountPercent\":\"0\",\"jurisdiction\":\"IN\"}"
 asp partner "$API/api/v1/proposals/$PROP/send" | ok
 # The client said yes on a call; the partner records it (0317). The firm runs
 # on UTC, so the day is the UTC one.
@@ -639,12 +675,12 @@ step "a second proposal left in draft — something to send live on stage"
 say "The letter that creates the work"
 LETTER=$(asp partner "$API/api/v1/engagement-letters" -d "{\"partyId\":\"$COBALT\",\"proposalId\":\"$PROP\",\"jurisdiction\":\"IN\",\"title\":\"Cobalt Foods - FY27 engagement\",\"currency\":\"INR\",\"fxRate\":\"1\",\"fxRateDate\":\"$TODAY\",\"background\":\"10x Global has been asked to take on the Cobalt group's indirect tax compliance, payroll, monthly bookkeeping and the FY27 statutory audit.\",\"addressedToPartyId\":\"$DIRECTOR\",\"issuedOn\":\"$LAST_MONTH\",\"effectiveFrom\":\"$LAST_MONTH\"}" | field id)
 lline() { asp partner "$API/api/v1/engagement-letters/$LETTER/lines" -d "$1" > /dev/null; }
-lline "{\"serviceVersionId\":\"$V_GST\",\"entityPartyId\":\"$COBALT\",\"description\":\"GST monthly filing - Cobalt Foods\",\"quantity\":\"12\",\"unitAmount\":\"6000.00\",\"discountPercent\":\"0\",\"billingFrequency\":\"monthly\",\"jurisdiction\":\"IN\"}"
-lline "{\"serviceVersionId\":\"$V_GST\",\"entityPartyId\":\"$COBALT_LOG\",\"description\":\"GST monthly filing - Cobalt Logistics\",\"quantity\":\"12\",\"unitAmount\":\"6000.00\",\"discountPercent\":\"0\",\"billingFrequency\":\"monthly\",\"jurisdiction\":\"IN\"}"
-lline "{\"serviceVersionId\":\"$V_TDS\",\"entityPartyId\":\"$COBALT\",\"description\":\"TDS quarterly return\",\"quantity\":\"4\",\"unitAmount\":\"9000.00\",\"discountPercent\":\"0\",\"billingFrequency\":\"quarterly\",\"jurisdiction\":\"IN\"}"
-lline "{\"serviceVersionId\":\"$V_BOOK\",\"entityPartyId\":\"$COBALT\",\"description\":\"Bookkeeping and MIS\",\"quantity\":\"12\",\"unitAmount\":\"25000.00\",\"discountPercent\":\"10\",\"billingFrequency\":\"monthly\",\"jurisdiction\":\"IN\"}"
+lline "{\"serviceVersionId\":\"$V_GST\",\"entityPartyId\":\"$COBALT\",\"description\":\"GST monthly filing - Cobalt Foods\",\"quantity\":\"1\",\"unitAmount\":\"6000.00\",\"discountPercent\":\"0\",\"billingFrequency\":\"monthly\",\"jurisdiction\":\"IN\"}"
+lline "{\"serviceVersionId\":\"$V_GST\",\"entityPartyId\":\"$COBALT_LOG\",\"description\":\"GST monthly filing - Cobalt Logistics\",\"quantity\":\"1\",\"unitAmount\":\"6000.00\",\"discountPercent\":\"0\",\"billingFrequency\":\"monthly\",\"jurisdiction\":\"IN\"}"
+lline "{\"serviceVersionId\":\"$V_TDS\",\"entityPartyId\":\"$COBALT\",\"description\":\"TDS quarterly return\",\"quantity\":\"1\",\"unitAmount\":\"9000.00\",\"discountPercent\":\"0\",\"billingFrequency\":\"quarterly\",\"jurisdiction\":\"IN\"}"
+lline "{\"serviceVersionId\":\"$V_BOOK\",\"entityPartyId\":\"$COBALT\",\"description\":\"Bookkeeping and MIS\",\"quantity\":\"1\",\"unitAmount\":\"25000.00\",\"discountPercent\":\"10\",\"billingFrequency\":\"monthly\",\"jurisdiction\":\"IN\"}"
 lline "{\"serviceVersionId\":\"$V_AUDIT\",\"entityPartyId\":\"$COBALT\",\"description\":\"Statutory audit FY27\",\"quantity\":\"1\",\"unitAmount\":\"175000.00\",\"discountPercent\":\"0\",\"billingFrequency\":\"one_time\",\"jurisdiction\":\"IN\"}"
-lline "{\"serviceVersionId\":\"$V_PAY\",\"entityPartyId\":\"$COBALT\",\"description\":\"Payroll processing\",\"quantity\":\"12\",\"unitAmount\":\"12000.00\",\"discountPercent\":\"0\",\"billingFrequency\":\"monthly\",\"jurisdiction\":\"IN\"}"
+lline "{\"serviceVersionId\":\"$V_PAY\",\"entityPartyId\":\"$COBALT\",\"description\":\"Payroll processing\",\"quantity\":\"1\",\"unitAmount\":\"12000.00\",\"discountPercent\":\"0\",\"billingFrequency\":\"monthly\",\"jurisdiction\":\"IN\"}"
 for c in governing-law-in confidentiality limitation termination; do
   CV=$(as partner "$API/api/v1/config/clause/$c" | pick "next(v['id'] for v in d['versions'] if v['version']==1)")
   asp partner "$API/api/v1/engagement-letters/$LETTER/clauses" -d "{\"clauseVersionId\":\"$CV\"}" | ok
@@ -661,27 +697,36 @@ step "signed a month ago — engagements fanned out, one per line"
 
 say "Billing"
 inv() {
-  asp partner "$API/api/v1/invoices" \
-    -d "{\"partyId\":\"$COBALT\",\"entityPartyId\":\"$FIRMENT\",\"currency\":\"INR\",\"fxRate\":\"1\",\"fxRateDate\":\"$TODAY\",\"dueOn\":\"$1\",\"seriesDate\":\"$2\"}" | field id
+  asp partner "$API/api/v1/invoices"     -d "{\"partyId\":\"$COBALT\",\"entityPartyId\":\"$FIRMENT\",\"currency\":\"INR\",\"dueOn\":\"$1\"}" | field id
 }
-I1=$(inv "$DUE_SOON" "$TODAY")
+# THE OLD, UNPAID ONE FIRST, so the series runs in date order. Issued through
+# the product, due today; then its two dates are moved back as if it had gone
+# out three months ago on 15-day terms (src/cmd/demo-history.ts, demo history
+# only). The product will not issue an invoice already overdue (B21, audit
+# 2026-10-03), which is what this seed used to do.
+I3=$(inv "$TODAY")
+asp partner "$API/api/v1/invoices/$I3/lines" -d '{"description":"Statutory audit - FY26","quantity":"1","unitAmount":"175000.00","taxPercent":"18"}' | ok
+asp partner "$API/api/v1/invoices/$I3/issue" | ok
+(cd "$(dirname "$0")/.." && npx tsx src/cmd/demo-history.ts "$I3" 90 75 | sed 's/^/    /')
+# Its number, for the partner's task about it: it is issued first, so it is the
+# first of the year's series, and the task named a number it no longer has.
+I3_NO=$(as partner "$API/api/v1/invoices/$I3" | pick "d['invoice']['number']")
+step "one 75 days overdue: the ladder will climb it to the credit-hold rung"
+
+I1=$(inv "$DUE_SOON")
 asp partner "$API/api/v1/invoices/$I1/lines" -d '{"description":"GST monthly filing - April to June","quantity":"6","unitAmount":"6000.00","taxPercent":"18"}' | ok
 asp partner "$API/api/v1/invoices/$I1/lines" -d '{"description":"Bookkeeping and MIS - April to June","quantity":"3","unitAmount":"22500.00","taxPercent":"18"}' | ok
 asp partner "$API/api/v1/invoices/$I1/issue" | ok
 asp partner "$API/api/v1/invoices/$I1/payments" -d "{\"amount\":\"50000.00\",\"receivedOn\":\"$TODAY\",\"method\":\"bank_transfer\",\"reference\":\"UTR8842190\"}" | ok
 step "one issued and part paid"
 
-# CANCELLED, and deliberately in the MIDDLE of the series. The sharpest single
-# fact in the demo: 0002 is withdrawn, keeps its number, and 0003 follows it.
-I2=$(inv "$DUE_SOON" "$TODAY")
+# A DRAFT CANCELLED BEFORE IT WENT OUT. Since 0322 a draft draws no number, so
+# this one never took one and the series has no hole; it never reaches the
+# client's portal either (F06, 0326).
+I2=$(inv "$DUE_SOON")
 asp partner "$API/api/v1/invoices/$I2/lines" -d '{"description":"Raised against the wrong entity","quantity":"1","unitAmount":"6000.00","taxPercent":"18"}' | ok
 asp partner "$API/api/v1/invoices/$I2/cancel" | ok
-step "one cancelled — it KEEPS its number, in the middle of the series"
-
-I3=$(inv "$LONG_AGO" "$LONG_AGO")
-asp partner "$API/api/v1/invoices/$I3/lines" -d '{"description":"Statutory audit - FY26","quantity":"1","unitAmount":"175000.00","taxPercent":"18"}' | ok
-asp partner "$API/api/v1/invoices/$I3/issue" | ok
-step "one 75 days overdue — the ladder will climb it to the credit-hold rung"
+step "one drafted against the wrong entity and cancelled before it went out: no number spent"
 
 # ── The engine, run once ─────────────────────────────────────────────────────
 
@@ -708,8 +753,16 @@ P_HIGH=$(vocab | pick "min(d['priorities'], key=lambda p: p['rank'])['id']")
 
 task() { asp partner "$API/api/v1/work-items" -d "$1" | field id; }
 
+# WHAT THE CLIENT SEES IS SAID, TASK BY TASK. Since V1.4 (2026-09-28) a task
+# raised by hand is hidden from the client's portal unless it says otherwise: it
+# is as often the firm talking to itself ("price the audit") as client work. So
+# the client's own work below carries `isClientVisible: true`, and the firm's own
+# (the planning memo, the partner's sign-offs, the credit hold) carries nothing.
+# This seed was written when the default was the other way round, and its asks
+# then pointed at tasks Meera could not see: ASK_NOT_FOUND (audit 2026-10-03).
+
 # LATE, and on Ananya's desk. Two rungs of the ladder have already passed it.
-W_LATE=$(task "{\"clientPartyId\":\"$COBALT\",\"entityPartyId\":\"$COBALT\",\"title\":\"GSTR-3B - Cobalt Foods - July\",\"description\":\"2B reconciled; the portal rejected the first upload and it has not been retried.\",\"priorityId\":\"$P_HIGH\",\"assigneeUserId\":\"$ANANYA_ID\",\"dueOn\":\"$LAST_WEEK\",\"isStatutoryDue\":true}")
+W_LATE=$(task "{\"clientPartyId\":\"$COBALT\",\"entityPartyId\":\"$COBALT\",\"title\":\"GSTR-3B - Cobalt Foods - July\",\"description\":\"2B reconciled; the portal rejected the first upload and it has not been retried.\",\"priorityId\":\"$P_HIGH\",\"assigneeUserId\":\"$ANANYA_ID\",\"dueOn\":\"$LAST_WEEK\",\"isStatutoryDue\":true,\"isClientVisible\":true}")
 asp partner "$API/api/v1/work-items/$W_LATE/checklist" -d '{"label":"Download 2B"}' | ok
 asp partner "$API/api/v1/work-items/$W_LATE/checklist" -d '{"label":"Reconcile against the purchase register"}' | ok
 asp partner "$API/api/v1/work-items/$W_LATE/checklist" -d '{"label":"Upload GSTR-1"}' | ok
@@ -726,25 +779,25 @@ W_NOBODY=$(task "{\"clientPartyId\":\"$LAKEVIEW\",\"entityPartyId\":\"$LAKEVIEW\
 step "TDS 26Q Q1 — a week late, on Farhan's desk"
 
 # BLOCKED, with the written reason the service and a trigger both insist on.
-W_BLOCKED=$(task "{\"clientPartyId\":\"$COBALT\",\"entityPartyId\":\"$COBALT_LOG\",\"title\":\"GSTR-3B - Cobalt Logistics - July\",\"priorityId\":\"$P_HIGH\",\"assigneeUserId\":\"$ANANYA_ID\",\"dueOn\":\"$YESTERDAY\",\"isStatutoryDue\":true}")
+W_BLOCKED=$(task "{\"clientPartyId\":\"$COBALT\",\"entityPartyId\":\"$COBALT_LOG\",\"title\":\"GSTR-3B - Cobalt Logistics - July\",\"priorityId\":\"$P_HIGH\",\"assigneeUserId\":\"$ANANYA_ID\",\"dueOn\":\"$YESTERDAY\",\"isStatutoryDue\":true,\"isClientVisible\":true}")
 asp partner "$API/api/v1/work-items/$W_BLOCKED/state" \
   -d "{\"stateId\":\"$S_BLOCKED\",\"blockedReason\":\"The client has not shared the Maharashtra purchase register. Chased on the 3rd and the 9th.\"}" | ok
 step "Cobalt Logistics July — blocked, with the reason on the card"
 
 # ONE THAT DEPENDS ON ANOTHER. Starting is refused while it is unfinished —
 # that is what a dependency SAYS.
-W_DEP=$(task "{\"clientPartyId\":\"$COBALT\",\"entityPartyId\":\"$COBALT\",\"title\":\"File the July acknowledgement\",\"priorityId\":\"$P_HIGH\",\"assigneeUserId\":\"$ANANYA_ID\",\"dueOn\":\"$TODAY\"}")
+W_DEP=$(task "{\"clientPartyId\":\"$COBALT\",\"entityPartyId\":\"$COBALT\",\"title\":\"File the July acknowledgement\",\"priorityId\":\"$P_HIGH\",\"assigneeUserId\":\"$ANANYA_ID\",\"dueOn\":\"$TODAY\",\"isClientVisible\":true}")
 asp partner "$API/api/v1/work-items/$W_DEP/dependencies" -d "{\"dependsOnWorkItemId\":\"$W_LATE\"}" | ok
 step "…and one waiting on it"
 
 # IN REVIEW. Ananya did it, so Ananya may not check it — the database refuses
 # it. It goes to Ravi, who is a manager.
-W_REVIEW=$(task "{\"clientPartyId\":\"$COBALT\",\"entityPartyId\":\"$COBALT\",\"title\":\"Management pack - June\",\"priorityId\":\"$P_HIGH\",\"assigneeUserId\":\"$ANANYA_ID\",\"dueOn\":\"$YESTERDAY\"}")
+W_REVIEW=$(task "{\"clientPartyId\":\"$COBALT\",\"entityPartyId\":\"$COBALT\",\"title\":\"Management pack - June\",\"priorityId\":\"$P_HIGH\",\"assigneeUserId\":\"$ANANYA_ID\",\"dueOn\":\"$YESTERDAY\",\"isClientVisible\":true}")
 asp ananya "$API/api/v1/work-items/$W_REVIEW/review" -d '{}' | ok
 step "Management pack June — waiting to be checked (Ananya made it, so Ananya cannot)"
 
 # DONE, so the board has something behind the "include finished work" switch.
-W_DONE=$(task "{\"clientPartyId\":\"$COBALT\",\"entityPartyId\":\"$COBALT\",\"title\":\"GSTR-3B - Cobalt Foods - June\",\"assigneeUserId\":\"$ANANYA_ID\",\"dueOn\":\"$LAST_MONTH\",\"isStatutoryDue\":true}")
+W_DONE=$(task "{\"clientPartyId\":\"$COBALT\",\"entityPartyId\":\"$COBALT\",\"title\":\"GSTR-3B - Cobalt Foods - June\",\"assigneeUserId\":\"$ANANYA_ID\",\"dueOn\":\"$LAST_MONTH\",\"isStatutoryDue\":true,\"isClientVisible\":true}")
 asp partner "$API/api/v1/work-items/$W_DONE/state" -d "{\"stateId\":\"$S_DONE\"}" | ok
 step "GSTR-3B June — filed, behind the finished-work switch"
 
@@ -762,13 +815,12 @@ step "FY27 audit planning memo — with Ravi, in progress"
 W_P1=$(task "{\"clientPartyId\":\"$COBALT\",\"entityPartyId\":\"$COBALT\",\"title\":\"Sign off the FY27 audit engagement\",\"description\":\"Independence confirmation and the engagement quality review before fieldwork opens.\",\"priorityId\":\"$P_HIGH\",\"assigneeUserId\":\"$PARTNER_ID\",\"dueOn\":\"$DUE_SOON\"}")
 W_P2=$(task "{\"clientPartyId\":\"$LAKEVIEW\",\"entityPartyId\":\"$LAKEVIEW\",\"title\":\"Price the Lakeview audit before the proposal goes out\",\"assigneeUserId\":\"$PARTNER_ID\",\"dueOn\":\"$YESTERDAY\"}")
 # NOT CLIENT-VISIBLE, and it is the row that shows why that flag exists (T6.5).
-# `is_client_visible` defaults TRUE — the client's own answer, "clients would be
-# able to see their tasks" — and the exceptions are MARKED rather than the rule
-# inverted. This is an exception: deciding whether to put a client on credit hold
-# is the firm talking to itself about that client's money, and the description
-# names the rung the ladder stopped on. Walking the portal is what found it
-# sitting on Meera's page.
-W_P3=$(task "{\"clientPartyId\":\"$COBALT\",\"entityPartyId\":\"$COBALT\",\"title\":\"Decide the credit hold on INV/2026-27/0003\",\"description\":\"75 days overdue. The ladder has climbed to the credit-hold rung and stopped - only a partner may apply it.\",\"priorityId\":\"$P_HIGH\",\"assigneeUserId\":\"$PARTNER_ID\",\"dueOn\":\"$TODAY\",\"isClientVisible\":false}")
+# Deciding whether to put a client on credit hold is the firm talking to itself
+# about that client's money, and the description names the rung the ladder
+# stopped on. Walking the portal is what found it sitting on Meera's page, when
+# a hand-raised task was visible unless marked; since V1.4 it is hidden unless
+# marked, and this one still says `false` out loud.
+W_P3=$(task "{\"clientPartyId\":\"$COBALT\",\"entityPartyId\":\"$COBALT\",\"title\":\"Decide the credit hold on $I3_NO\",\"description\":\"75 days overdue. The ladder has climbed to the credit-hold rung and stopped - only a partner may apply it.\",\"priorityId\":\"$P_HIGH\",\"assigneeUserId\":\"$PARTNER_ID\",\"dueOn\":\"$TODAY\",\"isClientVisible\":false}")
 step "three on Siddharth's own desk - one late, one due today, one the client cannot see"
 
 # ── WHAT THE FIRM IS WAITING ON THE CLIENT FOR (T6.6) ──────────────────────

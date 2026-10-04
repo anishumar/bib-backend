@@ -51,6 +51,7 @@ interface JobContextSource {
   readonly entityName: string | null;
   readonly periodLabel: string | null;
   readonly dueOn: string | null;
+  readonly filingDueOn: string | null;
   readonly services: readonly { readonly serviceName: string }[];
 }
 
@@ -66,8 +67,13 @@ const StepJobContextSchema = z
     }),
     dueOn: z.string().nullable().openapi({
       description:
-        "`YYYY-MM-DD`: the earliest due day of the job's unfinished tasks, which is what a step " +
-        "on it is due by. Null when none carries a date.",
+        "`YYYY-MM-DD`: what a step on this job is due by: the earliest due day of the job's " +
+        "unfinished tasks, and never after `filingDueOn`. Null when neither carries a date.",
+    }),
+    filingDueOn: z.string().nullable().openapi({
+      description:
+        "`YYYY-MM-DD`: the earliest legal due day of an unfiled filing this job's work is for " +
+        "(same company, a rule on its service, a period inside the job's). Null when none.",
     }),
   })
   .openapi("StepJobContext");
@@ -82,6 +88,7 @@ function jobContextWire(d: JobContextSource | undefined): z.infer<typeof StepJob
     periodLabel: d.periodLabel,
     services: d.services.map((s) => s.serviceName),
     dueOn: d.dueOn,
+    filingDueOn: d.filingDueOn,
   };
 }
 
@@ -282,6 +289,14 @@ const MyStepSchema = z
     label: z.string(),
     status: z.enum(["pending", "running", "blocked", "done", "skipped", "failed"]),
     job: StepJobContextSchema.nullable().openapi({ description: JOB_CONTEXT_DESCRIPTION }),
+    sentBack: z
+      .object({ notes: z.string().nullable(), decidedAt: z.string(), decidedByName: z.string().nullable() })
+      .nullable()
+      .openapi({
+        description:
+          "Sent back and not done again (CA#29): the latest decided check on the step was a " +
+          "send-back and none is open. The checker's note, when, and by whom. Null otherwise.",
+      }),
   })
   .openapi("MyStep");
 
@@ -858,16 +873,27 @@ export function registerOrchestratorRoutes(
     const steps = await deps.service.myOpenSteps(s.tenantId, s.userId);
     // ONE describe for the whole desk, never one per step.
     const jobs = await deps.jobs.describeJobs(s.tenantId, [...new Set(steps.map((st) => st.jobId))]);
+    // And one read for what was sent back (CA#29), never one per step.
+    const sentBack = new Map(
+      (await deps.service.sentBackSteps(s.tenantId, steps.map((st) => st.id))).map((b) => [b.jobStepId, b]),
+    );
     return c.json(
       {
-        steps: steps.map((st) => ({
-          id: st.id,
-          jobId: st.jobId,
-          stepKey: st.stepKey,
-          label: st.label,
-          status: st.status,
-          job: jobContextWire(jobs.get(st.jobId)),
-        })),
+        steps: steps.map((st) => {
+          const back = sentBack.get(st.id);
+          return {
+            id: st.id,
+            jobId: st.jobId,
+            stepKey: st.stepKey,
+            label: st.label,
+            status: st.status,
+            job: jobContextWire(jobs.get(st.jobId)),
+            sentBack:
+              back === undefined
+                ? null
+                : { notes: back.notes, decidedAt: back.decidedAt, decidedByName: back.decidedByName },
+          };
+        }),
       },
       200,
     );

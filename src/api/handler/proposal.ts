@@ -33,6 +33,7 @@ import type { EmailOutcome } from "../../usecase/proposal/service";
 import type { SharedProposal } from "../../usecase/proposal/ports";
 import type { BillingFrequency } from "../../domain/document/model";
 import { SYSTEM_ACTOR } from "../../domain/ledger/model";
+import { contentDispositionFor } from "../../domain/filestore/model";
 
 export interface ProposalDeps {
   readonly service: ProposalService;
@@ -460,6 +461,12 @@ const ProposalRecordSchema = z
     /** The money per billing frequency, summed by the database (D8): what a
      *  reader is shown instead of one net that adds monthly to one-time. */
     totalsByFrequency: z.array(FrequencyTotalSchema),
+    annualValue: AmountSchema.nullable().openapi({
+      description:
+        "What the recurring fees come to over a year (CA#42): monthly x 12, quarterly x 4, annually " +
+        "x 1, added by the database. No one-off or custom fee is in it. Null when nothing priced " +
+        "recurs, or for a caller without the fee axis.",
+    }),
     /** Sections and codes, from the SAME plan the PDF is rendered from. */
     document: ProposalPlanSchema,
     lines: z.array(ProposalLineSchema),
@@ -733,7 +740,12 @@ const AddLineRequest = z
      * schema could not express the difference until now, and quoting an unpriced
      * line at zero says something completely different to a client.
      */
-    unitAmount: AmountSchema.optional(),
+    unitAmount: AmountSchema.optional().openapi({
+      description:
+        "The fee. Omit it and `pricingNote` both to quote the catalogue's list price for this " +
+        "service in the proposal's currency (B09): how a login that cannot see fees adds a " +
+        "priced service. SERVICE_HAS_NO_LIST_PRICE (400) when there is none.",
+    }),
     discountPercent: AmountSchema.default("0"),
     /** Where the WORK is — the country the user picked. Not derived. */
     jurisdiction: JurisdictionSchema.optional(),
@@ -1433,6 +1445,7 @@ function toRecordBody(record: ProposalView, fees: boolean): z.infer<typeof Propo
       jurisdiction: record.issuer.jurisdiction,
     },
     issuedOn: record.issuedOn,
+    annualValue: fees ? record.annualValue : null,
     totalsByFrequency: record.totalsByFrequency.map((t) => ({
       frequency: t.frequency,
       net: fees ? t.net : null,
@@ -1818,7 +1831,9 @@ export function registerProposalRoutes(app: OpenAPIHono<AppEnv>, deps: ProposalD
       headers: {
         "content-type": "application/pdf",
         "content-length": String(pdf.bytes.byteLength),
-        "content-disposition": `attachment; filename="${pdf.filename.replace(/[^\w.-]/g, "_")}"`,
+        // Both forms (RFC 6266): the file's own name, client and all (CA#56),
+        // which may carry spaces and a client's name in any script.
+        "content-disposition": contentDispositionFor(pdf.filename),
         "x-content-type-options": "nosniff",
         // A capability's bytes: nothing in between keeps a copy.
         "cache-control": "private, no-store",

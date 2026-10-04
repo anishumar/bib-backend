@@ -8,6 +8,7 @@
 // proposals — but the CLAUSES are not. A delivery associate needs to know what
 // the firm undertook, and the scope and liability terms are the work, not the
 // fee.
+import type { LetterBillingTiming } from "../../domain/engagement/model";
 import { createRoute } from "@hono/zod-openapi";
 import type { OpenAPIHono } from "@hono/zod-openapi";
 import type { AppEnv } from "../guards";
@@ -113,6 +114,9 @@ const TotalsSchema = z
 const MoneySchema = z.object({ amount: AmountSchema, currency: CurrencySchema });
 
 /** The closed set lives in the domain; zod needs a literal tuple. */
+/** When a recurring fee is invoiced (0319), the domain's own list. */
+const LETTER_BILLING_TIMINGS = ["arrears", "advance", "on_date"] as const satisfies readonly LetterBillingTiming[];
+
 export const BILLING_FREQUENCY_VALUES = [
   "one_time",
   "monthly",
@@ -289,6 +293,21 @@ const LetterLineSchema = z
     jurisdiction: z.string().nullable(),
     /** How often this DEAL is billed. */
     billingFrequency: z.enum(BILLING_FREQUENCY_VALUES).nullable(),
+    billingTiming: z.enum(LETTER_BILLING_TIMINGS).nullable().openapi({
+      description:
+        "When the fee is invoiced (0319): `arrears` (after each period), `advance` (at its start) " +
+        "or `on_date` (from `billingOn`, then one span after). Null: not chosen, billed after each " +
+        "period. Only for a monthly, quarterly or yearly fee.",
+    }),
+    billingOn: DaySchema.nullable().openapi({ description: "The first invoice date, with `on_date` only." }),
+    advanceAmount: AmountSchema.nullable().openapi({
+      description:
+        "This service's own advance, before tax (0320): its work waits until the advance invoice is " +
+        "paid. Null: none, or hidden without the fee axis (see `hasAdvance`).",
+    }),
+    hasAdvance: z.boolean().openapi({
+      description: "Whether this service has its own advance. Never redacted, so a screen can say so.",
+    }),
     /** WHY there is no amount. Not redacted: it is what prints where a figure
      *  would. */
     pricingNote: z.string().nullable(),
@@ -318,6 +337,8 @@ const FeeGroupSchema = z
     position: z.number().int(),
     title: z.string(),
     billingFrequency: z.enum(BILLING_FREQUENCY_VALUES),
+    billingTiming: z.enum(LETTER_BILLING_TIMINGS).nullable(),
+    billingOn: DaySchema.nullable(),
     /** PER BILLING PERIOD. Null when redacted. */
     amount: AmountSchema.nullable(),
     currency: CurrencySchema,
@@ -746,6 +767,12 @@ const UpdateLetterLineRequest = z
     unitAmount: AmountSchema.nullable().optional(),
     discountPercent: AmountSchema.optional(),
     billingFrequency: z.enum(BILLING_FREQUENCY_VALUES).nullable().optional(),
+    /** Null clears it. Sent with `billingOn` when it is `on_date`. */
+    billingTiming: z.enum(LETTER_BILLING_TIMINGS).nullable().optional(),
+    billingOn: DaySchema.nullable().optional(),
+    /** This service's own advance, before tax (0320). Null clears it. Refused
+     *  on a grouped line and on a letter with one advance for the whole of it. */
+    advanceAmount: AmountSchema.nullable().optional(),
     pricingNote: z.string().max(2000).nullable().optional(),
     effectiveFrom: DaySchema.nullable().optional(),
     jurisdiction: JurisdictionSchema.nullable().optional(),
@@ -765,7 +792,12 @@ const AddLineRequest = z
     quantity: AmountSchema.default("1"),
     /** OPTIONAL since G1.6: omit it for a line that is genuinely "as mutually
      *  agreed" and send `pricingNote`. Omitting it is NOT sending "0". */
-    unitAmount: AmountSchema.optional(),
+    unitAmount: AmountSchema.optional().openapi({
+      description:
+        "The fee. Omit it and `pricingNote` both to quote the catalogue's list price for this " +
+        "service in the letter's currency (B09): how a login that cannot see fees adds a priced " +
+        "service. SERVICE_HAS_NO_LIST_PRICE (400) when there is none.",
+    }),
     discountPercent: AmountSchema.default("0"),
     effectiveFrom: DaySchema.optional().openapi({
       description:
@@ -776,6 +808,13 @@ const AddLineRequest = z
     /** How often this DEAL is billed. Omit and it defaults from the PINNED
      *  service's `recurrence`. */
     billingFrequency: z.enum(BILLING_FREQUENCY_VALUES).optional(),
+    billingTiming: z.enum(LETTER_BILLING_TIMINGS).optional().openapi({
+      description:
+        "When the fee is invoiced (0319): `arrears` (after each period), `advance` (at its start) " +
+        "or `on_date` (from `billingOn`, then one span after). Null: not chosen, billed after each " +
+        "period. Only for a monthly, quarterly or yearly fee.",
+    }),
+    billingOn: DaySchema.optional(),
     /** THIS LETTER'S OWN WORDING for any of the four scope blocks — what makes
      *  a signed document reproducible. Omit any and the pinned catalogue
      *  version's words print. */
@@ -802,6 +841,8 @@ const FeeGroupRequest = z
   .object({
     title: z.string().min(1).max(200),
     billingFrequency: z.enum(BILLING_FREQUENCY_VALUES),
+    billingTiming: z.enum(LETTER_BILLING_TIMINGS).optional(),
+    billingOn: DaySchema.optional(),
     /** PER BILLING PERIOD — 5000 on a monthly group is 5,000 a month. */
     amount: AmountSchema,
     paymentTerms: z.string().max(500).optional(),
@@ -818,6 +859,8 @@ const EditFeeGroupRequest = z
   .object({
     title: z.string().min(1).max(200).optional(),
     billingFrequency: z.enum(BILLING_FREQUENCY_VALUES).optional(),
+    billingTiming: z.enum(LETTER_BILLING_TIMINGS).nullable().optional(),
+    billingOn: DaySchema.nullable().optional(),
     amount: AmountSchema.optional(),
     paymentTerms: z.string().max(500).optional(),
     feeDescription: z.string().max(2000).optional(),
@@ -968,6 +1011,13 @@ const BillableEngagementSchema = z
     endsOn: DaySchema.nullable(),
     /** Why it ended (V2.3), in the firm's words. Null until it is ended. */
     endReason: z.string().nullable(),
+    billingFrom: DaySchema.nullable().openapi({
+      description:
+        "The first period billed (0318), its first day. Null with `firstInvoiceOn`: billing not set up.",
+    }),
+    firstInvoiceOn: DaySchema.nullable().openapi({
+      description: "The date the first period's invoice falls due; each later period one billing span after.",
+    }),
     feeGroup: z
       .object({
         id: z.string().uuid(),
@@ -1702,27 +1752,6 @@ const recordAcceptanceRoute = createRoute({
   },
 });
 
-const advanceRoute = createRoute({
-  method: "post",
-  path: "/api/v1/engagement-letters/{letterId}/advance",
-  tags: ["engagement-letters"],
-  summary: "Record the advance as received",
-  description:
-    "Releases every engagement waiting on it. HONEST LIMIT: a person asserts the money " +
-    "arrived — payments (T3.5) do not exist yet. The gate is real; its confirmation is an " +
-    "attestation until they do.",
-  request: { params: z.object({ letterId: z.string().uuid() }) },
-  responses: {
-    200: {
-      description: "Recorded, with the engagements released",
-      content: { "application/json": { schema: SignedResponse } },
-    },
-    401: errorResponse("Not signed in"),
-    403: errorResponse("No org selected, or the role does not permit it"),
-    404: errorResponse("No such letter at this firm"),
-    409: errorResponse("No advance is required, or it was already recorded"),
-  },
-});
 
 // ── Mapping ─────────────────────────────────────────────────────────────────
 
@@ -1923,6 +1952,10 @@ function toRecordBody(record: LetterView, fees: boolean): z.infer<typeof LetterR
       effectiveFrom: l.line.effectiveFrom,
       jurisdiction: l.line.jurisdiction,
       billingFrequency: l.line.billingFrequency,
+      billingTiming: l.line.billingTiming,
+      billingOn: l.line.billingOn,
+      advanceAmount: fees ? l.line.advanceAmount : null,
+      hasAdvance: l.line.advanceAmount !== null,
       pricingNote: l.line.pricingNote,
       oopEstimate: fees && l.line.oopEstimate !== null ? { ...l.line.oopEstimate } : null,
       feeGroupId: l.line.feeGroupId,
@@ -1989,6 +2022,8 @@ function toFeeGroupBody(g: FeeGroupRecord, fees: boolean): z.infer<typeof FeeGro
     position: g.group.position,
     title: g.group.title,
     billingFrequency: g.group.billingFrequency,
+    billingTiming: g.group.billingTiming,
+    billingOn: g.group.billingOn,
     amount: fees ? g.group.amount : null,
     currency: g.group.currency,
     paymentTerms: fees ? g.group.paymentTerms : null,
@@ -2044,6 +2079,10 @@ function toLineEchoBody(line: LetterLine, fees: boolean): z.infer<typeof LetterL
     effectiveFrom: line.effectiveFrom,
     jurisdiction: line.jurisdiction,
     billingFrequency: line.billingFrequency,
+    billingTiming: line.billingTiming,
+    billingOn: line.billingOn,
+    advanceAmount: fees ? line.advanceAmount : null,
+    hasAdvance: line.advanceAmount !== null,
     pricingNote: line.pricingNote,
     oopEstimate: fees && line.oopEstimate !== null ? { ...line.oopEstimate } : null,
     feeGroupId: line.feeGroupId,
@@ -2171,6 +2210,8 @@ export function registerEngagementRoutes(app: OpenAPIHono<AppEnv>, deps: Engagem
           effectiveFrom: e.effectiveFrom,
           endsOn: e.endsOn,
           endReason: e.endReason,
+          billingFrom: e.billingFrom,
+          firstInvoiceOn: e.firstInvoiceOn,
           feeGroup:
             e.feeGroup === null
               ? null
@@ -2441,28 +2482,6 @@ export function registerEngagementRoutes(app: OpenAPIHono<AppEnv>, deps: Engagem
       {
         letter: toLetterBody(result.letter, fees),
         engagements: result.engagements.map(toEngagementBody),
-      },
-      200,
-    );
-  });
-
-  app.openapi(advanceRoute, async (c) => {
-    const s = scopeOf(c.get("principal"));
-    if (!s.ok) return c.json(s.deny, s.status);
-    const principal = c.get("principal");
-    const { letterId } = c.req.valid("param");
-    // The person recording it is the SESSION's user, never a field in the body:
-    // an attestation somebody could attribute to a colleague is not one.
-    const result = await deps.service.recordAdvance(
-      s.tenantId,
-      letterId,
-      principal?.userId ?? "",
-      s.actor,
-    );
-    return c.json(
-      {
-        letter: toLetterBody(result.letter, seesFees(principal)),
-        engagements: result.released.map(toEngagementBody),
       },
       200,
     );

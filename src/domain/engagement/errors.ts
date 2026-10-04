@@ -1,4 +1,6 @@
 import type { LetterDeletionBlock } from "./model";
+import { countryCodeProblem } from "../country";
+import { amountProblem } from "../money/model";
 
 // Sentinel errors — the closed vocabulary of ways engagement letters fail.
 // Owned here in the domain; the api layer maps them to HTTP status codes.
@@ -25,6 +27,7 @@ export type EngagementErrorCode =
   | "LETTER_NOT_SIGNABLE"
   | "EMPTY_LETTER"
   | "NO_CLAUSES"
+  | "LETTER_HAS_NO_BODY"
   | "INVALID_LETTER_TRANSITION"
   | "INVALID_JURISDICTION"
   | "CLAUSE_NOT_FOUND"
@@ -39,8 +42,12 @@ export type EngagementErrorCode =
   | "ADVANCE_AMOUNT_REQUIRED"
   | "INVALID_AMOUNT"
   | "UNPRICED_LINE_NEEDS_REASON"
+  | "SERVICE_HAS_NO_LIST_PRICE"
   | "UNPRICED_LINE_HAS_DISCOUNT"
   | "INVALID_BILLING_FREQUENCY"
+  | "INVALID_BILLING_TIMING"
+  | "INVALID_LINE_ADVANCE"
+  | "ONE_KIND_OF_ADVANCE"
   | "INVALID_OOP_ESTIMATE"
   | "INVALID_DATE"
   | "LETTER_NOT_SUPERSEDABLE"
@@ -290,7 +297,7 @@ export class LetterNotEditable extends EngagementError {
     super(
       "LETTER_NOT_EDITABLE",
       status === "signed"
-        ? `this letter is signed, and a signed letter never changes — the database refuses it, ` +
+        ? `this letter is signed, and a signed letter never changes: the database refuses it, ` +
           `not just this code. It is the record of what the client agreed to. Draft a new ` +
           `letter that supersedes it; the old one stays readable as what was actually signed.`
         : `this letter is ${status}, and only a draft can be changed. The client has it as it ` +
@@ -316,9 +323,27 @@ export class NoClauses extends EngagementError {
     // into it.
     super(
       "NO_CLAUSES",
-      `An engagement letter with no clauses has no terms — no scope, no liability limit, no ` +
+      `An engagement letter with no clauses has no terms: no scope, no liability limit, no ` +
         `termination. Signing one leaves the firm bound by whatever is read into it. Add at ` +
         `least one clause from the library first.`,
+    );
+  }
+}
+
+/**
+ * CA#2 (audit 2026-10-03): a letter whose cover page says nothing. A new firm
+ * has no standard opening, so its first letter went out as "Dear Anil
+ * Deshpande, / Yours sincerely," with nothing between. The product writes no
+ * letter prose (0083), so it refuses to send one with none and says where the
+ * words go.
+ */
+export class LetterHasNoBody extends EngagementError {
+  constructor() {
+    super(
+      "LETTER_HAS_NO_BODY",
+      `This letter has no opening text: page 1 goes from the greeting straight to "Yours ` +
+        `sincerely,". Write a few lines under Cover letter before sending it. Once the firm's ` +
+        `standard opening is set in Standard wording, every new letter starts with it.`,
     );
   }
 }
@@ -327,8 +352,8 @@ export class InvalidLetterTransition extends EngagementError {
   constructor(from: string, to: string) {
     super(
       "INVALID_LETTER_TRANSITION",
-      `An engagement letter cannot go from ${from} to ${to}. Signing is final — the document ` +
-        `freezes — and a withdrawn letter stays withdrawn, so that the interval in which it ` +
+      `An engagement letter cannot go from ${from} to ${to}. Signing is final: the document ` +
+        `freezes, and a withdrawn letter stays withdrawn, so that the interval in which it ` +
         `was off the table is still on the record.`,
     );
   }
@@ -338,9 +363,7 @@ export class InvalidJurisdiction extends EngagementError {
   constructor(value: string) {
     super(
       "INVALID_JURISDICTION",
-      `Jurisdiction ${JSON.stringify(value)} is not an ISO 3166 country code — two letters, ` +
-        `like "IN" or "AE". The letter records the jurisdiction it was WRITTEN for, which is ` +
-        `not always the client's or the firm's, so it has to be stated rather than inferred.`,
+      countryCodeProblem(value),
     );
   }
 }
@@ -373,7 +396,7 @@ export class ClauseNotPublished extends EngagementError {
       "CLAUSE_NOT_PUBLISHED",
       `Clause version ${JSON.stringify(versionId)} is still a draft and was never in force, so ` +
         `it cannot be put in a contract. Publish it first. (A version that has since been ` +
-        `superseded is fine — that is what a pinned clause is supposed to resolve to.)`,
+        `superseded is fine: that is what a pinned clause is supposed to resolve to.)`,
     );
   }
 }
@@ -439,7 +462,7 @@ export class IssuerJurisdictionUnknown extends EngagementError {
     super(
       "ISSUER_JURISDICTION_UNKNOWN",
       `The clause ${JSON.stringify(title)} names a governing law or a forum, and this letter is ` +
-        `issued by ${JSON.stringify(entityName)}, which has no registered jurisdiction — so ` +
+        `issued by ${JSON.stringify(entityName)}, which has no registered jurisdiction, so ` +
         `there is nothing to check the term against. Register that entity (its jurisdiction, ` +
         `entity type and incorporation) and the clause goes on, or use a clause that names ` +
         `neither term.`,
@@ -487,9 +510,27 @@ export class InvalidAmount extends EngagementError {
   constructor(field: string, value: string) {
     super(
       "INVALID_AMOUNT",
-      `${field} ${JSON.stringify(value)} must be a non-negative decimal STRING with at most ` +
-        `four decimal places — "25000", "1499.50" — never a number, because a float cannot ` +
-        `hold 1499.50 exactly.`,
+      amountProblem(`The ${field}`, value, {
+        ...(field === "discount" ? { percent: true } : {}),
+        ...(field === "exchange rate" ? { places: 10 } : {}),
+      }),
+    );
+  }
+}
+
+/**
+ * A line with neither a fee nor a reason, for a service the catalogue has no
+ * list price for in this letter's currency (B09, audit 2026-10-03). Such a
+ * line is quoted at the list price when there is one, which is how a login
+ * that cannot see fees adds a priced service without being shown the price;
+ * with none, it has to be told what to send.
+ */
+export class ServiceHasNoListPrice extends EngagementError {
+  constructor(serviceName: string, currency: string) {
+    super(
+      "SERVICE_HAS_NO_LIST_PRICE",
+      `${serviceName} has no list price in ${currency} in the catalogue. ` +
+        "Enter the fee, or say why there is no fixed fee.",
     );
   }
 }
@@ -498,7 +539,7 @@ export class UnpricedLineNeedsReason extends EngagementError {
   constructor() {
     super(
       "UNPRICED_LINE_NEEDS_REASON",
-      `A line with no unit amount has to say WHY — "As mutually agreed". Send a "pricingNote" ` +
+      `A line with no unit amount has to say WHY: "As mutually agreed". Send a "pricingNote" ` +
         `with it. On a letter this is a TERM: the signature commits to it, and a blank where a ` +
         `price belongs is a term nobody can read afterwards.`,
     );
@@ -525,12 +566,53 @@ export class InvalidLineBillingFrequency extends EngagementError {
   }
 }
 
+/** When a recurring fee is invoiced (0319): one of three words, a date with
+ *  "on_date" and only with it, and only for a fee billed per period. */
+export class InvalidLetterBillingTiming extends EngagementError {
+  constructor(reason: string) {
+    super(
+      "INVALID_BILLING_TIMING",
+      `Billing timing: ${reason}. Send "arrears" (after each period), "advance" (at its start) ` +
+        `or "on_date" with "billingOn" (YYYY-MM-DD), for a monthly, quarterly or yearly fee only.`,
+    );
+  }
+}
+
+/** A service's own advance (0320): an amount above zero, before tax, on a line
+ *  priced on its own. */
+export class InvalidLineAdvance extends EngagementError {
+  constructor(reason: string) {
+    super(
+      "INVALID_LINE_ADVANCE",
+      `Advance: ${reason}. Send "advanceAmount" as a decimal string above zero (at most four decimals, ` +
+        `before tax), or null for none. A service in a fee group has no advance of its own: ` +
+        `ask for one advance for the whole letter instead.`,
+    );
+  }
+}
+
+/** A letter asks for ONE advance for the whole of it, or one per service, never
+ *  both (the user, 2026-10-01): two advances on one service would hold its work
+ *  for two payments. */
+export class OneKindOfAdvance extends EngagementError {
+  constructor(has: "letter" | "services") {
+    super(
+      "ONE_KIND_OF_ADVANCE",
+      has === "letter"
+        ? `This letter already asks for one advance for the whole letter, so a service cannot have ` +
+            `its own as well. Turn the letter's advance off first, or keep it and leave the services without one.`
+        : `Some services on this letter have their own advance, so the letter cannot also ask for one ` +
+            `for the whole of it. Clear the services' advances first, or keep them.`,
+    );
+  }
+}
+
 export class InvalidOutOfPocketEstimate extends EngagementError {
   constructor(reason: string) {
     super(
       "INVALID_OOP_ESTIMATE",
-      `Out-of-pocket estimate: ${reason}. It is a RANGE in its own currency — ` +
-        `{"min": "5000", "max": "6000", "currency": "USD"} — reimbursed at actuals and separate ` +
+      `Out-of-pocket estimate: ${reason}. It is a RANGE in its own currency: ` +
+        `{"min": "5000", "max": "6000", "currency": "USD"}, reimbursed at actuals and separate ` +
         `from the fee, so all three travel together or none of them do.`,
     );
   }
@@ -540,7 +622,7 @@ export class InvalidDate extends EngagementError {
   constructor(field: string, value: string) {
     super(
       "INVALID_DATE",
-      `${field} ${JSON.stringify(value)} must be a calendar day as YYYY-MM-DD — "2026-10-01". ` +
+      `${field} ${JSON.stringify(value)} must be a calendar day as YYYY-MM-DD: "2026-10-01". ` +
         `A day, not an instant: an engagement that begins on 1 October begins on the client's ` +
         `1 October, and midnight UTC is somebody else's evening.`,
     );
@@ -716,7 +798,7 @@ export class QuoteNotAccepted extends EngagementError {
     super(
       "QUOTE_NOT_ACCEPTED",
       `${ref} is ${status}, and a letter is drafted from a quote the client has ACCEPTED. ` +
-        `Record the acceptance first — that is the act that turns an offer into something to ` +
+        `Record the acceptance first: that is the act that turns an offer into something to ` +
         `write up. A quote that was rejected or has expired is not re-opened: a client who ` +
         `comes back is a new quote.`,
     );
@@ -739,7 +821,7 @@ export class QuoteJurisdictionUnclear extends EngagementError {
       "QUOTE_JURISDICTION_UNCLEAR",
       found.length === 0
         ? `no line on ${ref} says which country the work is in, and a letter states one for the ` +
-            `whole document — it settles governing law, the courts, and which of the firm's own ` +
+            `whole document: it settles governing law, the courts, and which of the firm's own ` +
             `companies contracts. Say which.`
         : `${ref} quotes work in ${found.join(", ")}, and a letter states ONE country for the ` +
             `whole document because that is what decides its governing law. Say which this ` +
@@ -773,7 +855,7 @@ export class FeeGroupTitleRequired extends EngagementError {
   constructor() {
     super(
       "FEE_GROUP_TITLE_REQUIRED",
-      `A fee group needs a title — "Ongoing recurring services". It is the heading of its ` +
+      `A fee group needs a title: "Ongoing recurring services". It is the heading of its ` +
         `section of the letter and the name its row in the Summary of Fees goes by.`,
     );
   }
@@ -811,7 +893,7 @@ export class GroupedLinePriced extends EngagementError {
   constructor() {
     super(
       "GROUPED_LINE_PRICED",
-      `A service covered by a fee group has no price or discount of its own — the group's fee ` +
+      `A service covered by a fee group has no price or discount of its own: the group's fee ` +
         `pays for it, and a price on both would charge the client twice. Leave "unitAmount" ` +
         `out and send a discount of "0", or take the service out of the group.`,
     );

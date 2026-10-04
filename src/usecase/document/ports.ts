@@ -193,6 +193,40 @@ export interface FirmEntityRecord {
   readonly routedCountries: readonly string[];
   /** Whether it answers for every country the firm has no company in (`*`). */
   readonly isFallback: boolean;
+  /**
+   * What prints under its name on an invoice and a letter (audit 2026-10-03,
+   * B12 / CA#18), each the identifier IN FORCE today, or null: its tax
+   * registration (a GSTIN in India, a TRN in the UAE, an EIN in the US, a VAT
+   * number elsewhere), its PAN (India), and how to reach it.
+   */
+  readonly taxRegistration: FirmEntityNumber | null;
+  readonly pan: string | null;
+  readonly phone: string | null;
+  readonly email: string | null;
+}
+
+/** One of a company's numbers: which kind, and its value. */
+export interface FirmEntityNumber {
+  readonly type: string;
+  readonly value: string;
+}
+
+/**
+ * One of a company's numbers set or cleared. Every identifier of `types` in
+ * force on the company is VOIDED (the company form holds the current number,
+ * and the documents already out froze theirs, 0334), then `set` is added, in
+ * force from today. A tax registration's `types` are all four kinds, so a
+ * company changing country's kind of number cannot keep two.
+ */
+export interface FirmEntityNumberWrite {
+  readonly types: readonly string[];
+  readonly set: { readonly id: string; readonly type: string; readonly value: string } | null;
+}
+
+/** What a write of numbers did, for the events: never the values. */
+export interface FirmEntityNumbersWritten {
+  readonly added: readonly { readonly id: string; readonly type: string }[];
+  readonly voided: readonly { readonly id: string; readonly type: string }[];
 }
 
 /** A new company of the firm's, with the preference row that makes it the
@@ -205,6 +239,8 @@ export interface NewFirmEntity {
   readonly entityType: string;
   readonly registeredAddress: RegisteredAddress | null;
   readonly preferenceId: string;
+  /** Its numbers, written in the same transaction (audit 2026-10-03). */
+  readonly numbers: readonly FirmEntityNumberWrite[];
 }
 
 /** A change to one of the firm's companies. `register` records the country of
@@ -214,6 +250,8 @@ export interface FirmEntityChange {
   readonly entityType?: string | undefined;
   readonly registeredAddress?: RegisteredAddress | null | undefined;
   readonly register?: { readonly jurisdiction: string; readonly entityType: string } | undefined;
+  /** Numbers set or cleared, in the same transaction (audit 2026-10-03). */
+  readonly numbers?: readonly FirmEntityNumberWrite[] | undefined;
 }
 
 export interface FirmEntityRepository {
@@ -232,9 +270,23 @@ export interface FirmEntityRepository {
   /**
    * The party, the organization, the legal entity and the preference row, in
    * ONE transaction — a company half-created would be an organization with no
-   * country, or one no rule names, and would sit in the client list. Returns
-   * false, having written nothing, when another company took the country first.
+   * country, or one no rule names, and would sit in the client list. Answers
+   * `{ created: false }`, having written nothing, when another company took
+   * the country first, and `{ taken }` when another party at the firm already
+   * holds one of its numbers (the kind), writing nothing either.
    */
-  create(e: NewFirmEntity): Promise<boolean>;
-  edit(tenantId: string, partyId: string, change: FirmEntityChange): Promise<void>;
+  create(
+    e: NewFirmEntity,
+  ): Promise<
+    | { readonly created: true; readonly numbers: FirmEntityNumbersWritten }
+    | { readonly created: false }
+    | { readonly taken: string }
+  >;
+  /** One transaction; `{ taken }` (the kind) and nothing written when another
+   *  party at the firm already holds a number it sets. */
+  edit(
+    tenantId: string,
+    partyId: string,
+    change: FirmEntityChange,
+  ): Promise<{ readonly numbers: FirmEntityNumbersWritten } | { readonly taken: string }>;
 }

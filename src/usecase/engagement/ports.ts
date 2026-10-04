@@ -1,6 +1,8 @@
 // The ports the engagement use case needs from the world. Interfaces are owned
 // by the use case that needs them; adapters in infrastructure/ implement them,
 // and two are satisfied by other use cases at the composition root.
+import type { Actor } from "../../domain/ledger/model";
+import type { LetterBillingTiming } from "../../domain/engagement/model";
 import type { NewRecordedAcceptance, RecordedAcceptance } from "../../domain/acceptance/model";
 import type { Amount, CurrencyCode, Money } from "../../domain/money/model";
 import type { EngagementErrorCode } from "../../domain/engagement/errors";
@@ -81,6 +83,44 @@ export interface ClientStructureDirectory {
  * Which zone the firm keeps its calendar in — "today", for the day a client's
  * structure is read on. Structural: `PostgresFirmTimeZone` satisfies it.
  */
+/**
+ * Sets each engagement's billing schedule from its letter when the work goes
+ * live (0319, phase 1b): at signature for those it activated, and when an
+ * advance is recorded for those it released. Satisfied structurally by
+ * `BillingDeskService`, so neither use case imports the other. It decides
+ * nothing here: whether the firm bills automatically, and what the schedule
+ * is, are the billing desk's rules.
+ */
+/**
+ * Fills the firm's compliance calendar now, as tonight's sweep would (audit
+ * 2026-10-03, CA#24): a client signed today sees the filings its services owe
+ * at once, not after the nightly pass. Satisfied structurally by
+ * `ObligationService.fillCalendar`, so neither use case imports the other. It
+ * decides nothing here: which periods are owed is the generator's rule.
+ */
+export interface CalendarFiller {
+  fillCalendar(tenantId: string, actor: Actor): Promise<unknown>;
+}
+
+export interface GoLiveBilling {
+  scheduleActivated(
+    input: { readonly tenantId: string; readonly engagementIds: readonly string[]; readonly liveOn: string },
+    actor: Actor,
+  ): Promise<unknown>;
+}
+
+/**
+ * Writes the advance bill(s) a signed letter owes (0320): the letter's one, or
+ * one per service with its own advance. Satisfied structurally by the billing
+ * desk's `AdvanceBiller`, so neither use case imports the other. Every advance
+ * is a tax invoice, and the work it holds starts when that invoice is paid.
+ */
+/** A signed letter's advance becomes a bill and a draft invoice (0320, 0322),
+ *  satisfied by the billing use case. */
+export interface AdvanceBilling {
+  billAdvances(input: { readonly tenantId: string; readonly letterId: string }, actor: Actor): Promise<unknown>;
+}
+
 export interface FirmTimeZone {
   timeZoneFor(tenantId: string): Promise<string>;
 }
@@ -208,6 +248,11 @@ export interface LetterLineEdit {
   readonly effectiveFrom: string | null;
   readonly jurisdiction: string | null;
   readonly billingFrequency: BillingFrequency | null;
+  /** When it is invoiced (0319), judged with the frequency above. */
+  readonly billingTiming: LetterBillingTiming | null;
+  readonly billingOn: string | null;
+  /** This service's own advance, before tax (0320); null = none. */
+  readonly advanceAmount: Amount | null;
   readonly scopeOverride: string | null;
   readonly clientObligationsOverride: string | null;
   readonly volumeLimitsOverride: string | null;
@@ -336,6 +381,12 @@ export interface NewLetterLine {
   /** RESOLVED before it gets here: the caller's value, else the pinned
    *  service's `recurrence`, else null. */
   readonly billingFrequency: BillingFrequency | null;
+  /** When it is invoiced (0319); null = not chosen. Validated upstream. */
+  readonly billingTiming: LetterBillingTiming | null;
+  readonly billingOn: string | null;
+  /** Its own advance (0320). Absent or null = none; only a copy carries one,
+   *  since a line is given its advance on the letter page. */
+  readonly advanceAmount?: Amount | null | undefined;
   readonly scopeOverride: string | null;
   readonly clientObligationsOverride: string | null;
   readonly volumeLimitsOverride: string | null;
@@ -357,6 +408,8 @@ export interface NewFeeGroup {
   readonly currency: CurrencyCode;
   readonly title: string;
   readonly billingFrequency: BillingFrequency;
+  readonly billingTiming: LetterBillingTiming | null;
+  readonly billingOn: string | null;
   readonly amount: Amount;
   readonly paymentTerms: string | null;
   readonly feeDescription: string | null;
@@ -370,6 +423,9 @@ export interface NewFeeGroup {
 export interface FeeGroupEdit {
   readonly title?: string | undefined;
   readonly billingFrequency?: BillingFrequency | undefined;
+  /** With `billingOn`: both written, or neither. */
+  readonly billingTiming?: LetterBillingTiming | null | undefined;
+  readonly billingOn?: string | null | undefined;
   readonly amount?: Amount | undefined;
   readonly paymentTerms?: string | null | undefined;
   readonly feeDescription?: string | null | undefined;
@@ -461,8 +517,9 @@ export interface NewEngagement {
   /** Who the work is for, taken from the LINE rather than the letter — that is
    *  the whole point of G0.1. */
   readonly entityPartyId: string;
-  /** `active` when the letter needs no advance, `pending_advance` when it does.
-   *  Decided by the domain's `mayActivate`, never by the adapter. */
+  /** `active`: since 0322 the advance no longer holds the work, so every
+   *  engagement a signature creates starts active (`pending_advance` was the
+   *  0320 gate's, and survives only on work signed before 0322). */
   readonly status: EngagementStatus;
   readonly activatedAt: string | null;
   /** Resolved once, here, from line → letter → signature date. NOT NULL in the
@@ -892,14 +949,10 @@ export interface EngagementRepository {
   /** The acceptance recorded for this letter (0317), or null. */
   findRecordedAcceptance(tenantId: string, letterId: string): Promise<RecordedAcceptance | null>;
 
-  /** Records the advance and releases every engagement waiting on it, in one
-   *  transaction for the same reason. */
-  recordAdvance(
-    tenantId: string,
-    letterId: string,
-    recordedByUserId: string,
-    at: string,
-  ): Promise<{ letter: EngagementLetter; released: readonly Engagement[] }>;
+  /** Work signed before 0322 that still waits on its advance starts (0322's
+   *  catch-up): these engagements become active. Only those still
+   *  `pending_advance`: the write is the lock, so a second call answers none. */
+  releaseEngagements(tenantId: string, engagementIds: readonly string[], at: string): Promise<readonly Engagement[]>;
 
   listEngagements(tenantId: string, letterId: string): Promise<readonly Engagement[]>;
 
@@ -1308,6 +1361,10 @@ export interface BillableEngagement {
   readonly endsOn: string | null;
   /** Why it ended (V2.3), in the firm's words; null until it is ended. */
   readonly endReason: string | null;
+  /** The billing schedule (0318): the first period billed and the date its
+   *  invoice falls due. Both null: billing not set up. */
+  readonly billingFrom: string | null;
+  readonly firstInvoiceOn: string | null;
   /**
    * The FEE GROUP that prices this engagement, or null (0083).
    *
@@ -1379,7 +1436,8 @@ export interface EngagementLifecycle {
   ): Promise<EndOutcome | null>;
   pause(
     tenantId: string,
-    input: { readonly engagementId: string; readonly byUserId: string | null },
+    /** `pausedOn` is the firm's day, kept after the resume (0318). */
+    input: { readonly engagementId: string; readonly byUserId: string | null; readonly pausedOn: string },
   ): Promise<Engagement | null>;
   resume(
     tenantId: string,

@@ -1,5 +1,5 @@
 // Setup readiness (V2.6): is this firm set up well enough for the product to
-// run its work? Eight lines, each one a fact the database can answer and a
+// run its work? Thirteen lines, each one a fact the database can answer and a
 // screen that fixes it.
 //
 // ── WHY IT EXISTS ───────────────────────────────────────────────────────────
@@ -11,6 +11,16 @@
 // the list that says so, and it is computed, never ticked by hand: fixing a gap
 // turns its line done on the next read.
 //
+// ── NOTHING TO CHECK IS NOT DONE (audit 2026-10-03, CA#15) ──────────────────
+//
+// A line about clients on a firm with no clients has nothing missing, and it
+// used to say Done: an empty firm read "4 of 8 done" on its first morning, a
+// progress it had not made. A line with nothing to look at now says so
+// (`nothing_to_check`) and is neither done nor to do, so the count is of the
+// lines that apply. The first-week blockers that exist as data (the firm's
+// company details, its time zone, its people, a service, standard terms) are
+// lines of their own: they were the ones a new firm actually stopped on.
+//
 // ── WHAT IT DELIBERATELY DOES NOT CHECK ─────────────────────────────────────
 //
 // The NUMBERS on a ladder (decision D3 is open: the firm has not given its
@@ -18,13 +28,20 @@
 // never "these days". Nor does it decide which services OUGHT to file: a
 // bookkeeping service may owe nothing, so the rules line asks that the calendar
 // has something confirmed to generate from, and that nothing linked is left
-// unconfirmed.
+// unconfirmed. Nor the firm's own GSTIN or PAN: there is nowhere to record
+// them yet, and a line nobody can turn done is noise.
 //
 // Pure: facts in, lines out. The adapter gathers the facts; this decides.
+import { isZoneChosen, zoneForCountries } from "../tenancy/model";
 
 /** The lines, in the order a firm sets itself up (handover-flow.md). */
 export const READINESS_KEYS = [
+  "company_details",
+  "time_zone",
+  "staff",
   "deadlines",
+  "services",
+  "standard_terms",
   "reporting_lines",
   "request_routing",
   "processes",
@@ -36,6 +53,10 @@ export const READINESS_KEYS = [
 
 export type ReadinessKey = (typeof READINESS_KEYS)[number];
 
+/** Done, to do, or nothing to look at yet (no clients, no services). */
+export const READINESS_STATES = ["done", "to_do", "nothing_to_check"] as const;
+export type ReadinessState = (typeof READINESS_STATES)[number];
+
 /**
  * One thing that is missing, on one subject.
  *
@@ -44,10 +65,11 @@ export type ReadinessKey = (typeof READINESS_KEYS)[number];
  * copy is the screen's.
  */
 export interface ReadinessGap {
-  /** The subject's id (a client's party id, a person's user id, a rule's id),
-   *  or null when the gap is the firm's own. */
+  /** The subject's id (a client's party id, a person's user id, a rule's id,
+   *  one of the firm's companies), or null when the gap is the firm's own. */
   readonly id: string | null;
-  /** A key the screen can link with (a service's catalogue key), or null. */
+  /** A key the screen can link with (a service's catalogue key), or on
+   *  `time_zone` the zone the firm's companies settle, or null. */
   readonly ref: string | null;
   /** The subject's name as the firm wrote it; empty for the firm's own gap. */
   readonly name: string;
@@ -56,6 +78,8 @@ export interface ReadinessGap {
 
 export interface ReadinessLine {
   readonly key: ReadinessKey;
+  readonly state: ReadinessState;
+  /** `state === "done"`. Kept because every reader before 2026-10-03 reads it. */
   readonly done: boolean;
   readonly gaps: readonly ReadinessGap[];
   /** Names that explain WHY a line applies at all (the check rules that read
@@ -67,6 +91,21 @@ export interface ReadinessLine {
 export interface ReadinessFacts {
   /** The firm's day the account team and portal grants were read on. */
   readonly day: string;
+  /** The firm's own companies, not archived or retired, and whether each has
+   *  its country and its registered address. */
+  readonly companies: readonly {
+    readonly partyId: string;
+    readonly name: string;
+    /** ISO 3166-1 alpha-2, or null when the company is not registered. */
+    readonly country: string | null;
+    readonly hasAddress: boolean;
+  }[];
+  /** `tenancy.tenant.time_zone`. 'UTC' is the default nobody chose (0071). */
+  readonly timeZone: string;
+  /** Active staff logins, the person reading included. */
+  readonly activeStaff: number;
+  /** Standard terms (clauses) with a version in force. */
+  readonly publishedTerms: number;
   /** Every client with an active engagement, not archived. */
   readonly activeClients: readonly {
     readonly partyId: string;
@@ -103,43 +142,95 @@ export interface ReadinessFacts {
 }
 
 function line(key: ReadinessKey, gaps: readonly ReadinessGap[], context: readonly string[] = []): ReadinessLine {
-  return { key, done: gaps.length === 0, gaps, context };
+  const state: ReadinessState = gaps.length === 0 ? "done" : "to_do";
+  return { key, state, done: state === "done", gaps, context };
+}
+
+/** A line with no subject yet: neither done nor to do. */
+function nothingToCheck(key: ReadinessKey): ReadinessLine {
+  return { key, state: "nothing_to_check", done: false, gaps: [], context: [] };
 }
 
 const firm = (missing: string): ReadinessGap => ({ id: null, ref: null, name: "", missing: [missing] });
 
-/** The eight lines, in `READINESS_KEYS` order. */
+/** The lines, in `READINESS_KEYS` order. */
 export function readinessLines(f: ReadinessFacts): readonly ReadinessLine[] {
   const lines: Record<ReadinessKey, ReadinessLine> = {
+    // Every company the firm issues from has its country (which law its
+    // letters and filings follow) and its registered address (what a letter
+    // and an invoice print). A firm always has at least itself.
+    company_details: line(
+      "company_details",
+      f.companies.length === 0
+        ? [firm("company")]
+        : f.companies
+            .filter((c) => c.country === null || !c.hasAddress)
+            .map((c) => ({
+              id: c.partyId,
+              ref: null,
+              name: c.name,
+              missing: [...(c.country === null ? ["country"] : []), ...(c.hasAddress ? [] : ["address"])],
+            })),
+    ),
+
+    // UTC is the default nobody chose. `ref` is the zone the firm's companies
+    // settle between them, when they settle one, so the screen can offer it.
+    // It is never applied for the firm: the zone is the firm's call.
+    time_zone: line(
+      "time_zone",
+      isZoneChosen(f.timeZone)
+        ? []
+        : [
+            {
+              id: null,
+              ref: zoneForCountries(f.companies.map((c) => c.country)),
+              name: "",
+              missing: ["time_zone"],
+            },
+          ],
+    ),
+
+    // Somebody besides the one person a new firm is created with.
+    staff: line("staff", f.activeStaff >= 2 ? [] : [firm("colleagues")]),
+
     // The go-live floor and the financial year's first month.
     deadlines: line("deadlines", [
       ...(f.missedFromOn === null ? [firm("go_live_floor")] : []),
       ...(f.fiscalYearStartMonth === null ? [firm("fiscal_year_start")] : []),
     ]),
 
+    services: line("services", f.services.length > 0 ? [] : [firm("service")]),
+
+    // A letter cannot be written without a term in force (CA#3).
+    standard_terms: line("standard_terms", f.publishedTerms > 0 ? [] : [firm("standard_terms")]),
+
     // Only where a check rule reads them. `reporting_line_or_rank` falls back
     // to rank, so a person with no manager can still be checked there.
-    reporting_lines: line(
-      "reporting_lines",
+    reporting_lines:
       f.reportingLinePolicies.length === 0
-        ? []
-        : f.staffWithoutManager.map((p) => ({ id: p.userId, ref: null, name: p.name, missing: ["manager"] })),
-      f.reportingLinePolicies,
-    ),
+        ? nothingToCheck("reporting_lines")
+        : line(
+            "reporting_lines",
+            f.staffWithoutManager.map((p) => ({ id: p.userId, ref: null, name: p.name, missing: ["manager"] })),
+            f.reportingLinePolicies,
+          ),
 
     request_routing: line("request_routing", f.requestRouting === "none" ? [firm("routing")] : []),
 
-    processes: line(
-      "processes",
-      f.services
-        .filter((s) => s.processKey === null || !s.processPublished)
-        .map((s) => ({
-          id: null,
-          ref: s.key,
-          name: s.name,
-          missing: [s.processKey === null ? "process" : "published_process"],
-        })),
-    ),
+    processes:
+      f.services.length === 0
+        ? nothingToCheck("processes")
+        : line(
+            "processes",
+            f.services
+              .filter((s) => s.processKey === null || !s.processPublished)
+              .map((s) => ({
+                id: null,
+                ref: s.key,
+                name: s.name,
+                missing: [s.processKey === null ? "process" : "published_process"],
+              })),
+          ),
 
     compliance_rules: line("compliance_rules", [
       ...(f.generatingRules === 0 ? [firm("confirmed_linked_rule")] : []),
@@ -153,27 +244,33 @@ export function readinessLines(f: ReadinessFacts): readonly ReadinessLine[] {
       ...(f.ladders.nudge ? [] : [firm("nudge")]),
     ]),
 
-    account_team: line(
-      "account_team",
-      f.activeClients
-        .filter((c) => !c.hasKeyManager || c.deptsWithoutSpoc.length > 0)
-        .map((c) => ({
-          id: c.partyId,
-          ref: null,
-          name: c.name,
-          missing: [
-            ...(c.hasKeyManager ? [] : ["key_manager"]),
-            ...c.deptsWithoutSpoc.map((d) => `spoc:${d}`),
-          ],
-        })),
-    ),
+    account_team:
+      f.activeClients.length === 0
+        ? nothingToCheck("account_team")
+        : line(
+            "account_team",
+            f.activeClients
+              .filter((c) => !c.hasKeyManager || c.deptsWithoutSpoc.length > 0)
+              .map((c) => ({
+                id: c.partyId,
+                ref: null,
+                name: c.name,
+                missing: [
+                  ...(c.hasKeyManager ? [] : ["key_manager"]),
+                  ...c.deptsWithoutSpoc.map((d) => `spoc:${d}`),
+                ],
+              })),
+          ),
 
-    portal_contacts: line(
-      "portal_contacts",
-      f.activeClients
-        .filter((c) => !c.hasPortalLogin)
-        .map((c) => ({ id: c.partyId, ref: null, name: c.name, missing: ["portal_login"] })),
-    ),
+    portal_contacts:
+      f.activeClients.length === 0
+        ? nothingToCheck("portal_contacts")
+        : line(
+            "portal_contacts",
+            f.activeClients
+              .filter((c) => !c.hasPortalLogin)
+              .map((c) => ({ id: c.partyId, ref: null, name: c.name, missing: ["portal_login"] })),
+          ),
   };
   return READINESS_KEYS.map((k) => lines[k]);
 }

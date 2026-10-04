@@ -28,6 +28,7 @@ import type {
   WorkItemCheck,
   WorkItemDependency,
   WorkItemDependencyRecord,
+  WorkItemNote,
   WorkItemPriority,
   WorkItemRecord,
   WorkItemState,
@@ -37,8 +38,10 @@ import type {
   EngagementWork,
   EngagementWorkSource,
   JobStepHandover,
+  LinkableFiling,
   NewWorkItem,
   NewWorkItemApproval,
+  NewWorkItemNote,
   NewWorkItemPriority,
   NewWorkItemState,
   ObligationCoverage,
@@ -215,6 +218,7 @@ export class FakeWorkVocabularyRepo implements WorkVocabularyRepository {
 export class FakeWorkItemRepo implements WorkItemRepository {
   readonly rows: WorkItem[] = [];
   readonly checklist: ChecklistItem[] = [];
+  readonly notes: WorkItemNote[] = [];
   readonly dependencies: WorkItemDependency[] = [];
   /** Set by the test harness so the read model can resolve names and flags —
    *  the joins the real query does. */
@@ -509,6 +513,27 @@ export class FakeWorkItemRepo implements WorkItemRepository {
     return next;
   }
 
+  addNote(note: NewWorkItemNote): Promise<WorkItemNote> {
+    // The composite foreign key, reproduced: a note hangs off a task of THIS firm.
+    if (!this.rows.some((r) => r.tenantId === note.tenantId && r.id === note.workItemId)) {
+      throw new Error(`no work item ${note.workItemId} at this firm`);
+    }
+    const row: WorkItemNote = {
+      ...note,
+      authorName: this.people.get(note.authorUserId)?.displayName ?? null,
+    };
+    this.notes.push(row);
+    return Promise.resolve(row);
+  }
+
+  listNotes(tenantId: string, workItemId: string): Promise<readonly WorkItemNote[]> {
+    return Promise.resolve(
+      this.notes
+        .filter((n) => n.tenantId === tenantId && n.workItemId === workItemId)
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+    );
+  }
+
   private async toRecord(r: WorkItem): Promise<WorkItemRecord> {
     const state = await this.vocabulary.findState(r.tenantId, r.stateId);
     const priority = await this.vocabulary.findPriority(r.tenantId, r.priorityId);
@@ -536,6 +561,23 @@ export class FakeWorkItemRepo implements WorkItemRepository {
         this.approvals?.rows.some((a) => a.workItemId === r.id && a.decision === "pending") ??
         false,
       blockedByOpen: await this.openBlockers(r.tenantId, r.id),
+      sentBack: this.sentBackOf(r, state.isTerminal),
+    };
+  }
+
+  /** The SQL's rule (CA#29), reproduced: the latest decided review was a
+   *  send-back, none is open, and the task is not finished. */
+  private sentBackOf(r: WorkItem, finished: boolean): WorkItemRecord["sentBack"] {
+    const reviews = (this.approvals?.rows ?? []).filter((a) => a.workItemId === r.id);
+    if (finished || reviews.some((a) => a.decision === "pending")) return null;
+    const decided = reviews.filter((a) => a.decision !== "pending" && a.decidedAt !== null);
+    const latest = decided.at(-1);
+    if (latest?.decision !== "rejected" || latest.decidedAt === null) return null;
+    return {
+      notes: latest.notes,
+      decidedAt: latest.decidedAt,
+      decidedByName:
+        latest.decidedBy === null ? null : (this.people.get(latest.decidedBy)?.displayName ?? null),
     };
   }
 }
@@ -562,6 +604,7 @@ export class FakeWorkItemApprovalRepo implements WorkItemApprovalRepository {
       submittedAt: "2026-08-30T00:00:00.000Z",
       policyVersionId: approval.policyVersionId,
       policyKey: approval.policyKey,
+      requestNote: approval.requestNote,
       decision: "pending",
       notes: null,
       decidedBy: null,
@@ -621,6 +664,8 @@ export class FakeWorkItemApprovalRepo implements WorkItemApprovalRepository {
     workItemTitle: this.items?.rows.find((r) => r.id === a.workItemId)?.title ?? "",
     clientName: "",
     clientPartyId: this.items?.rows.find((r) => r.id === a.workItemId)?.clientPartyId ?? "",
+    entityPartyId: this.items?.rows.find((r) => r.id === a.workItemId)?.entityPartyId ?? null,
+    entityName: null,
     dueOn: this.items?.rows.find((r) => r.id === a.workItemId)?.dueOn ?? null,
     submittedByName: null,
     policyLabel: null,
@@ -737,6 +782,10 @@ export class FakeReviewPolicies implements ReviewPolicySource {
       [...this.published.values()].find((p) => p.versionId === versionId) ?? null,
     );
   }
+
+  publishedPolicies(_tenantId: string): Promise<readonly ResolvedReviewPolicy[]> {
+    return Promise.resolve([...this.published.values()].sort((a, b) => a.key.localeCompare(b.key)));
+  }
 }
 
 export class FakeReviewers implements ReviewerDirectory {
@@ -806,6 +855,19 @@ export class FakeObligationCoverage implements ObligationCoverage {
     const covered = await this.coveredEngagements(tenantId, engagementIds);
     return new Set([...covered].filter((id) => !this.ownProcess.has(id)));
   }
+
+  /** The earliest unfiled filing's legal date per engagement, as a test sets it. */
+  readonly filingDue = new Map<string, string>();
+  readonly filingDueAsked: { engagementId: string; start: string; end: string }[] = [];
+
+  earliestFilingDue(
+    _tenantId: string,
+    engagementId: string,
+    period: { readonly start: string; readonly end: string },
+  ): Promise<string | null> {
+    this.filingDueAsked.push({ engagementId, start: period.start, end: period.end });
+    return Promise.resolve(this.filingDue.get(engagementId) ?? null);
+  }
 }
 
 /**
@@ -818,6 +880,40 @@ export class FakeObligationCoverage implements ObligationCoverage {
  */
 export class FakeObligationFiling implements ObligationFiling {
   readonly calls: { workItemId: string; discharged: boolean }[] = [];
+  /** What `filingsForTask` answers, and what `linkTask` was told (CA#36). */
+  readonly filings: LinkableFiling[] = [];
+  readonly links: {
+    obligationId: string;
+    task: { id: string; entityPartyId: string; discharged: boolean };
+  }[] = [];
+  readonly unlinked: string[] = [];
+
+  filingsForTask(
+    _tenantId: string,
+    workItemId: string,
+    _entityPartyId: string,
+  ): Promise<{ readonly linked: LinkableFiling | null; readonly open: readonly LinkableFiling[] }> {
+    const link = this.links.find((l) => l.task.id === workItemId);
+    return Promise.resolve({
+      linked: link === undefined ? null : (this.filings.find((f) => f.obligationId === link.obligationId) ?? null),
+      open: this.filings.filter((f) => !this.links.some((l) => l.obligationId === f.obligationId)),
+    });
+  }
+
+  linkTask(
+    _tenantId: string,
+    obligationId: string,
+    task: { readonly id: string; readonly entityPartyId: string; readonly discharged: boolean },
+    _actor: Actor,
+  ): Promise<void> {
+    this.links.push({ obligationId, task: { ...task } });
+    return Promise.resolve();
+  }
+
+  unlinkTask(_tenantId: string, workItemId: string, _actor: Actor): Promise<void> {
+    this.unlinked.push(workItemId);
+    return Promise.resolve();
+  }
 
   reconcileFiling(
     _tenantId: string,

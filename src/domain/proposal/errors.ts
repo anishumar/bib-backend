@@ -5,6 +5,8 @@ import type { ProposalDeletionBlock } from "./model";
 // Match with `instanceof`, never by string.
 
 import { longDay } from "../day";
+import { countryCodeProblem } from "../country";
+import { amountProblem } from "../money/model";
 
 export class ProposalError extends Error {
   constructor(
@@ -39,6 +41,7 @@ export type ProposalErrorCode =
   | "INVALID_QUANTITY"
   | "INVALID_UNIT_AMOUNT"
   | "UNPRICED_LINE_NEEDS_REASON"
+  | "SERVICE_HAS_NO_LIST_PRICE"
   | "UNPRICED_LINE_HAS_DISCOUNT"
   | "INVALID_BILLING_FREQUENCY"
   | "INVALID_LINE_JURISDICTION"
@@ -314,7 +317,7 @@ export class NotADraft extends ProposalError {
       "NOT_A_DRAFT",
       `This proposal is ${status}, and only a draft can be changed. The client has the document ` +
         `as it was sent; altering it now would leave no record of what they were shown. Draft a ` +
-        `new proposal instead — the old one stays readable as what was actually offered.`,
+        `new proposal instead: the old one stays readable as what was actually offered.`,
     );
   }
 }
@@ -354,7 +357,7 @@ export class ProposalExpired extends ProposalError {
     super(
       "PROPOSAL_EXPIRED",
       `This proposal was valid until ${longDay(validUntil)} and has now been marked expired. ` +
-        `Honouring it late is a commercial decision, not a data one — draft a new proposal, dated today.`,
+        `Honouring it late is a commercial decision, not a data one: draft a new proposal, dated today.`,
     );
   }
 }
@@ -365,7 +368,7 @@ export class DiscountNeedsApproval extends ProposalError {
       "DISCOUNT_NEEDS_APPROVAL",
       limit === null
         ? `this proposal discounts a line by ${largest}%, and this firm has published no discount ` +
-          `policy — so any discount at all needs sign-off from somebody holding ` +
+          `policy, so any discount at all needs sign-off from somebody holding ` +
           `"proposal:approve". Publish a policy with a maxDiscountPercent to set a limit.`
         : `this proposal discounts a line by ${largest}%, past this firm's published limit of ` +
           `${limit}%. Somebody holding "proposal:approve" has to sign it off before it can be sent.`,
@@ -396,7 +399,7 @@ export class AlreadyApproved extends ProposalError {
       "ALREADY_APPROVED",
       `This proposal's discount was already approved at ${approvedAt}. Approving again would ` +
         `record a second sign-off for one decision in a log that cannot be corrected. If the ` +
-        `discount has changed since, the quote has too — draft a new proposal.`,
+        `discount has changed since, the quote has too: draft a new proposal.`,
     );
   }
 }
@@ -430,7 +433,7 @@ export class ServiceNotPublished extends ProposalError {
       "SERVICE_NOT_PUBLISHED",
       `Configuration version ${JSON.stringify(versionId)} is still a draft and was never in ` +
         `force, so it cannot be quoted. Publish it first. (A version that has since been ` +
-        `superseded is fine — that is what a pinned quote is supposed to resolve to.)`,
+        `superseded is fine: that is what a pinned quote is supposed to resolve to.)`,
     );
   }
 }
@@ -444,7 +447,7 @@ export class ShareLinkUnknown extends ProposalError {
     super(
       "SHARE_LINK_UNKNOWN",
       `This link is not one we recognise. It may have been mistyped, or the proposal may have ` +
-        `been withdrawn — ask whoever sent it for a new one.`,
+        `been withdrawn: ask whoever sent it for a new one.`,
     );
   }
 }
@@ -453,9 +456,7 @@ export class InvalidQuantity extends ProposalError {
   constructor(quantity: string) {
     super(
       "INVALID_QUANTITY",
-      `Quantity ${JSON.stringify(quantity)} must be a positive decimal STRING with at most four ` +
-        `decimal places — "1", "2.5". A number is refused for the same reason an amount is: a ` +
-        `float does not hold it exactly.`,
+      amountProblem("The quantity", quantity),
     );
   }
 }
@@ -464,9 +465,24 @@ export class InvalidUnitAmount extends ProposalError {
   constructor(amount: string) {
     super(
       "INVALID_UNIT_AMOUNT",
-      `Unit amount ${JSON.stringify(amount)} must be a non-negative decimal STRING with at most ` +
-        `four decimal places — "25000", "1499.50" — never a number, because a float cannot hold ` +
-        `1499.50 exactly and the error is invisible in one line and material in a total.`,
+      amountProblem("The fee", amount),
+    );
+  }
+}
+
+/**
+ * A line with neither a fee nor a reason, for a service the catalogue has no
+ * list price for in this proposal's currency (B09, audit 2026-10-03). Such a
+ * line is quoted at the list price when there is one, which is how a login
+ * that cannot see fees adds a priced service without being shown the price;
+ * with none, it has to be told what to send.
+ */
+export class ServiceHasNoListPrice extends ProposalError {
+  constructor(serviceName: string, currency: string) {
+    super(
+      "SERVICE_HAS_NO_LIST_PRICE",
+      `${serviceName} has no list price in ${currency} in the catalogue. ` +
+        "Enter the fee, or say why there is no fixed fee.",
     );
   }
 }
@@ -475,7 +491,7 @@ export class UnpricedLineNeedsReason extends ProposalError {
   constructor() {
     super(
       "UNPRICED_LINE_NEEDS_REASON",
-      `A line with no unit amount has to say WHY — "As mutually agreed", "Quoted on receipt of ` +
+      `A line with no unit amount has to say WHY: "As mutually agreed", "Quoted on receipt of ` +
         `the registrar's schedule". Send a "pricingNote" with it. Leaving a price blank with no ` +
         `reason is indistinguishable on the client's document from a figure somebody forgot to ` +
         `type, and quoting it as "0" says something different again.`,
@@ -500,7 +516,7 @@ export class InvalidLineBillingFrequency extends ProposalError {
     super(
       "INVALID_BILLING_FREQUENCY",
       `Billing frequency ${JSON.stringify(value)} must be one of ${allowed.join(", ")}. It is ` +
-        `how often this DEAL is invoiced, which is not how often the work comes round — a ` +
+        `how often this DEAL is invoiced, which is not how often the work comes round: a ` +
         `monthly service billed quarterly is why it is a field at all.`,
     );
   }
@@ -510,8 +526,7 @@ export class InvalidLineJurisdiction extends ProposalError {
   constructor(value: string) {
     super(
       "INVALID_LINE_JURISDICTION",
-      `Line jurisdiction ${JSON.stringify(value)} is not an ISO 3166 country code — two ` +
-        `letters, like "IN" or "AE". It is where the WORK is, stated rather than inferred.`,
+      countryCodeProblem(value),
     );
   }
 }
@@ -520,8 +535,8 @@ export class InvalidOutOfPocketEstimate extends ProposalError {
   constructor(reason: string) {
     super(
       "INVALID_OOP_ESTIMATE",
-      `Out-of-pocket estimate: ${reason}. It is a RANGE in its own currency — ` +
-        `{"min": "5000", "max": "6000", "currency": "USD"} — reimbursed at actuals and separate ` +
+      `Out-of-pocket estimate: ${reason}. It is a RANGE in its own currency: ` +
+        `{"min": "5000", "max": "6000", "currency": "USD"}, reimbursed at actuals and separate ` +
         `from the fee, so all three travel together or none of them do. Its currency need not be ` +
         `the document's: a client quoted in INR still faces a filing fee in USD.`,
     );
@@ -532,7 +547,7 @@ export class InvalidDiscount extends ProposalError {
   constructor(percent: string) {
     super(
       "INVALID_DISCOUNT",
-      `Discount ${JSON.stringify(percent)} must be a decimal STRING between "0" and "100".`,
+      amountProblem("The discount", percent, { percent: true }),
     );
   }
 }
@@ -541,9 +556,8 @@ export class InvalidFxRate extends ProposalError {
   constructor(rate: string) {
     super(
       "INVALID_FX_RATE",
-      `Exchange rate ${JSON.stringify(rate)} must be a positive decimal STRING. Quote in the ` +
-        `firm's own currency and it is "1" — stored, not omitted, so that "did we convert this?" ` +
-        `is never a question about a missing value.`,
+      // Quote in the firm's own currency and it is "1", stored, not omitted.
+      amountProblem("The exchange rate", rate, { places: 10 }),
     );
   }
 }
@@ -552,7 +566,7 @@ export class InvalidQuoteCurrency extends ProposalError {
   constructor(currency: string) {
     super(
       "INVALID_CURRENCY",
-      `Quote currency ${JSON.stringify(currency)} is not an ISO 4217 code — three letters, like ` +
+      `Quote currency ${JSON.stringify(currency)} is not an ISO 4217 code: three letters, like ` +
         `"INR" or "AED".`,
     );
   }

@@ -53,7 +53,11 @@ export type WorkItemErrorCode =
   | "REVIEW_ALREADY_DECIDED"
   | "REVIEW_SELF_APPROVAL"
   | "REVIEW_REJECTION_NEEDS_NOTE"
-  | "REVIEWER_NOT_ELIGIBLE";
+  | "REVIEWER_NOT_ELIGIBLE"
+  | "CHECKLIST_OPEN"
+  | "REVIEW_RULE_NEEDED"
+  | "NOTE_REQUIRED"
+  | "NOTE_TOO_LONG";
 
 // ── the firm's vocabulary ──────────────────────────────────────────────────
 
@@ -62,7 +66,7 @@ export class InvalidVocabularyCode extends WorkItemError {
     super(
       "INVALID_VOCABULARY_CODE",
       `Code ${JSON.stringify(code)} is not a lowercase handle (2-40 chars, letters, digits, ` +
-        `"-" or "_") — like "waiting_client". It is the firm's stable name for the row and ` +
+        `"-" or "_"): like "waiting_client". It is the firm's stable name for the row and ` +
         `nothing in the product compares it; the label people read is the name, which has no ` +
         `such restriction.`,
     );
@@ -74,7 +78,7 @@ export class InvalidRank extends WorkItemError {
     super(
       "INVALID_RANK",
       `Rank ${JSON.stringify(rank)} must be a whole number above zero, where 1 is the MOST ` +
-        `urgent. Ranks need not be unique or consecutive — two priorities may share one, and ` +
+        `urgent. Ranks need not be unique or consecutive: two priorities may share one, and ` +
         `gaps are how a firm leaves room to insert one later.`,
     );
   }
@@ -141,7 +145,7 @@ export class NoInitialState extends WorkItemError {
     super(
       "NO_INITIAL_STATE",
       `This firm has no starting state for work items, so nothing can be created. Exactly one ` +
-        `state must be marked as the one new work begins in — the product seeds "Not Started" ` +
+        `state must be marked as the one new work begins in: the product seeds "Not Started" ` +
         `at every firm, so reaching this means it was un-marked and nothing was marked in its ` +
         `place. Set it on the work-vocabulary screen.`,
     );
@@ -165,7 +169,7 @@ export class NoDefaultPriority extends WorkItemError {
     super(
       "NO_DEFAULT_PRIORITY",
       `This firm has no default priority for work items, so nothing can be created. One ` +
-        `priority must be marked as what ordinary work gets — the product seeds "Medium" at ` +
+        `priority must be marked as what ordinary work gets: the product seeds "Medium" at ` +
         `every firm. Set it on the work-vocabulary screen.`,
     );
   }
@@ -178,7 +182,7 @@ export class LastInitialState extends WorkItemError {
     super(
       "LAST_INITIAL_STATE",
       `This would leave the firm with no starting state, and no work item could then be ` +
-        `created at all. Mark another state as the starting one first — the change is then ` +
+        `created at all. Mark another state as the starting one first: the change is then ` +
         `two ticks and never a moment with none.`,
     );
   }
@@ -239,7 +243,7 @@ export class WorkItemTitleRequired extends WorkItemError {
   constructor() {
     super(
       "WORK_ITEM_TITLE_REQUIRED",
-      `A work item needs a title — it is the whole of what a board row says, and an untitled ` +
+      `A work item needs a title: it is the whole of what a board row says, and an untitled ` +
         `task is one nobody can pick up`,
     );
   }
@@ -250,7 +254,7 @@ export class InvalidDueDate extends WorkItemError {
     super(
       "INVALID_DUE_DATE",
       `${JSON.stringify(value)} is not a calendar date (YYYY-MM-DD). Dates here are the ` +
-        `firm's own calendar days, never instants — an instant is a different day either ` +
+        `firm's own calendar days, never instants: an instant is a different day either ` +
         `side of midnight UTC.`,
     );
   }
@@ -274,7 +278,7 @@ export class BlockReasonRequired extends WorkItemError {
     super(
       "BLOCK_REASON_REQUIRED",
       `${JSON.stringify(stateName)} is a state this firm has marked as BLOCKED, and a blocked ` +
-        `item owes a reason. "Blocked" on its own records that work is stuck and never why — ` +
+        `item owes a reason. "Blocked" on its own records that work is stuck and never why, ` +
         `and a year later "are our delays ours or the client's" has no query that can answer ` +
         `it. Send blockedReason with the move.`,
     );
@@ -317,7 +321,7 @@ export class ChecklistItemDone extends WorkItemError {
   constructor() {
     super(
       "CHECKLIST_ITEM_DONE",
-      `This line is ticked and cannot be removed — the tick is the record that somebody did ` +
+      `This line is ticked and cannot be removed: the tick is the record that somebody did ` +
         `it, and it lives nowhere else. Untick it first if it was ticked by mistake.`,
     );
   }
@@ -367,7 +371,7 @@ export class ReviewAlreadyDecided extends WorkItemError {
   constructor(decision: string) {
     super(
       "REVIEW_ALREADY_DECIDED",
-      `This review was already ${decision} — somebody else got there first, and their ` +
+      `This review was already ${decision}: somebody else got there first, and their ` +
         `decision is the one that stands`,
     );
   }
@@ -393,7 +397,7 @@ export class ReviewRejectionNeedsNote extends WorkItemError {
     super(
       "REVIEW_REJECTION_NEEDS_NOTE",
       `Sending work back needs a note saying what for. It is the only signal that ever ` +
-        `explains why rework happens — marking the task Completed later erases the fact that ` +
+        `explains why rework happens: marking the task Completed later erases the fact that ` +
         `it was rejected at all.`,
     );
   }
@@ -402,5 +406,56 @@ export class ReviewRejectionNeedsNote extends WorkItemError {
 export class ReviewerNotEligible extends WorkItemError {
   constructor(reason: string) {
     super("REVIEWER_NOT_ELIGIBLE", reason);
+  }
+}
+
+/**
+ * A checklist line is still open (audit 2026-10-03, CA#30): the task's own
+ * gate, the way a process step's sub-steps hold Done shut (T6.15). Five lines
+ * by name and then a count, the step gate's shape. Who it is said to decides
+ * the second sentence: the doer ticks or removes a line; the CHECKER cannot,
+ * and sends it back.
+ */
+export class ChecklistOpen extends WorkItemError {
+  constructor(open: readonly string[], to: "doer" | "checker") {
+    const named = open.slice(0, 5).map((l) => `"${l}"`).join(", ");
+    const more = open.length > 5 ? ` and ${String(open.length - 5)} more` : "";
+    super(
+      "CHECKLIST_OPEN",
+      `${open.length === 1 ? "One checklist line is" : `${String(open.length)} checklist lines are`} ` +
+        `not ticked yet: ${named}${more}. ` +
+        (to === "doer"
+          ? "Tick them, or remove a line that does not apply, first."
+          : "Send it back so the person doing it can finish them."),
+    );
+  }
+}
+
+/**
+ * The firm has published more than one review rule and the sender named none
+ * (CA#27). Which of them a task raised by hand is checked under is the firm's
+ * call, so the sender picks; opening it under none would be the product
+ * lowering the firm's bar, which is the bug this replaced.
+ */
+export class ReviewRuleNeeded extends WorkItemError {
+  constructor(labels: readonly string[]) {
+    super(
+      "REVIEW_RULE_NEEDED",
+      `Your firm has more than one rule for who checks work: ${labels
+        .map((l) => `"${l}"`)
+        .join(", ")}. Pick the one this task is checked under.`,
+    );
+  }
+}
+
+export class NoteRequired extends WorkItemError {
+  constructor() {
+    super("NOTE_REQUIRED", "Write something in the note first.");
+  }
+}
+
+export class NoteTooLong extends WorkItemError {
+  constructor(max: number) {
+    super("NOTE_TOO_LONG", `A note can be at most ${String(max)} characters. Shorten it, or add a file instead.`);
   }
 }

@@ -26,6 +26,7 @@ import { PostgresDashboardRepository } from "../../src/infrastructure/postgres/d
 import { DashboardService } from "../../src/usecase/dashboard/service";
 import { FakeClock } from "../../src/testfakes/clock";
 import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
+import { FakeFiscalYearSource } from "../../src/testfakes/billing";
 
 const cfg = load();
 const owner = postgres(cfg.db.ownerUrl, { max: 1 });
@@ -183,6 +184,7 @@ function service(): DashboardService {
   return new DashboardService({
     dashboards: new PostgresDashboardRepository(app),
     timeZones: new FakeFirmTimeZone("Asia/Kolkata"),
+    fiscalYears: new FakeFiscalYearSource(),
     clock: new FakeClock(new Date("2026-09-29T10:00:00Z")),
   });
 }

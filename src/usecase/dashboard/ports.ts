@@ -32,9 +32,12 @@ export interface DashboardRepository {
    *  one slice per version. */
   mrrBy(tenantId: string, axis: "client" | "service"): Promise<readonly Slice[]>;
 
-  receivables(tenantId: string): Promise<ReceivableTotals>;
+  /** Bucketed as of `day`, the FIRM's calendar day (audit 2026-10-03, B29):
+   *  the database's own day is UTC, which is yesterday in India until 05:30. */
+  receivables(tenantId: string, day: string): Promise<ReceivableTotals>;
 
-  receivablesByClient(tenantId: string): Promise<readonly Slice[]>;
+  /** What each client owes as of `day`, the firm's day. */
+  receivablesByClient(tenantId: string, day: string): Promise<readonly Slice[]>;
 
   /**
    * What the firm actually billed in a window — the denominator of DSO.
@@ -44,7 +47,7 @@ export interface DashboardRepository {
    * was reversed was not a sale, and leaving it in would flatter DSO by
    * inflating the denominator.
    */
-  creditSales(tenantId: string, sinceDays: number): Promise<string>;
+  creditSales(tenantId: string, sinceDays: number, day: string): Promise<string>;
 
   /**
    * The firm's own companies (`crm.is_firm_entity`, live and not archived),
@@ -65,6 +68,21 @@ export interface DashboardRepository {
     owns: readonly { readonly partyId: string; readonly currency: string }[],
     reportingCurrency: string,
   ): Promise<readonly CompanyMonthRow[]>;
+
+  /**
+   * Billed and collected per manager per month, and per month for the whole
+   * firm, in ONE pass (grouping sets), summed in SQL on `numeric`. The
+   * definitions are `ManagerMonth`'s.
+   */
+  billingByManager(tenantId: string, window: BillingWindowDays): Promise<readonly ManagerMonthRow[]>;
+
+  /** What each manager's issued invoices are owed now, and the firm's total,
+   *  from `crm.receivable_ageing` (the rows "Owed to the firm" sums). */
+  owedByManager(tenantId: string, day: string): Promise<readonly ManagerOwedRow[]>;
+
+  /** Names for these users, from this firm's own memberships only (a user
+   *  account is global; the membership is behind the tenant wall). */
+  managerNames(tenantId: string, userIds: readonly string[]): Promise<readonly ManagerName[]>;
 }
 
 /** A billing window as two days: `from` inclusive, `until` exclusive. */
@@ -100,4 +118,39 @@ export interface CompanyMonthRow {
  *  by `PostgresFirmTimeZone`, like every other use case's (T6.14). */
 export interface FirmTimeZone {
   timeZoneFor(tenantId: string): Promise<string>;
+}
+
+/**
+ * One row of `billingByManager`. `scope: "firm"` is the whole firm's month;
+ * on a `"manager"` row `managerUserId` null is the invoices naming nobody.
+ * Every amount is in the reporting currency, each document at its own rate.
+ */
+export interface ManagerMonthRow {
+  readonly scope: "manager" | "firm";
+  readonly managerUserId: string | null;
+  readonly month: string;
+  readonly billed: string;
+  readonly collected: string;
+  readonly invoices: number;
+}
+
+/** One row of `owedByManager`, scoped the same way. */
+export interface ManagerOwedRow {
+  readonly scope: "manager" | "firm";
+  readonly managerUserId: string | null;
+  readonly outstanding: string;
+  readonly invoices: number;
+}
+
+/** A manager by name, as THIS firm's roster has them. */
+export interface ManagerName {
+  readonly userId: string;
+  readonly name: string;
+  readonly activeStaff: boolean;
+}
+
+/** The firm's financial year, so a screen can offer "this financial year"
+ *  (structural: the config repository satisfies it, as it does billing's). */
+export interface FiscalYearSource {
+  fiscalYearStartMonth(tenantId: string): Promise<number | null>;
 }

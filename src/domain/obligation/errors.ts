@@ -15,6 +15,7 @@
 // refusal a partner cannot act on just becomes a support ticket.
 
 import { longDay } from "../day";
+import { countryCodeProblem } from "../country";
 
 export class ObligationError extends Error {
   constructor(
@@ -69,7 +70,8 @@ export type ObligationErrorCode =
   | "INVALID_CUTOVER"
   | "CUTOVER_BEFORE_START"
   | "ALREADY_SUPERSEDED"
-  | "SUCCESSOR_NEEDS_ITS_OWN_PACK";
+  | "SUCCESSOR_NEEDS_ITS_OWN_PACK"
+  | "FILING_NOT_LINKABLE";
 
 // ── the rule ───────────────────────────────────────────────────────────────
 
@@ -83,7 +85,7 @@ export class TemplateNameRequired extends ObligationError {
   constructor() {
     super(
       "TEMPLATE_NAME_REQUIRED",
-      `A rule needs the name of the filing — "GSTR-3B", "TDS deposit", "AOC-4". It is what ` +
+      `A rule needs the name of the filing: "GSTR-3B", "TDS deposit", "AOC-4". It is what ` +
         `appears on the calendar and on the task raised from it.`,
     );
   }
@@ -93,9 +95,7 @@ export class InvalidJurisdiction extends ObligationError {
   constructor(value: string) {
     super(
       "INVALID_JURISDICTION",
-      `Jurisdiction ${JSON.stringify(value)} must be a two-letter ISO 3166-1 country code in ` +
-        `upper case — "IN", "SG", "AE". It is matched exactly against the entity's own ` +
-        `registered jurisdiction, so a mismatch means the rule reaches nobody.`,
+      countryCodeProblem(value),
     );
   }
 }
@@ -105,8 +105,8 @@ export class InvalidRecurrence extends ObligationError {
     super(
       "INVALID_RECURRENCE",
       `Recurrence ${JSON.stringify(value)} must be one of monthly, quarterly, half_yearly, ` +
-        `annual or event. "event" means the filing is triggered by something happening — a ` +
-        `share allotment, a director change — and produces no calendar entries, because ` +
+        `annual or event. "event" means the filing is triggered by something happening (a ` +
+        `share allotment, a director change) and produces no calendar entries, because ` +
         `nothing in this system yet knows the event occurred.`,
     );
   }
@@ -117,7 +117,7 @@ export class InvalidFiscalYearStart extends ObligationError {
     super(
       "INVALID_FISCAL_YEAR_START",
       `The financial year has to start in a month 1-12, not ${JSON.stringify(month)}. India is ` +
-        `4 — and it matters: an Indian quarter runs Apr-Jun, so a rule left on 1 would put ` +
+        `4, and it matters: an Indian quarter runs Apr-Jun, so a rule left on 1 would put ` +
         `every quarterly filing in the wrong period.`,
     );
   }
@@ -148,7 +148,7 @@ export class UnresolvedReasonRequired extends ObligationError {
   constructor() {
     super(
       "UNRESOLVED_REASON_REQUIRED",
-      `A rule with no due formula needs a reason saying what is missing — "depends on the AGM ` +
+      `A rule with no due formula needs a reason saying what is missing: "depends on the AGM ` +
         `date", "State-specific", "working days, and we hold no holiday calendar". The reason ` +
         `is what the rules screen shows in place of a date, so a partner can tell an ` +
         `unfinished rule from a broken system.`,
@@ -182,7 +182,7 @@ export class InvalidRulePack extends ObligationError {
     super(
       "INVALID_RULE_PACK",
       `Rule pack ${JSON.stringify(value)} cannot be blank. It names the version of the rules ` +
-        `this came from — "gst-in@2026.07" — and it is part of the rule's identity, so ` +
+        `this came from: "gst-in@2026.07", and it is part of the rule's identity, so ` +
         `revising a rule means a new pack rather than an edit. Without it, "why was this due ` +
         `then?" has no answer.`,
     );
@@ -194,7 +194,7 @@ export class InvalidRuleStatus extends ObligationError {
     super(
       "INVALID_RULE_STATUS",
       `Status ${JSON.stringify(value)} must be "unconfirmed" or "confirmed". Confirming a rule ` +
-        `is a partner saying they have checked this date against the statute — the shipped ` +
+        `is a partner saying they have checked this date against the statute: the shipped ` +
         `dates came from a document, not from the firm.`,
     );
   }
@@ -205,7 +205,7 @@ export class InvalidCutover extends ObligationError {
     super(
       "INVALID_CUTOVER",
       `${JSON.stringify(value)} is not a day. The date a law changes must be written ` +
-        `YYYY-MM-DD, because it is compared against the first day of a filing PERIOD — ` +
+        `YYYY-MM-DD, because it is compared against the first day of a filing PERIOD: ` +
         `August's return is August's law even though it falls due in September.`,
     );
   }
@@ -217,7 +217,7 @@ export class CutoverBeforeStart extends ObligationError {
       "CUTOVER_BEFORE_START",
       `This rule only began governing periods from ${start}, so a change taking effect ` +
         `${cutover} would leave it governing nothing at all. If the earlier rule was wrong, ` +
-        `correct it rather than superseding it — its dates were never confirmed against the ` +
+        `correct it rather than superseding it: its dates were never confirmed against the ` +
         `statute in the first place.`,
     );
   }
@@ -228,7 +228,7 @@ export class AlreadySuperseded extends ObligationError {
     super(
       "ALREADY_SUPERSEDED",
       `${name} already hands over on ${longDay(endsOn)}, so it is not the rule in force. Amend the ` +
-        `one that governs periods from then on — superseding this row a second time would leave ` +
+        `one that governs periods from then on: superseding this row a second time would leave ` +
         `two successors covering the same periods, which is two filings for one return.`,
     );
   }
@@ -238,7 +238,7 @@ export class SuccessorNeedsItsOwnPack extends ObligationError {
   constructor(pack: string) {
     super(
       "SUCCESSOR_NEEDS_ITS_OWN_PACK",
-      `The new rule needs a rule pack of its own — ${JSON.stringify(pack)} is the one it ` +
+      `The new rule needs a rule pack of its own: ${JSON.stringify(pack)} is the one it ` +
         `replaces. A pack is part of a rule's identity, which is what lets a filing made last ` +
         `year still name the version it was due under. Try dating it, as the shipped packs do.`,
     );
@@ -251,7 +251,7 @@ export class PeriodShapeLocked extends ObligationError {
       "PERIOD_SHAPE_LOCKED",
       `${field} decides where a period STARTS and ends, and this rule has already produced ` +
         `${String(instanceCount)} filing${instanceCount === 1 ? "" : "s"} that are keyed on ` +
-        `those boundaries. Changing it now would orphan every one of them — last quarter's ` +
+        `those boundaries. Changing it now would orphan every one of them: last quarter's ` +
         `return would stop matching any quarter. Retire this rule and write a new one instead; ` +
         `the retired row goes on explaining the filings it produced.`,
     );
@@ -319,7 +319,7 @@ export class InvalidPeriodEndMonth extends ObligationError {
     super(
       "INVALID_PERIOD_END_MONTH",
       `An exception is keyed on the calendar month the filed PERIOD ends in, 1-12, not ` +
-        `${JSON.stringify(month)}. March is 3 — that is the month of the deduction, not the ` +
+        `${JSON.stringify(month)}. March is 3: that is the month of the deduction, not the ` +
         `month it is due, because the due month is exactly what the exception changes.`,
     );
   }
@@ -329,7 +329,7 @@ export class ExceptionNoteRequired extends ObligationError {
   constructor() {
     super(
       "EXCEPTION_NOTE_REQUIRED",
-      `An exception needs a note saying why this period is different — "March TDS is due 30 ` +
+      `An exception needs a note saying why this period is different: "March TDS is due 30 ` +
         `April by statute". Without it a partner checking the calendar against the statute ` +
         `cannot tell a real carve-out from somebody's typo.`,
     );
@@ -341,7 +341,7 @@ export class ExceptionMonthTaken extends ObligationError {
     super(
       "EXCEPTION_MONTH_TAKEN",
       `This rule already has an exception for periods ending in month ${month}. Two would make ` +
-        `the due date depend on row order, which is not a rule at all — edit the existing one.`,
+        `the due date depend on row order, which is not a rule at all: edit the existing one.`,
     );
   }
 }
@@ -364,7 +364,7 @@ export class NoInitialState extends ObligationError {
       "NO_INITIAL_STATE",
       `This firm has no obligation state marked as the starting one, so a generated filing has ` +
         `nowhere to begin. Every firm is seeded with one ("Pending") and the product refuses to ` +
-        `unmark the last one, so this means the states were changed outside it — mark one as ` +
+        `unmark the last one, so this means the states were changed outside it: mark one as ` +
         `the starting state on the compliance vocabulary screen.`,
     );
   }
@@ -387,7 +387,7 @@ export class NoFiledState extends ObligationError {
       "NO_FILED_STATE",
       `This firm has no obligation state marked as the filed one, so a completed filing has ` +
         `nowhere to land and the calendar would keep showing it as open. Every firm is seeded ` +
-        `with one ("Filed") — mark one of your compliance states as the filed one on the ` +
+        `with one ("Filed"): mark one of your compliance states as the filed one on the ` +
         `compliance vocabulary screen.`,
     );
   }
@@ -399,7 +399,7 @@ export class NoMissedState extends ObligationError {
       "NO_MISSED_STATE",
       `This firm has no obligation state marked as the missed one, so a deadline that passes ` +
         `has nowhere to go and nothing would ever reach the decision queue. Every firm is ` +
-        `seeded with one ("Missed") — mark one of your compliance states as the missed one on ` +
+        `seeded with one ("Missed"): mark one of your compliance states as the missed one on ` +
         `the compliance vocabulary screen. It has to be a state that needs a decision, which ` +
         `is what puts the filing in front of a partner rather than quietly filing it away.`,
     );
@@ -412,7 +412,7 @@ export class NoResolutionState extends ObligationError {
       "NO_RESOLUTION_STATE",
       `This firm has no obligation state marked as the resolution one, so a filing a partner ` +
         `has decided will never be made has nowhere to end. Every firm is seeded with one ` +
-        `("Resolved") — mark one of your compliance states as the resolution one on the ` +
+        `("Resolved"): mark one of your compliance states as the resolution one on the ` +
         `compliance vocabulary screen. Only a state that ends the matter can be it.`,
     );
   }
@@ -425,8 +425,8 @@ export class ResolutionOptionNotFound extends ObligationError {
     super(
       "RESOLUTION_OPTION_NOT_FOUND",
       `No resolution option ${JSON.stringify(ref)} at this firm. The options are the firm's ` +
-        `own list of answers to a passed deadline — file provisionally, accept the late fee, ` +
-        `file a nil return — and they are edited on the compliance vocabulary screen.`,
+        `own list of answers to a passed deadline: file provisionally, accept the late fee, ` +
+        `file a nil return, and they are edited on the compliance vocabulary screen.`,
     );
   }
 }
@@ -436,7 +436,7 @@ export class ResolutionOptionRetired extends ObligationError {
     super(
       "RESOLUTION_OPTION_RETIRED",
       `${JSON.stringify(name)} is no longer one of this firm's resolution options. Decisions ` +
-        `already recorded against it stay exactly as they were — a retired option is one the ` +
+        `already recorded against it stay exactly as they were: a retired option is one the ` +
         `firm has stopped choosing, not one it never chose. Pick a current option.`,
     );
   }
@@ -447,7 +447,7 @@ export class ResolutionReasonRequired extends ObligationError {
     super(
       "RESOLUTION_REASON_REQUIRED",
       `Say why. In eighteen months nobody remembers why a late fee was accepted rather than a ` +
-        `provisional filing made, and that is exactly the thing worth knowing — it is what ` +
+        `provisional filing made, and that is exactly the thing worth knowing: it is what ` +
         `answers the client who asks what the penalty was for. The option says what was done; ` +
         `this says why.`,
     );
@@ -459,7 +459,7 @@ export class AlreadyDecided extends ObligationError {
     super(
       "ALREADY_DECIDED",
       `Somebody has already decided what happens about this deadline. A decision is not ` +
-        `overwritten — that would destroy the only record of what was originally chosen and ` +
+        `overwritten: that would destroy the only record of what was originally chosen and ` +
         `why. If the decision needs to change, record the new one against the filing it ` +
         `produces.`,
     );
@@ -471,7 +471,7 @@ export class NotAwaitingDecision extends ObligationError {
     super(
       "NOT_AWAITING_DECISION",
       `This filing is ${JSON.stringify(stateName)}, which is not a state waiting on a ` +
-        `decision. Only a deadline that has actually passed undischarged reaches the queue — ` +
+        `decision. Only a deadline that has actually passed undischarged reaches the queue: ` +
         `if this one is late and is not here, the nightly sweep has not run yet.`,
     );
   }
@@ -490,7 +490,7 @@ export class InvalidVocabularyCode extends ObligationError {
     super(
       "INVALID_VOCABULARY_CODE",
       `${JSON.stringify(value)} is not a usable handle. Use lower case letters, digits and ` +
-        `underscores — "awaiting_client". It is the firm's stable handle for this row and is ` +
+        `underscores: "awaiting_client". It is the firm's stable handle for this row and is ` +
         `never shown to anybody; the NAME is what appears on screen and may be changed freely.`,
     );
   }
@@ -512,7 +512,7 @@ export class InvalidSortOrder extends ObligationError {
     super(
       "INVALID_SORT_ORDER",
       `Sort order ${JSON.stringify(value)} must be a whole number. It only decides the order ` +
-        `things appear in; gaps are fine and are the point — leave room to insert one later.`,
+        `things appear in; gaps are fine and are the point: leave room to insert one later.`,
     );
   }
 }
@@ -547,16 +547,16 @@ export class LastDestinationState extends ObligationError {
     super(
       "LAST_DESTINATION_STATE",
       which === "filed"
-        ? `this is the state a completed filing lands in, and a firm cannot have none — every ` +
+        ? `this is the state a completed filing lands in, and a firm cannot have none: every ` +
             `filing your team finishes would stay showing as open on the calendar. Mark another ` +
             `state as the filed one first; that moves the flag in one step.`
         : which === "missed"
-          ? `this is the state a passed deadline moves to, and a firm cannot have none — ` +
+          ? `this is the state a passed deadline moves to, and a firm cannot have none: ` +
               `nothing would ever reach the decision queue again, and a missed filing would ` +
               `sit on the calendar with nobody asked about it. Mark another state as the ` +
               `missed one first; that moves the flag in one step.`
           : `this is the state a filing ends in when a partner decides it will never be made, ` +
-              `and a firm cannot have none — that decision would have nowhere to land. Mark ` +
+              `and a firm cannot have none: that decision would have nowhere to land. Mark ` +
               `another state as the resolution one first; that moves the flag in one step.`,
     );
   }
@@ -566,7 +566,7 @@ export class LastInitialState extends ObligationError {
   constructor() {
     super(
       "LAST_INITIAL_STATE",
-      `This is the state new filings start in, and a firm cannot have none — every obligation ` +
+      `This is the state new filings start in, and a firm cannot have none: every obligation ` +
         `the calendar generates would have nowhere to begin. Mark another state as the ` +
         `starting one first; doing that moves the flag in one step, so there is never a moment ` +
         `with none.`,
@@ -587,5 +587,16 @@ export class InvalidWindow extends ObligationError {
       `The window ${JSON.stringify(from)}..${JSON.stringify(to)} is not a pair of dates with ` +
         `the earlier one first. Dates are YYYY-MM-DD and name a day, never an instant.`,
     );
+  }
+}
+
+/**
+ * A task cannot be made the one that files this filing, or taken off it
+ * (audit 2026-10-03, CA#36). The sentence says which of the reasons it is,
+ * because each is fixed somewhere different.
+ */
+export class FilingNotLinkable extends ObligationError {
+  constructor(why: string) {
+    super("FILING_NOT_LINKABLE", why);
   }
 }

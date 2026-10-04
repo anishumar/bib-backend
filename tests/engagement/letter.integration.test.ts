@@ -66,8 +66,9 @@ import {
 } from "../../src/infrastructure/postgres/obligation-instance-repository";
 import { PostgresRuleServiceLinkRepository } from "../../src/infrastructure/postgres/obligation-link-repository";
 import { ObligationService } from "../../src/usecase/obligation/service";
-import { FakeAcceptedQuotes } from "../../src/testfakes/engagement";
+import { FakeAcceptedQuotes, writeOpening } from "../../src/testfakes/engagement";
 import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
+import { FakeClock } from "../../src/testfakes/clock";
 
 const cfg = load();
 const app = postgres(cfg.db.appUrl, { max: 2 });
@@ -165,7 +166,7 @@ const documents = new DocumentService({
   ids: systemIds,
   events: ledger,
 });
-const service = new EngagementService({
+const serviceDeps = {
   letters,
   library: configRepository,
   documents,
@@ -198,7 +199,8 @@ const service = new EngagementService({
   ids: systemIds,
   clock: systemClock,
   events: ledger,
-});
+};
+const service = new EngagementService(serviceDeps);
 
 const stamp = Date.now().toString(36);
 let tenantA = "";
@@ -382,6 +384,7 @@ async function fullyFilledSignedLetter(): Promise<string> {
     effectiveFrom: "2026-12-01",
   });
   await service.addClause(tenantA, letter.id, scopeV1);
+  await writeOpening(documents, tenantA, letter.id);
   await service.send(tenantA, letter.id, SYSTEM_ACTOR);
   await service.sign(
     {
@@ -460,6 +463,7 @@ async function signedLetter(advance?: string, layout?: "classic"): Promise<strin
     discountPercent: "0",
   });
   await service.addClause(tenantA, letter.id, scopeV1);
+  await writeOpening(documents, tenantA, letter.id);
   await service.send(tenantA, letter.id, SYSTEM_ACTOR);
   await service.sign(
     { tenantId: tenantA, letterId: letter.id, signedByName: "Priya Menon", reference: "paper-001" },
@@ -836,6 +840,7 @@ describe("the pin", () => {
       discountPercent: "0",
     });
     await service.addClause(tenantA, letter.id, scopeV1);
+    await writeOpening(documents, tenantA, letter.id);
     await service.send(tenantA, letter.id, SYSTEM_ACTOR);
     await service.sign(
       {
@@ -919,20 +924,11 @@ describe("the pin", () => {
 });
 
 describe("the advance gate", () => {
-  it("holds the engagements, then releases them all at once", async () => {
+  it("starts every engagement at signature, advance or not (0322)", async () => {
     const id = await signedLetter("10000");
-    const held = await letters.listEngagements(tenantA, id);
-    expect(held.every((e) => e.status === "pending_advance")).toBe(true);
-
-    const [user] = await owner<{ id: string }[]>`
-      INSERT INTO tenancy.user_account (email)
-      VALUES (${`advance-${stamp}@example.test`}) RETURNING id
-    `;
-    if (!user) throw new Error("could not create the recorder");
-
-    const { released } = await service.recordAdvance(tenantA, id, user.id, SYSTEM_ACTOR);
-    expect(released).toHaveLength(2);
-    expect(released.every((e) => e.engagement.status === "active")).toBe(true);
+    const started = await letters.listEngagements(tenantA, id);
+    expect(started).toHaveLength(2);
+    expect(started.every((e) => e.status === "active" && e.activatedAt !== null)).toBe(true);
   });
 });
 
@@ -1194,6 +1190,12 @@ describe("effective dates", () => {
   it("carries the resolved start date onto every engagement", async () => {
     // The acceptance, end to end: a letter signed today opening work that
     // begins in October, with one line that begins later still.
+    //
+    // TODAY IS PINNED to 15 July 2026. It was the real today, so from
+    // 2 October 2026 the October work had already started and the test went
+    // red on the calendar alone (audit 2026-10-03). Signing, the start dates
+    // and the state all read this one clock.
+    const service = new EngagementService({ ...serviceDeps, clock: new FakeClock(new Date("2026-07-15T06:30:00Z")) });
     const letter = await service.draft(
       {
         tenantId: tenantA,
@@ -1230,6 +1232,7 @@ describe("effective dates", () => {
       effectiveFrom: "2026-12-01",
     });
     await service.addClause(tenantA, letter.id, scopeV1);
+    await writeOpening(documents, tenantA, letter.id);
     await service.send(tenantA, letter.id, SYSTEM_ACTOR);
     const { engagements } = await service.sign(
       { tenantId: tenantA, letterId: letter.id, signedByName: "Priya Menon" },
@@ -1332,7 +1335,13 @@ describe("what a client can be BILLED for (T3.5b)", () => {
     // client signed for is missing from the picker — the blank-versus-absent
     // failure this codebase has paid for several times. The caller decides what
     // to OFFER; this says what is true.
+    // Since 0322 a signature starts the work, so the only work still behind
+    // the gate is a letter signed before it: put one engagement back there.
     const id = await signedLetter("50000");
+    await owner`
+      UPDATE crm.engagement SET status = 'pending_advance', activated_at = NULL
+       WHERE engagement_letter_id = ${id}
+    `;
 
     const billable = (await letters.listBillable(tenantA, partyA)).filter(
       (b) => b.letterId === id,
@@ -1385,6 +1394,7 @@ describe("a letter's signature request, in the database (0080)", () => {
       discountPercent: "0",
     });
     await service.addClause(tenantA, letter.id, scopeV1);
+    await writeOpening(documents, tenantA, letter.id);
     await service.send(tenantA, letter.id, SYSTEM_ACTOR);
     return letter.id;
   }
@@ -1741,7 +1751,7 @@ describe("who a letter and an invoice name, in the database (F-10-1, 0306)", () 
       fxRateDate: "2026-07-01",
       dueOn: null,
       notes: null,
-      seriesDate: "2026-07-01",
+      financialYear: 2026,
     };
     const issuedByClient = await invoices
       .create({ ...draft, id: systemIds.newId(), partyId: entityA1, entityPartyId: partyA })
@@ -1765,7 +1775,7 @@ describe("who a letter and an invoice name, in the database (F-10-1, 0306)", () 
       fxRateDate: "2026-07-01",
       dueOn: null,
       notes: null,
-      seriesDate: "2026-07-01",
+      financialYear: 2026,
       entityPartyId: firmEntityA,
     };
     const acmes = await invoices.create({ ...base, id: systemIds.newId(), partyId: partyA });
@@ -1835,6 +1845,7 @@ describe("a letter the client accepted outside bib, in the database (0317)", () 
       discountPercent: "0",
     });
     await service.addClause(tenantA, letter.id, scopeV1);
+    await writeOpening(documents, tenantA, letter.id);
     await service.send(tenantA, letter.id, SYSTEM_ACTOR);
     const [doc] = await owner<{ id: string }[]>`
       INSERT INTO files.document (tenant_id, title, origin, kind, party_id)
@@ -1960,5 +1971,46 @@ describe("a letter the client accepted outside bib, in the database (0317)", () 
       SELECT count(*)::int AS n FROM crm.recorded_acceptance WHERE engagement_letter_id = ${other}
     `);
     expect(seen[0]?.n).toBe(0);
+  });
+});
+
+describe("the classic letter's totals (B46, audit 2026-10-03)", () => {
+  // The classic letter summed every line with Number() and printed one
+  // "Total" with toFixed(2), adding a monthly fee to a one-time one: a figure
+  // nobody owes. It now prints one total per billing frequency, summed by the
+  // database, and the one "Total" only when every priced line bills alike.
+  const source = new PostgresRenderSource(app, () => Promise.resolve(null));
+
+  it("prints a total per frequency, never one mixed sum", async () => {
+    const letter = await service.draft(
+      {
+        tenantId: tenantA, partyId: partyA, jurisdiction: "IN", title: "Acme, mixed fees",
+        currency: "INR", fxRate: "1", fxRateDate: "2026-07-01", advanceRequired: false,
+      },
+      SYSTEM_ACTOR,
+    );
+    await owner`UPDATE crm.engagement_letter SET layout = 'classic' WHERE id = ${letter.id}`;
+    const line = (description: string, unitAmount: string, billingFrequency: string) =>
+      service.addLine({
+        tenantId: tenantA, letterId: letter.id, entityPartyId: entityA1, serviceVersionId: gstV1,
+        description, quantity: "1", unitAmount, discountPercent: "0", billingFrequency,
+      });
+    await line("Bookkeeping", "22500.10", "monthly");
+    await line("GST returns", "6000.20", "monthly");
+    await line("Incorporation", "15000", "one_time");
+
+    const described = await source.describe({ tenantId: tenantA, kind: "engagement_letter", subjectRef: letter.id });
+    expect(described?.document.totals).toEqual([
+      { label: "Total, monthly", value: "INR 28,500.30", emphasis: true },
+      { label: "Total, one-off", value: "INR 15,000.00", emphasis: true },
+    ]);
+  });
+
+  it("keeps the one Total when every priced line bills alike", async () => {
+    const id = await signedLetter(undefined, "classic");
+    const described = await source.describe({ tenantId: tenantA, kind: "engagement_letter", subjectRef: id });
+    const totals = described?.document.totals ?? [];
+    expect(totals).toHaveLength(1);
+    expect(totals[0]?.label).toBe("Total");
   });
 });

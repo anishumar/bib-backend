@@ -34,6 +34,8 @@
 // takes a list, and "who was the SPOC in March" is allowed to answer with two
 // when the firm really had two.
 
+import { isCalendarDay } from "../day";
+
 /** What somebody was given. The ENGINE's vocabulary — the same at every firm,
  *  and a CHECK in the schema, the way `service_axis.axis` and
  *  `config.entry.kind` are. What a firm owns is who holds them. */
@@ -145,7 +147,9 @@ export interface OwnedClient {
  * between them is held by a test, not by a shared import.
  */
 export function isIsoDate(s: string): boolean {
-  return /^\d{4}-\d{2}-\d{2}$/.test(s);
+  // A day that EXISTS, not just the shape (audit 2026-10-03, B43): 2026-13-45
+  // passed the shape and reached Postgres as an unmapped 22008, a 500.
+  return isCalendarDay(s);
 }
 
 /**

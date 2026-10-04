@@ -33,8 +33,8 @@ export class PostgresTenantRepository implements TenantRepository {
 
   async create(t: NewTenant): Promise<Tenant> {
     const [row] = await this.app<TenantRow[]>`
-      INSERT INTO tenancy.tenant (id, slug, name, reporting_currency)
-      VALUES (${t.id}, ${t.slug}, ${t.name}, ${t.reportingCurrency})
+      INSERT INTO tenancy.tenant (id, slug, name, reporting_currency, time_zone)
+      VALUES (${t.id}, ${t.slug}, ${t.name}, ${t.reportingCurrency}, ${t.timeZone})
       RETURNING id, slug, name, status, reporting_currency,
                 firm_signatory_user_id, firm_signatory_title
     `;

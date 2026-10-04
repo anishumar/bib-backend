@@ -282,7 +282,7 @@ export function registerPortalAccessRoutes(
         membershipId: scope.membershipId,
         // Echoed back, because a screen that asked for "today" needs to know
         // which day it actually got when it did not say.
-        onDate: asOf ?? new Date().toISOString().slice(0, 10),
+        onDate: scope.onDate,
         clientPartyIds: [...scope.clientPartyIds],
       },
       200,

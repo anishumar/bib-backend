@@ -24,6 +24,7 @@ import type {
   ResolvedPolicy,
   StaffMember,
   StepApprovalRepository,
+  StepSentBack,
   VerificationPolicySource,
 } from "../usecase/verification/ports";
 import type { FakeJobStepRepo } from "./orchestrator";
@@ -51,7 +52,27 @@ export class FakeStepApprovalRepo implements StepApprovalRepository {
    *  refuses rather than lets through. */
   marks: { readonly rows: readonly StepCheckMark[] } | null = null;
 
+  /** Who decided, by name: the adapter joins `user_account` (CA#29). */
+  readonly names = new Map<string, string>();
+
   constructor(private readonly now: () => string = () => "2026-08-30T09:00:00.000Z") {}
+
+  sentBackFor(tenantId: string, jobStepIds: readonly string[]): Promise<readonly StepSentBack[]> {
+    const out: StepSentBack[] = [];
+    for (const jobStepId of jobStepIds) {
+      const rows = this.rows.filter((r) => r.tenantId === tenantId && r.jobStepId === jobStepId);
+      if (rows.some((r) => r.decision === "pending")) continue;
+      const latest = rows.filter((r) => r.decidedAt !== null).at(-1);
+      if (latest?.decision !== "rejected" || latest.decidedAt === null) continue;
+      out.push({
+        jobStepId,
+        notes: latest.notes,
+        decidedAt: latest.decidedAt,
+        decidedByName: latest.decidedBy === null ? null : (this.names.get(latest.decidedBy) ?? null),
+      });
+    }
+    return Promise.resolve(out);
+  }
 
   openIfAbsent(approval: NewStepApproval, subStepKeys: readonly string[] = []): Promise<StepApproval | null> {
     const step = this.steps?.rows.find((s) => s.id === approval.jobStepId) ?? null;

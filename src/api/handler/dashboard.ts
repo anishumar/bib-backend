@@ -23,6 +23,7 @@ import type {
   DashboardService,
   Overview,
   RevenueByCompany,
+  RevenueByManager,
 } from "../../usecase/dashboard/service";
 import type { Slice } from "../../domain/dashboard/model";
 import {
@@ -232,6 +233,93 @@ function revenueToWire(r: RevenueByCompany): z.infer<typeof RevenueByCompanyResp
   };
 }
 
+const COLLECTED_DEFINITION =
+  "COLLECTED is the cash received that month on the manager's ISSUED invoices, by the payment's " +
+  "received date, WITH tax (what reached the bank); a bounced cheque or a refund is a negative " +
+  "payment and comes off the month it is dated. Payments on an invoice cancelled since are left out.";
+
+const ManagerMonthSchema = z.object({
+  month: z.string().openapi({ description: "YYYY-MM." }),
+  billed: AmountString.openapi({ description: "Before tax. " + BILLED_DEFINITION }),
+  collected: AmountString.openapi({ description: "With tax. " + COLLECTED_DEFINITION }),
+  invoiceCount: z.number().int().openapi({ description: "Invoices issued that month." }),
+});
+
+const OwedSchema = {
+  outstanding: AmountString.openapi({
+    description:
+      "What these issued invoices are owed NOW, with tax, overpayments left out: the rows " +
+      "/dashboard/overview's `receivables.outstanding` sums, so the managers add up to it. Not cut " +
+      "by month.",
+  }),
+  outstandingInvoices: z.number().int(),
+};
+
+const RevenueByManagerResponse = z
+  .object({
+    reportingCurrency: z.string().length(3).openapi({
+      description: "Every amount below, each document at the rate stored on it, never today's.",
+    }),
+    months: z.array(z.string()).openapi({
+      description:
+        "The last N calendar months, oldest first, as YYYY-MM, the last one the month the FIRM " +
+        "is in now on its own timezone.",
+    }),
+    financialYearStartMonth: z.number().int().min(1).max(12).nullable().openapi({
+      description:
+        "The month (1-12) the firm's financial year starts, from its compliance policy, so a screen " +
+        "can offer 'this financial year'. Null when the firm has not said.",
+    }),
+    total: z
+      .object({ months: z.array(ManagerMonthSchema), ...OwedSchema })
+      .openapi({ description: "The whole firm: what the rows below add up to." }),
+    managers: z.array(
+      z.object({
+        userId: z.string().uuid().nullable().openapi({
+          description:
+            "The invoice's `managerUserId`. Null is ONE row: the invoices that name nobody, listed " +
+            "so the table adds up to the firm.",
+        }),
+        name: z.string().nullable().openapi({
+          description: "Their name on this firm's roster. Null on the no-manager row.",
+        }),
+        activeStaff: z.boolean().openapi({
+          description: "On the staff today. False for somebody who has left: the revenue stays theirs.",
+        }),
+        months: z.array(ManagerMonthSchema),
+        ...OwedSchema,
+      }),
+    ),
+  })
+  .openapi("DashboardRevenueByManager");
+
+function managersToWire(r: RevenueByManager): z.infer<typeof RevenueByManagerResponse> {
+  const month = (m: RevenueByManager["total"]["months"][number]) => ({
+    month: m.month,
+    billed: m.billed,
+    collected: m.collected,
+    invoiceCount: m.invoiceCount,
+  });
+  return {
+    reportingCurrency: r.reportingCurrency,
+    months: [...r.months],
+    financialYearStartMonth: r.financialYearStartMonth,
+    total: {
+      months: r.total.months.map(month),
+      outstanding: r.total.outstanding,
+      outstandingInvoices: r.total.outstandingInvoices,
+    },
+    managers: r.managers.map((m) => ({
+      userId: m.userId,
+      name: m.name,
+      activeStaff: m.activeStaff,
+      months: m.months.map(month),
+      outstanding: m.outstanding,
+      outstandingInvoices: m.outstandingInvoices,
+    })),
+  };
+}
+
 // ── Routes ──────────────────────────────────────────────────────────────────
 
 const overviewRoute = createRoute({
@@ -308,18 +396,56 @@ const revenueByCompanyRoute = createRoute({
   },
 });
 
+const revenueByManagerRoute = createRoute({
+  method: "get",
+  path: "/api/v1/dashboard/revenue/by-manager",
+  tags: ["dashboard"],
+  summary: "What each manager's invoices billed and collected, month by month, and are owed now",
+  description:
+    "Grouped on the invoice's manager (`managerUserId`, fixed when it is issued): Ashish's " +
+    "'revenue is tracked by manager'. Everything in the firm's reporting currency at each " +
+    "document's stored rate. " +
+    BILLED_DEFINITION +
+    " " +
+    COLLECTED_DEFINITION +
+    " Summed in SQL on numeric; every amount is a decimal string. Requires commercial visibility.",
+  request: {
+    query: z.object({
+      months: z.coerce
+        .number()
+        .int()
+        .min(1)
+        .max(BILLING_MONTHS_MAX)
+        .default(BILLING_MONTHS_DEFAULT)
+        .openapi({
+          description: `How many months, ending with this one. Default ${String(BILLING_MONTHS_DEFAULT)}.`,
+        }),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Revenue by manager",
+      content: { "application/json": { schema: RevenueByManagerResponse } },
+    },
+    400: errorResponse("`months` is not a whole number from 1 to 24"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("No org selected, or the caller does not have commercial visibility"),
+  },
+});
+
 export function registerDashboardRoutes(app: OpenAPIHono<AppEnv>, deps: DashboardDeps): void {
   /** The fee axis, as a gate rather than a redaction — see the file header. */
   const denyWithoutFees = (principal: Parameters<AuthzService["seesFees"]>[0] | null) => {
     if (principal === null || !deps.authz.seesFees(principal)) {
+      // In words a CA firm uses (CA#54, audit 2026-10-03), and the fee axis's
+      // one reason code, as every other money refusal has.
       return toEnvelope({
         status: 403,
         code: "FORBIDDEN",
         message:
-          "These figures are the firm's revenue and receivables, and this login does not have " +
-          "commercial visibility. That is a setting on the membership, separate from the role — " +
-          "a partner administering the firm can grant it.",
-        reason: "NO_COMMERCIAL_VISIBILITY",
+          "These are the firm's revenue figures, and your login is not set to see fees. " +
+          "Ask somebody who can see fees.",
+        reason: "FEES_NOT_VISIBLE",
       });
     }
     return null;
@@ -366,6 +492,15 @@ export function registerDashboardRoutes(app: OpenAPIHono<AppEnv>, deps: Dashboar
     const { months } = c.req.valid("query");
     return c.json(revenueToWire(await deps.service.revenueByCompany(s.tenantId, months)), 200);
   });
+
+  app.openapi(revenueByManagerRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const denied = denyWithoutFees(c.get("principal"));
+    if (denied !== null) return c.json(denied, 403);
+    const { months } = c.req.valid("query");
+    return c.json(managersToWire(await deps.service.revenueByManager(s.tenantId, months)), 200);
+  });
 }
 
 export const dashboardRoutes = {
@@ -373,4 +508,5 @@ export const dashboardRoutes = {
   mrrBy: mrrByRoute,
   receivablesByClient: receivablesByClientRoute,
   revenueByCompany: revenueByCompanyRoute,
+  revenueByManager: revenueByManagerRoute,
 } as const;

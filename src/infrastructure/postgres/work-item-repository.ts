@@ -16,17 +16,20 @@ import type {
   WorkItemBlocker,
   WorkItemDependency,
   WorkItemDependencyRecord,
+  WorkItemNote,
   WorkItemRecord,
 } from "../../domain/workitem/model";
 import type {
   CatchUpCandidate,
   NewWorkItem,
+  NewWorkItemNote,
   WorkItemFilter,
   WorkItemPatch,
   WorkItemRepository,
   WorkItemStateWrite,
 } from "../../usecase/workitem/ports";
 import { MAX_LIST_ROWS } from "../../db/limits";
+import { isoInstant } from "./instant";
 
 interface ItemRow {
   id: string;
@@ -79,6 +82,9 @@ interface RecordRow extends ItemRow {
   checklist_total: number;
   has_open_review: boolean;
   blocked_by_open: WorkItemBlocker[] | null;
+  sent_back_notes: string | null;
+  sent_back_at: string | null;
+  sent_back_by_name: string | null;
 }
 
 interface ChecklistRow {
@@ -174,6 +180,10 @@ function toRecord(r: RecordRow): WorkItemRecord {
     checklistTotal: Number(r.checklist_total),
     hasOpenReview: r.has_open_review,
     blockedByOpen: r.blocked_by_open ?? [],
+    sentBack:
+      r.sent_back_at === null
+        ? null
+        : { notes: r.sent_back_notes, decidedAt: r.sent_back_at, decidedByName: r.sent_back_by_name },
   };
 }
 
@@ -218,7 +228,15 @@ const RECORD_SELECT = `
            SELECT 1 FROM delivery.work_item_approval a
             WHERE a.work_item_id = w.id AND a.decision = 'pending'
          ) AS has_open_review,
-         blockers.rows AS blocked_by_open
+         blockers.rows AS blocked_by_open,
+         -- SENT BACK AND NOT YET SENT AGAIN (CA#29): the latest decided review
+         -- was a send-back, none is open (the lateral below), and the task is
+         -- not finished.
+         CASE WHEN lr.decision = 'rejected' AND NOT s.is_terminal THEN lr.notes END AS sent_back_notes,
+         CASE WHEN lr.decision = 'rejected' AND NOT s.is_terminal
+              THEN ${isoInstant("lr.decided_at")} END AS sent_back_at,
+         CASE WHEN lr.decision = 'rejected' AND NOT s.is_terminal
+              THEN lr.decided_by_name END AS sent_back_by_name
   FROM delivery.work_item w
   JOIN core.party cp ON cp.id = w.client_party_id AND cp.tenant_id = w.tenant_id
   LEFT JOIN core.party ep ON ep.id = w.entity_party_id AND ep.tenant_id = w.tenant_id
@@ -247,6 +265,19 @@ const RECORD_SELECT = `
      WHERE d.work_item_id = w.id AND d.tenant_id = w.tenant_id
        AND NOT bs.is_terminal
   ) blockers ON true
+  -- The latest DECIDED review while none is open, for "sent back to you"
+  -- (CA#29). One row per item at most; none while the work is with a checker.
+  LEFT JOIN LATERAL (
+    SELECT a.decision, a.notes, a.decided_at, du.display_name AS decided_by_name
+      FROM delivery.work_item_approval a
+      LEFT JOIN tenancy.user_account du ON du.id = a.decided_by
+     WHERE a.work_item_id = w.id AND a.tenant_id = w.tenant_id AND a.decision <> 'pending'
+       AND NOT EXISTS (
+         SELECT 1 FROM delivery.work_item_approval o
+          WHERE o.work_item_id = w.id AND o.tenant_id = w.tenant_id AND o.decision = 'pending')
+     ORDER BY a.decided_at DESC NULLS LAST, a.submitted_at DESC
+     LIMIT 1
+  ) lr ON true
 `;
 
 export class PostgresWorkItemRepository implements WorkItemRepository {
@@ -689,6 +720,46 @@ export class PostgresWorkItemRepository implements WorkItemRepository {
   }
 
   /** Unfinished is the blocker's state FLAG, never its code. */
+  // ── notes (0330, CA#30) ──────────────────────────────────────────────────
+
+  /** Append one. `bib_app` holds SELECT and INSERT on the table and nothing
+   *  else, so there is no update or delete to write here. */
+  async addNote(note: NewWorkItemNote): Promise<WorkItemNote> {
+    return withTenant(this.app, note.tenantId, async (db) => {
+      const [row] = await db<NoteRow[]>`
+        WITH n AS (
+          INSERT INTO delivery.work_item_note (id, tenant_id, work_item_id, author_user_id, body, created_at)
+          VALUES (${note.id}, ${note.tenantId}, ${note.workItemId}, ${note.authorUserId},
+                  ${note.body}, ${note.createdAt}::timestamptz)
+          RETURNING id, tenant_id, work_item_id, author_user_id, body, created_at
+        )
+        SELECT n.id, n.tenant_id, n.work_item_id, n.author_user_id, n.body,
+               ${db.unsafe(isoInstant("n.created_at", "created_at"))},
+               u.display_name AS author_name
+        FROM n
+        -- By id alone: tenancy.user_account is GLOBAL (ADR-02).
+        LEFT JOIN tenancy.user_account u ON u.id = n.author_user_id
+      `;
+      if (!row) throw new Error("work_item_note insert returned no row");
+      return toNote(row);
+    });
+  }
+
+  async listNotes(tenantId: string, workItemId: string): Promise<readonly WorkItemNote[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<NoteRow[]>`
+        SELECT n.id, n.tenant_id, n.work_item_id, n.author_user_id, n.body,
+               ${db.unsafe(isoInstant("n.created_at", "created_at"))},
+               u.display_name AS author_name
+        FROM delivery.work_item_note n
+        LEFT JOIN tenancy.user_account u ON u.id = n.author_user_id
+        WHERE n.work_item_id = ${workItemId}
+        ORDER BY n.created_at, n.id
+      `;
+      return rows.map(toNote);
+    });
+  }
+
   async openBlockers(
     tenantId: string,
     workItemId: string,
@@ -729,6 +800,28 @@ export class PostgresWorkItemRepository implements WorkItemRepository {
       RETURNING ${db.unsafe(COLUMNS)}
     `;
   }
+}
+
+interface NoteRow {
+  id: string;
+  tenant_id: string;
+  work_item_id: string;
+  author_user_id: string;
+  author_name: string | null;
+  body: string;
+  created_at: string;
+}
+
+function toNote(r: NoteRow): WorkItemNote {
+  return {
+    id: r.id,
+    tenantId: r.tenant_id,
+    workItemId: r.work_item_id,
+    authorUserId: r.author_user_id,
+    authorName: r.author_name,
+    body: r.body,
+    createdAt: r.created_at,
+  };
 }
 
 function toChecklist(r: ChecklistRow): ChecklistItem {

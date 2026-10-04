@@ -29,7 +29,7 @@ import {
   PAYMENT_METHODS,
 } from "../../domain/invoice/model";
 import { DUNNING_ACTIONS } from "../../domain/config/model";
-import type { InvoiceRecord, InvoiceSummary } from "../../usecase/invoice/ports";
+import type { InvoiceSummary, InvoiceView } from "../../usecase/invoice/ports";
 import type { AuthzService } from "../../usecase/authz/service";
 import type { Principal } from "../../platform/callctx";
 
@@ -70,14 +70,20 @@ const InvoiceSchema = z
     /** WHO IS CHARGING — one of the firm's own entities, and the owner of the
      *  series this number came from. */
     entityPartyId: z.string().uuid(),
-    number: z.string().openapi({
+    number: z.string().nullable().openapi({
       description:
-        "`INV/2026-27/0001`. Allocated by the write itself from a gapless per-entity series " +
-        "and frozen by a trigger — an invoice number is never edited. A wrong invoice is " +
-        "cancelled and a new one issued, and both stay readable.",
+        "`INV/2026-27/0001`. Drawn from a gapless per-entity series when the invoice is ISSUED " +
+        "(0322) and frozen by a trigger from then: an invoice number is never edited. NULL on a " +
+        "draft (show it as a draft), and on a draft cancelled before it was issued. Drafts made " +
+        "before 0322 keep the number they drew. A wrong issued invoice is cancelled and a new " +
+        "one issued, and both stay readable.",
     }),
-    financialYear: z.number().int(),
-    sequenceNumber: z.number().int(),
+    financialYear: z.number().int().openapi({
+      description:
+        "The financial year whose series the number was drawn from. On a draft it is provisional: " +
+        "issuing takes the year of the issue date, in the firm's own financial year (B03).",
+    }),
+    sequenceNumber: z.number().int().nullable(),
     status: z.enum(STATUS_VALUES),
     currency: z.string().length(3),
     /** NULL for somebody without commercial visibility — the fee axis. Not an
@@ -93,6 +99,9 @@ const InvoiceSchema = z
     }),
     irnRegisteredAt: z.string().nullable(),
     notes: z.string().nullable(),
+    managerUserId: z.string().uuid().nullable().openapi({
+      description: "Whose revenue this invoice is (0318); frozen once issued. Null when nobody was named.",
+    }),
   })
   .openapi("Invoice");
 
@@ -144,6 +153,34 @@ const InvoiceRecordSchema = z
     entity: PartyRefSchema,
     lines: z.array(InvoiceLineSchema),
     totals: TotalsSchema,
+    manager: z
+      .object({ userId: z.string().uuid(), displayName: z.string().nullable(), email: z.string() })
+      .nullable(),
+    letters: z.array(z.object({ id: z.string().uuid(), ref: z.string() })).openapi({
+      description: "The engagement letters this invoice's lines bill, by reference (0318).",
+    }),
+    taxSuggestions: z
+      .object({
+        companyDefault: Decimal.nullable(),
+        byEngagement: z.array(z.object({ engagementId: z.string().uuid(), taxPercent: Decimal })),
+      })
+      .openapi({
+        description:
+          "The tax rate a line added by hand starts at (CA#5), by the automatic advance's rule: the " +
+          "rate last invoiced on that engagement, else the issuing company's default tax rate (Your " +
+          "firm), else none. A tax rate is a statutory fact, not a price: never redacted.",
+      }),
+    issueBlocked: z
+      .object({ reason: z.enum(["INVOICE_NUMBER_OUT_OF_ORDER"]), message: z.string() })
+      .nullable()
+      .openapi({
+        description:
+          "Why Issue would be refused today, when the record alone shows it (B51): a draft numbered " +
+          "before 0322 whose number is now out of order in its series (a later number of the series " +
+          "has been issued, or today is in another financial year). `message` is the refusal's own " +
+          "sentence, for the screen to show where Issue is offered. Null when nothing on the record " +
+          "stops it; the issue call still decides.",
+      }),
   })
   .openapi("InvoiceRecord");
 
@@ -198,14 +235,25 @@ const RaiseInvoiceRequest = z
     partyId: z.string().uuid(),
     entityPartyId: z.string().uuid(),
     currency: z.string().length(3),
-    fxRate: Decimal,
-    fxRateDate: z.string(),
+    fxRate: Decimal.optional().openapi({
+      description:
+        "How many of the firm's reporting currency one unit of `currency` was worth. REQUIRED when " +
+        "`currency` is not the firm's reporting currency (FX_RATE_REQUIRED, 400; it used to default " +
+        "to 1, B07); in the reporting currency leave it out (it is 1; anything else is FX_RATE_NOT_ONE).",
+    }),
+    fxRateDate: z.string().optional().openapi({ description: "The day the rate is from. Defaults to today." }),
     dueOn: z.string().optional(),
     notes: z.string().max(2000).optional(),
     seriesDate: z.string().optional().openapi({
       description:
-        "Which financial year's series this belongs to. Defaults to today; a firm raising an " +
-        "invoice on 2 April for March's work sets it deliberately.",
+        "The draft's provisional financial year (defaults to today). It does not decide the " +
+        "number: an invoice is numbered in the series of the year it is ISSUED in (B03).",
+    }),
+    managerUserId: z.string().uuid().nullable().optional().openapi({
+      description:
+        "Whose revenue this invoice is (auto-invoice T4); null or absent names nobody. Must be " +
+        "active staff at this firm (MANAGER_NOT_STAFF, 409). The screen preselects the client's " +
+        "Key Manager. Changeable while a draft (PUT /invoices/{id}/manager), fixed once issued.",
     }),
   })
   .openapi("RaiseInvoiceRequest");
@@ -237,11 +285,12 @@ const raiseRoute = createRoute({
   method: "post",
   path: "/api/v1/invoices",
   tags: ["invoices"],
-  summary: "Raise an invoice — the number is allocated by the write itself",
+  summary: "Raise a draft invoice — it is numbered when it is issued",
   description:
-    "The number comes from a gapless per-entity, per-financial-year series, taken under a row " +
-    "lock inside the same transaction as the insert. A failure releases it, because the " +
-    "counter never moved — which is the difference between this and a document reference.",
+    "A DRAFT, with no number (0322). The number comes from a gapless per-entity, " +
+    "per-financial-year series when the invoice is ISSUED, taken under a row lock inside the " +
+    "same transaction as the issue, so a draft cancelled before issue spends nothing, and in the " +
+    "series of the year the issue date falls in (the firm's financial year, else 1 April).",
   request: {
     query: CallerDayQuery,
     body: { content: { "application/json": { schema: RaiseInvoiceRequest } }, required: true },
@@ -250,7 +299,10 @@ const raiseRoute = createRoute({
     201: { description: "Raised", content: { "application/json": { schema: InvoiceSchema } } },
     400: errorResponse("Bad currency, rate, or date"),
     401: errorResponse("Not signed in"),
-    403: errorResponse("No org selected, or the role does not permit it"),
+    403: errorResponse(
+      "No org selected, or the role does not permit it" +
+        ", or this login does not see fees (FEES_NOT_VISIBLE)",
+    ),
   },
 });
 
@@ -307,7 +359,10 @@ const addLineRoute = createRoute({
     204: { description: "Added" },
     400: errorResponse("Bad quantity, amount, discount or tax rate"),
     401: errorResponse("Not signed in"),
-    403: errorResponse("No org selected, or the role does not permit it"),
+    403: errorResponse(
+      "No org selected, or the role does not permit it" +
+        ", or this login does not see fees (FEES_NOT_VISIBLE)",
+    ),
     404: errorResponse("No such invoice at this firm"),
     409: errorResponse(
       "The invoice has been issued (its lines are fixed), or the engagement's letter was signed " +
@@ -325,7 +380,10 @@ const removeLineRoute = createRoute({
   responses: {
     204: { description: "Struck off" },
     401: errorResponse("Not signed in"),
-    403: errorResponse("No org selected, or the role does not permit it"),
+    403: errorResponse(
+      "No org selected, or the role does not permit it" +
+        ", or this login does not see fees (FEES_NOT_VISIBLE)",
+    ),
     404: errorResponse("No such invoice or line at this firm"),
     409: errorResponse("The invoice has been issued — its lines are fixed"),
   },
@@ -338,7 +396,12 @@ const issueRoute = createRoute({
   summary: "Issue it",
   description:
     "Refuses an invoice with no lines: it would ask the client for nothing. The date on it is " +
-    "the caller's `asOf`, or the firm's day.",
+    "the caller's `asOf`, or the firm's day. This is when the number is drawn (0322): the next " +
+    "in the draft's series, in the same transaction as the issue. A draft whose due date is before " +
+    "the issue date is refused (DUE_BEFORE_ISSUE, 409: change it with PUT /due-date); one with no " +
+    "due date takes the firm's payment terms when it has set them (0327), else stays without one. " +
+    "A draft numbered before 0322 keeps its number and is refused when that number would go out of " +
+    "order (INVOICE_NUMBER_OUT_OF_ORDER, 409, B51): cancel it and raise it again.",
   request: { params: z.object({ invoiceId: z.string().uuid() }), query: CallerDayQuery },
   responses: {
     200: { description: "Issued", content: { "application/json": { schema: InvoiceSchema } } },
@@ -346,7 +409,10 @@ const issueRoute = createRoute({
     403: errorResponse("No org selected, or the role does not permit it"),
     404: errorResponse("No such invoice at this firm"),
     400: errorResponse("asOf is not today anywhere"),
-    409: errorResponse("Not a draft, or it has no lines"),
+    409: errorResponse(
+      "Not a draft, it has no lines, its due date is before today's issue date, or its number " +
+        "(drawn before 0322) would go out of order",
+    ),
   },
 });
 
@@ -356,9 +422,10 @@ const cancelRoute = createRoute({
   tags: ["invoices"],
   summary: "Withdraw it",
   description:
-    "The number is NOT released and the row is not removed — that is what makes the series " +
-    "consecutive. A cancelled invoice stays in the sequence saying it was cancelled, which is " +
-    "exactly what an auditor needs to see where a number went.",
+    "An issued invoice's number is NOT released and the row is not removed — that is what " +
+    "makes the series consecutive. A cancelled invoice stays in the sequence saying it was " +
+    "cancelled, which is exactly what an auditor needs to see where a number went. A draft has " +
+    "no number yet (0322), so cancelling one spends nothing.",
   request: { params: z.object({ invoiceId: z.string().uuid() }) },
   responses: {
     200: { description: "Cancelled", content: { "application/json": { schema: InvoiceSchema } } },
@@ -366,6 +433,72 @@ const cancelRoute = createRoute({
     403: errorResponse("No org selected, or the role does not permit it"),
     404: errorResponse("No such invoice at this firm"),
     409: errorResponse("Already cancelled"),
+  },
+});
+
+const setManagerRoute = createRoute({
+  method: "put",
+  path: "/api/v1/invoices/{invoiceId}/manager",
+  tags: ["invoices"],
+  summary: "Put a draft in another manager's revenue (or nobody's)",
+  description:
+    "Drafts only. Once issued, whose revenue it is is fixed " +
+    "(INVOICE_MANAGER_FROZEN, 409, and 0318's trigger). The manager must be active staff at this " +
+    "firm (MANAGER_NOT_STAFF, 409). Writes `invoice.manager_set` when it changes.",
+  request: {
+    params: z.object({ invoiceId: z.string().uuid() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z
+            .object({ managerUserId: z.string().uuid().nullable() })
+            .openapi("SetInvoiceManagerRequest"),
+        },
+      },
+      required: true,
+    },
+  },
+  responses: {
+    200: { description: "Saved", content: { "application/json": { schema: InvoiceSchema } } },
+    400: errorResponse("Not a user id"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such invoice at this firm"),
+    409: errorResponse("The invoice is no longer a draft, or the person is not active staff here"),
+  },
+});
+
+const setDueDateRoute = createRoute({
+  method: "put",
+  path: "/api/v1/invoices/{invoiceId}/due-date",
+  tags: ["invoices"],
+  summary: "Set, change or clear a draft's due date",
+  description:
+    "Drafts only (INVOICE_NOT_EDITABLE, 409, once issued: the due date is what was sent). Today or " +
+    "later (DUE_DATE_IN_THE_PAST, 400); null clears it. A draft whose due date has passed by the " +
+    "time it is issued is refused at issue (DUE_BEFORE_ISSUE), so this is how it is fixed. Writes " +
+    "`invoice.due_date_set` when it changes (audit 2026-10-03, B20/B21).",
+  request: {
+    params: z.object({ invoiceId: z.string().uuid() }),
+    query: CallerDayQuery,
+    body: {
+      content: {
+        "application/json": {
+          schema: z
+            .object({ dueOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable() })
+            .openapi("SetInvoiceDueDateRequest"),
+        },
+      },
+      required: true,
+    },
+  },
+  responses: {
+    200: { description: "Saved", content: { "application/json": { schema: InvoiceSchema } } },
+    400: errorResponse("Not a day, or a day already past"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such invoice at this firm"),
+    409: errorResponse("The invoice is no longer a draft"),
   },
 });
 
@@ -489,7 +622,8 @@ const BalanceSchema = z
     invoiced: Decimal.nullable(),
     paid: Decimal.nullable(),
     credited: Decimal.nullable(),
-    /** invoiced − paid − credited, computed by Postgres. Never a stored column:
+    /** invoiced − paid − credited, computed by Postgres, for an ISSUED invoice;
+     *  0 for a draft or a cancelled one (0326, B22). Never a stored column:
      *  a `paid` flag drifts the first time a payment is corrected. */
     outstanding: Decimal.nullable(),
   })
@@ -532,7 +666,10 @@ const recordPaymentRoute = createRoute({
     201: { description: "Recorded", content: { "application/json": { schema: PaymentSchema } } },
     400: errorResponse("Bad amount, method or date"),
     401: errorResponse("Not signed in"),
-    403: errorResponse("No org selected, or the role does not permit it"),
+    403: errorResponse(
+      "No org selected, or the role does not permit it" +
+        ", or this login does not see fees (FEES_NOT_VISIBLE)",
+    ),
     404: errorResponse("No such invoice at this firm"),
     409: errorResponse("The invoice is not issued — a draft owes nothing, a cancelled one is a refund"),
   },
@@ -562,7 +699,9 @@ const creditNoteRoute = createRoute({
   description:
     "Its own document with its own gapless series. The reason is mandatory and closed — " +
     "without it revenue leakage is invisible, because the numbers always reconcile and why " +
-    "does not. A firm cannot credit more than it billed.",
+    "does not. A firm cannot credit more than it billed. `issuedOn` (default today) must be on " +
+    "or after the invoice's issue date and not after today (CREDIT_NOTE_DATE_OUT_OF_RANGE, 400); " +
+    "it is numbered in the series of its own date's year.",
   request: {
     params: z.object({ invoiceId: z.string().uuid() }),
     query: CallerDayQuery,
@@ -572,7 +711,10 @@ const creditNoteRoute = createRoute({
     201: { description: "Issued", content: { "application/json": { schema: CreditNoteSchema } } },
     400: errorResponse("Bad amount, or not one of the credit reasons"),
     401: errorResponse("Not signed in"),
-    403: errorResponse("No org selected, or the role does not permit it"),
+    403: errorResponse(
+      "No org selected, or the role does not permit it" +
+        ", or this login does not see fees (FEES_NOT_VISIBLE)",
+    ),
     404: errorResponse("No such invoice at this firm"),
     409: errorResponse("The invoice is not issued, or this would credit more than was billed"),
   },
@@ -668,6 +810,11 @@ const PendingDunningSchema = z
     outstanding: Decimal.nullable(),
     currency: z.string().length(3),
     dueOn: z.string().nullable(),
+    invoiceStatus: z.enum(STATUS_VALUES).openapi({
+      description:
+        "The invoice as it stands now. A step on an invoice cancelled since (outstanding 0) can " +
+        "only be rejected (DUNNING_NOTHING_OWED, 409, on approve).",
+    }),
   })
   .openapi("PendingDunningAction");
 
@@ -735,7 +882,10 @@ const decideDunningRoute = createRoute({
     401: errorResponse("Not signed in"),
     403: errorResponse("No org selected, or the role does not permit it"),
     404: errorResponse("No such dunning action at this firm"),
-    409: errorResponse("Not awaiting approval, or already decided"),
+    409: errorResponse(
+      "Not awaiting approval, already decided, or (approving) the invoice was cancelled or is paid " +
+        "in full since the step fired (DUNNING_NOTHING_OWED): reject it instead",
+    ),
   },
 });
 
@@ -745,12 +895,28 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
    *  allowed. */
   const seesFees = (principal: Principal | null): boolean =>
     principal !== null && deps.authz.seesFees(principal);
+  /**
+   * B27 (audit 2026-10-03): a route that WRITES an amount refuses a login that
+   * cannot see fees, before the use case is asked. Seeing a figure and setting
+   * one are one question; the billing desk already refused a changed price to
+   * the same login (PRICE_NOT_VISIBLE).
+   */
+  const requireFees = (principal: Principal | null, what: string): void => {
+    if (principal !== null) deps.authz.requireFees(principal, what);
+  };
 
   app.openapi(raiseRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
+    requireFees(c.get("principal"), "raise an invoice by hand");
+    const { managerUserId, ...body } = c.req.valid("json");
     const raised = await deps.service.raise(
-      { tenantId: s.tenantId, ...c.req.valid("json"), asOf: c.req.valid("query").asOf },
+      {
+        tenantId: s.tenantId,
+        ...body,
+        managerUserId: managerUserId ?? undefined,
+        asOf: c.req.valid("query").asOf,
+      },
       s.actor,
     );
     return c.json(toInvoiceBody(raised, seesFees(c.get("principal"))), 201);
@@ -803,6 +969,7 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
   app.openapi(addLineRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
+    requireFees(c.get("principal"), "change the lines on an invoice");
     await deps.service.addLine({
       tenantId: s.tenantId,
       invoiceId: c.req.valid("param").invoiceId,
@@ -814,6 +981,7 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
   app.openapi(removeLineRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
+    requireFees(c.get("principal"), "change the lines on an invoice");
     const p = c.req.valid("param");
     await deps.service.removeLine(s.tenantId, p.invoiceId, p.lineId);
     return c.body(null, 204);
@@ -836,6 +1004,31 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
     if (!s.ok) return c.json(s.deny, s.status);
     const cancelled = await deps.service.cancel(s.tenantId, c.req.valid("param").invoiceId, s.actor);
     return c.json(toInvoiceBody(cancelled, seesFees(c.get("principal"))), 200);
+  });
+
+  app.openapi(setManagerRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const saved = await deps.service.setManager(
+      s.tenantId,
+      c.req.valid("param").invoiceId,
+      c.req.valid("json").managerUserId,
+      s.actor,
+    );
+    return c.json(toInvoiceBody(saved, seesFees(c.get("principal"))), 200);
+  });
+
+  app.openapi(setDueDateRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const saved = await deps.service.setDueDate(
+      s.tenantId,
+      c.req.valid("param").invoiceId,
+      c.req.valid("json").dueOn,
+      s.actor,
+      c.req.valid("query").asOf,
+    );
+    return c.json(toInvoiceBody(saved, seesFees(c.get("principal"))), 200);
   });
 
   app.openapi(registerIrnRoute, async (c) => {
@@ -883,6 +1076,7 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
   app.openapi(recordPaymentRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
+    requireFees(c.get("principal"), "record a payment");
     const payment = await deps.service.recordPayment(
       { tenantId: s.tenantId, invoiceId: c.req.valid("param").invoiceId, ...c.req.valid("json") },
       s.actor,
@@ -901,6 +1095,7 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
   app.openapi(creditNoteRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
+    requireFees(c.get("principal"), "issue a credit note");
     const credit = await deps.service.issueCreditNote(
       {
         tenantId: s.tenantId,
@@ -959,6 +1154,7 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
           outstanding: fees ? a.outstanding : null,
           currency: a.currency,
           dueOn: a.dueOn,
+          invoiceStatus: a.invoiceStatus,
         })),
       },
       200,
@@ -1058,6 +1254,7 @@ function toInvoiceBody(i: Invoice, fees: boolean): z.infer<typeof InvoiceSchema>
     irn: i.irn,
     irnRegisteredAt: i.irnRegisteredAt,
     notes: i.notes,
+    managerUserId: i.managerUserId,
   };
 }
 
@@ -1073,7 +1270,7 @@ function toTotalsBody(t: InvoiceTotals, fees: boolean): z.infer<typeof TotalsSch
   };
 }
 
-function toRecordBody(record: InvoiceRecord, fees: boolean): z.infer<typeof InvoiceRecordSchema> {
+function toRecordBody(record: InvoiceView, fees: boolean): z.infer<typeof InvoiceRecordSchema> {
   return {
     invoice: toInvoiceBody(record.invoice, fees),
     party: { id: record.party.id, displayName: record.party.displayName },
@@ -1092,5 +1289,21 @@ function toRecordBody(record: InvoiceRecord, fees: boolean): z.infer<typeof Invo
       tax: fees ? l.tax : null,
     })),
     totals: toTotalsBody(record.totals, fees),
+    manager:
+      record.manager === null
+        ? null
+        : { userId: record.manager.userId, displayName: record.manager.displayName, email: record.manager.email },
+    letters: record.letters.map((l) => ({ id: l.id, ref: l.ref })),
+    taxSuggestions: {
+      companyDefault: record.taxSuggestions.companyDefault,
+      byEngagement: record.taxSuggestions.byEngagement.map((t) => ({
+        engagementId: t.engagementId,
+        taxPercent: t.taxPercent,
+      })),
+    },
+    issueBlocked:
+      record.issueBlocked === null
+        ? null
+        : { reason: record.issueBlocked.reason, message: record.issueBlocked.message },
   };
 }

@@ -18,13 +18,27 @@ import type { OpenAPIHono } from "@hono/zod-openapi";
 import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
 import { scopeOf } from "../scope";
-import type { ConfigKind } from "../../domain/config/model";
+import type { ConfigEntry, ConfigKind, ConfigVersion } from "../../domain/config/model";
+import { bodyWithoutFees, kindCarriesFees } from "../../domain/config/model";
 import { PERMISSIONS, PERMISSION_DESCRIPTIONS } from "../../domain/authz/model";
 import type { ConfigService } from "../../usecase/config/service";
+import type { AuthzService } from "../../usecase/authz/service";
+import type { Principal } from "../../platform/callctx";
 
 export interface ConfigDeps {
   readonly service: ConfigService;
+  /**
+   * The FEE AXIS only (B09, audit 2026-10-03). A service's list price is nulled
+   * for a login that cannot see fees, and that login may not write a service:
+   * it reads null, so whatever it sent back would wipe a price it never saw.
+   * Gate 3 is middleware.
+   */
+  readonly authz: AuthzService;
 }
+
+/** What the refusal says was refused. */
+const WRITE_SERVICE = "change a service in the catalogue";
+
 
 // The closed kind set lives in the domain (CONFIG_KINDS). `satisfies` makes a
 // value that is not a ConfigKind a compile error here; a unit test asserts the
@@ -264,7 +278,33 @@ const publishRoute = createRoute({
 
 // ── Registration ────────────────────────────────────────────────────────────
 
+/** Field by field (B48): these were forwarded whole. `fees` false nulls a
+ *  service's list price (B09). */
+function entryToWire(e: ConfigEntry): z.infer<typeof ConfigEntrySchema> {
+  return { id: e.id, tenantId: e.tenantId, kind: e.kind, key: e.key };
+}
+
+function versionToWire(kind: ConfigKind, v: ConfigVersion, fees: boolean): z.infer<typeof ConfigVersionSchema> {
+  return {
+    id: v.id,
+    tenantId: v.tenantId,
+    entryId: v.entryId,
+    version: v.version,
+    status: v.status,
+    body: fees ? { ...v.body } : bodyWithoutFees(kind, v.body),
+    publishedAt: v.publishedAt,
+    archivedAt: v.archivedAt,
+  };
+}
+
 export function registerConfigRoutes(app: OpenAPIHono<AppEnv>, deps: ConfigDeps): void {
+  const seesFees = (principal: Principal | null): boolean =>
+    principal !== null && deps.authz.seesFees(principal);
+  /** B09: a service carries its list price, so writing one is a money write. */
+  const requireFeesToWrite = (principal: Principal | null, kind: ConfigKind): void => {
+    if (principal !== null && kindCarriesFees(kind)) deps.authz.requireFees(principal, WRITE_SERVICE);
+  };
+
   // Registered BEFORE /config/{kind}: "permissions" is not a kind, and a
   // template route would otherwise swallow it and answer 400 for a value that
   // was never meant to be a kind at all.
@@ -287,12 +327,13 @@ export function registerConfigRoutes(app: OpenAPIHono<AppEnv>, deps: ConfigDeps)
     if (!s.ok) return c.json(s.deny, s.status);
     const { kind } = c.req.valid("param");
     const entries = await deps.service.list(s.tenantId, kind);
+    const fees = seesFees(c.get("principal"));
     return c.json(
       {
         entries: entries.map((e) => ({
-          entry: e.entry,
-          published: e.published,
-          pendingDraft: e.pendingDraft,
+          entry: entryToWire(e.entry),
+          published: e.published === null ? null : versionToWire(kind, e.published, fees),
+          pendingDraft: e.pendingDraft === null ? null : versionToWire(kind, e.pendingDraft, fees),
         })),
       },
       200,
@@ -304,40 +345,56 @@ export function registerConfigRoutes(app: OpenAPIHono<AppEnv>, deps: ConfigDeps)
     if (!s.ok) return c.json(s.deny, s.status);
     const { kind, key } = c.req.valid("param");
     const history = await deps.service.describe(s.tenantId, kind, key);
-    return c.json({ entry: history.entry, versions: [...history.versions] }, 200);
+    const fees = seesFees(c.get("principal"));
+    return c.json(
+      {
+        entry: entryToWire(history.entry),
+        versions: history.versions.map((v) => versionToWire(kind, v, fees)),
+      },
+      200,
+    );
   });
 
   app.openapi(defineRoute, async (c) => {
-    const s = scopeOf(c.get("principal"));
+    const principal = c.get("principal");
+    const s = scopeOf(principal);
     if (!s.ok) return c.json(s.deny, s.status);
     const { kind } = c.req.valid("param");
+    requireFeesToWrite(principal, kind);
     const { key, body } = c.req.valid("json");
     const defined = await deps.service.define(
       { tenantId: s.tenantId, kind, key, body },
       s.actor,
     );
-    return c.json(defined, 201);
+    return c.json(
+      { entry: entryToWire(defined.entry), draft: versionToWire(kind, defined.draft, true) },
+      201,
+    );
   });
 
   app.openapi(addVersionRoute, async (c) => {
-    const s = scopeOf(c.get("principal"));
+    const principal = c.get("principal");
+    const s = scopeOf(principal);
     if (!s.ok) return c.json(s.deny, s.status);
     const { kind, key } = c.req.valid("param");
+    requireFeesToWrite(principal, kind);
     const { body } = c.req.valid("json");
     // No actor: drafting records nothing, because nothing has taken effect.
     // See ConfigService.addVersion.
     const version = await deps.service.addVersion({ tenantId: s.tenantId, kind, key, body });
-    return c.json(version, 201);
+    return c.json(versionToWire(kind, version, true), 201);
   });
 
   app.openapi(publishRoute, async (c) => {
-    const s = scopeOf(c.get("principal"));
+    const principal = c.get("principal");
+    const s = scopeOf(principal);
     if (!s.ok) return c.json(s.deny, s.status);
     const { kind, key, version } = c.req.valid("param");
+    requireFeesToWrite(principal, kind);
     const published = await deps.service.publish(
       { tenantId: s.tenantId, kind, key, version },
       s.actor,
     );
-    return c.json(published, 200);
+    return c.json(versionToWire(kind, published, true), 200);
   });
 }

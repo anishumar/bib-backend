@@ -22,12 +22,13 @@
 //
 // `usecase/identity/ports.ts` says the same thing from the other side, which is
 // why `sendPortalInvite` takes `firmName` at all.
-import type { Mailer } from "../../usecase/identity/ports";
+import type { Mailer, StaffWelcomeExtras } from "../../usecase/identity/ports";
 import type {
   DecisionNotice,
   ProposalLetter,
   ProposalMailer,
 } from "../../usecase/proposal/ports";
+import type { AdvanceDigestLetter, AdvanceDigestRow, BillingMailer } from "../../usecase/billing/ports";
 import { longDay } from "../../domain/day";
 
 /**
@@ -74,7 +75,7 @@ export interface MailTransport {
  *  tenant, and the FIRM is named in the invite's own text. */
 const PRODUCT = "BiB";
 
-export class SmtpMailer implements Mailer, ProposalMailer {
+export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer {
   constructor(private readonly transport: MailTransport) {}
 
   sendMagicLink(to: string, url: string, expiresAt: string): Promise<void> {
@@ -88,7 +89,7 @@ export class SmtpMailer implements Mailer, ProposalMailer {
       `The link works ONCE and stops working at ${when}.`,
       ``,
       `If you did not ask for this, nothing has happened and you can ignore this`,
-      `message — the link is the only way in and nobody else has it.`,
+      `message: the link is the only way in and nobody else has it.`,
     ].join("\n");
 
     return this.transport.send({
@@ -100,7 +101,7 @@ export class SmtpMailer implements Mailer, ProposalMailer {
         button(url, "Sign in"),
         paragraph(`The link works <strong>once</strong> and stops working at ${esc(when)}.`),
         paragraph(
-          `If you did not ask for this, nothing has happened and you can ignore this message — ` +
+          `If you did not ask for this, nothing has happened and you can ignore this message: ` +
             `the link is the only way in and nobody else has it.`,
         ),
         fallback(url),
@@ -113,6 +114,7 @@ export class SmtpMailer implements Mailer, ProposalMailer {
     url: string,
     expiresAt: string,
     firmName: string | null,
+    timeZone?: string | null,
   ): Promise<void> {
     // Null is a real state — `PortalInviteService` passes it when the tenant row
     // does not resolve, and its comment is explicit that the letter should go
@@ -125,7 +127,7 @@ export class SmtpMailer implements Mailer, ProposalMailer {
       firm === null
         ? `You have been invited to a client portal`
         : `${firm} has invited you to their client portal`;
-    const when = readableInstant(expiresAt);
+    const when = readableInstant(expiresAt, timeZone);
 
     const text = [
       `${who} uses ${PRODUCT} to work with its clients, and has invited you to`,
@@ -146,7 +148,13 @@ export class SmtpMailer implements Mailer, ProposalMailer {
 
     return this.transport.send({
       to,
+      // FROM THE FIRM, by name (CA#12): only the display name; the address is
+      // the one the relay authenticates. No firm known, the deployment's name.
+      ...(firm === null ? {} : { fromName: firm }),
       subject,
+      // Sent AS the firm (CA#40), the way a proposal is (0085): the client
+      // knows the firm, not this product. The address stays the deployment's.
+      fromName: firm ?? undefined,
       text,
       html: page([
         paragraph(
@@ -192,25 +200,41 @@ export class SmtpMailer implements Mailer, ProposalMailer {
     url: string,
     expiresAt: string,
     firmName: string | null,
+    timeZone?: string | null,
+    extra?: StaffWelcomeExtras,
   ): Promise<void> {
     const firm = headerSafe(firmName);
     const who = firm ?? "The firm you work at";
     const subject =
       firm === null ? `You have been given access to ${PRODUCT}` : `${firm} has added you to ${PRODUCT}`;
-    const when = readableInstant(expiresAt);
+    const when = readableInstant(expiresAt, timeZone);
+    // WHO added them (CA#50): "somebody there" read as a form letter from
+    // nobody. The name is the colleague's own, so it is data like the firm's.
+    const adder = headerSafe(extra?.addedBy ?? null);
+    const opening =
+      adder === null
+        ? { text: `${who} runs its practice on ${PRODUCT}, and has given you access with this`, html: `<strong>${esc(who)}</strong> runs its practice on ${esc(PRODUCT)}, and has given you access with this email address.` }
+        : { text: `${adder} at ${firm ?? "your firm"} has given you access to ${PRODUCT} with this`, html: `<strong>${esc(adder)}</strong> at <strong>${esc(firm ?? "your firm")}</strong> has given you access to ${esc(PRODUCT)} with this email address.` };
+    // THE FIRST PASSWORD IS CHOSEN ON THIS LINK (CA#38). It used to sign the
+    // colleague in and stop, and the only way to a password was a second email
+    // titled "Reset your password" for a password they never had.
+    const choose = extra?.choosePassword === true;
+    const action = choose
+      ? { line: `Open this link to choose your password and sign in:`, button: "Choose your password" }
+      : { line: `Open this link to sign in:`, button: "Sign in" };
 
     const text = [
-      `${who} runs its practice on ${PRODUCT}, and somebody there has given you`,
-      `access with this email address.`,
+      opening.text,
+      `email address.`,
       ``,
-      `Open this link to sign in:`,
+      action.line,
       url,
       ``,
       `Inside you will find the work that is yours, what is due and when, and the`,
       `clients you look after.`,
       ``,
       `The link works ONCE and stops working at ${when}. If it has expired by the`,
-      `time you read this, nothing is lost — go to the sign-in page and ask for a`,
+      `time you read this, nothing is lost: go to the sign-in page and ask for a`,
       `new link with this same address.`,
       ``,
       `If you were not expecting this, please check with your contact at`,
@@ -219,21 +243,22 @@ export class SmtpMailer implements Mailer, ProposalMailer {
 
     return this.transport.send({
       to,
+      // FROM THE FIRM, by name (CA#12): only the display name; the address is
+      // the one the relay authenticates. No firm known, the deployment's name.
+      ...(firm === null ? {} : { fromName: firm }),
       subject,
+      fromName: firm ?? undefined,
       text,
       html: page([
-        paragraph(
-          `<strong>${esc(who)}</strong> runs its practice on ${esc(PRODUCT)}, and somebody ` +
-            `there has given you access with this email address.`,
-        ),
-        button(url, "Sign in"),
+        paragraph(opening.html),
+        button(url, action.button),
         paragraph(
           `Inside you will find the work that is yours, what is due and when, and the clients ` +
             `you look after.`,
         ),
         paragraph(
           `The link works <strong>once</strong> and stops working at ${esc(when)}. If it has ` +
-            `expired by the time you read this, nothing is lost — go to the sign-in page and ` +
+            `expired by the time you read this, nothing is lost: go to the sign-in page and ` +
             `ask for a new link with this same address.`,
         ),
         paragraph(
@@ -270,6 +295,7 @@ export class SmtpMailer implements Mailer, ProposalMailer {
     url: string,
     expiresAt: string,
     firmName: string | null,
+    timeZone?: string | null,
   ): Promise<void> {
     const firm = headerSafe(firmName);
     const who = firm ?? "The firm you work with";
@@ -277,7 +303,7 @@ export class SmtpMailer implements Mailer, ProposalMailer {
       firm === null
         ? `You have been given access to a client portal`
         : `${firm} has given you access to their client portal`;
-    const when = readableInstant(expiresAt);
+    const when = readableInstant(expiresAt, timeZone);
 
     const text = [
       `${who} uses ${PRODUCT} to work with its clients, and has given you access`,
@@ -293,7 +319,7 @@ export class SmtpMailer implements Mailer, ProposalMailer {
       `you have been invoiced.`,
       ``,
       `The link works ONCE and stops working at ${when}. If it has expired by the`,
-      `time you read this, nothing is lost — sign in as you normally do.`,
+      `time you read this, nothing is lost: sign in as you normally do.`,
       ``,
       `If you were not expecting this, please check with your contact at`,
       `${who} before opening it, rather than replying to this message.`,
@@ -301,7 +327,11 @@ export class SmtpMailer implements Mailer, ProposalMailer {
 
     return this.transport.send({
       to,
+      // FROM THE FIRM, by name (CA#12): only the display name; the address is
+      // the one the relay authenticates. No firm known, the deployment's name.
+      ...(firm === null ? {} : { fromName: firm }),
       subject,
+      fromName: firm ?? undefined,
       text,
       html: page([
         paragraph(
@@ -320,7 +350,7 @@ export class SmtpMailer implements Mailer, ProposalMailer {
         ),
         paragraph(
           `The link works <strong>once</strong> and stops working at ${esc(when)}. If it has ` +
-            `expired by the time you read this, nothing is lost — sign in as you normally do.`,
+            `expired by the time you read this, nothing is lost: sign in as you normally do.`,
         ),
         paragraph(
           `If you were not expecting this, please check with your contact at ` +
@@ -365,7 +395,7 @@ export class SmtpMailer implements Mailer, ProposalMailer {
       `cancels this.`,
       ``,
       `If you did not ask for this, your password has NOT changed and nothing`,
-      `will happen as long as you leave this link alone — simply ignore this`,
+      `will happen as long as you leave this link alone: simply ignore this`,
       `message. Nobody can read the link but you.`,
     ].join("\n");
 
@@ -384,7 +414,7 @@ export class SmtpMailer implements Mailer, ProposalMailer {
         ),
         paragraph(
           `If you did not ask for this, <strong>your password has not changed</strong> and ` +
-            `nothing will happen as long as you leave this link alone — simply ignore this ` +
+            `nothing will happen as long as you leave this link alone: simply ignore this ` +
             `message. Nobody can read the link but you.`,
         ),
         fallback(url),
@@ -491,7 +521,7 @@ export class SmtpMailer implements Mailer, ProposalMailer {
     const verb = accepted ? "accepted" : "declined";
     const client = headerSafe(notice.clientName) ?? "The client";
     const ref = headerSafe(notice.ref) ?? notice.ref;
-    const when = readableInstant(notice.decidedAt);
+    const when = readableInstant(notice.decidedAt, notice.timeZone);
     const headline =
       `${notice.signerName} ${verb} proposal ${notice.ref} (${notice.title}) for ` +
       `${notice.clientName}, on the proposal's link, at ${when}.`;
@@ -513,8 +543,12 @@ export class SmtpMailer implements Mailer, ProposalMailer {
       ...(next === null ? [] : [``, next]),
     ].join("\n");
 
+    const firm = headerSafe(notice.firmName ?? null);
     return this.transport.send({
       to: notice.to,
+      // From the firm (CA#12): a colleague at one firm must not hear about its
+      // client from another firm's name, which the deployment's one was.
+      ...(firm === null ? {} : { fromName: firm }),
       subject: `${client} ${verb} ${ref}`,
       text,
       html: page([
@@ -526,20 +560,142 @@ export class SmtpMailer implements Mailer, ProposalMailer {
       ]),
     });
   }
+
+  /**
+   * The weekly summary of advances to a firm's administrator (0322).
+   *
+   * Ashish: "once every week it should escalate to ceo coo ... through system
+   * notification/email". It goes to a COLLEAGUE about the firm's own money, so
+   * it names the firm in the subject (one person may administer two firms) and
+   * says plainly that the work has started: the summary exists because the
+   * advance no longer holds it. Amounts only where the reader may see fees (the
+   * use case leaves them out otherwise). No client data beyond what the
+   * administrator already sees on the Advances list.
+   */
+  sendAdvanceDigest(letter: AdvanceDigestLetter): Promise<void> {
+    const firm = headerSafe(letter.firmName);
+    const count = letter.rows.length;
+    const what = count === 1 ? "1 advance" : `${String(count)} advances`;
+    const hello = headerSafe(letter.recipientName);
+    const intro =
+      `${count === 1 ? "This advance was" : "These advances were"} signed a week or more ago and ` +
+      `${count === 1 ? "is" : "are"} not paid yet. The work has started.`;
+    const lines = letter.rows.map(digestLine);
+
+    const text = [
+      hello === null ? "Hello," : `Hello ${hello},`,
+      ``,
+      intro,
+      ``,
+      ...lines.map((l) => `- ${l}`),
+      ``,
+      `Open the advances:`,
+      letter.advancesUrl,
+      ``,
+      `You get this every week as an administrator${firm === null ? "" : ` of ${firm}`} on ${PRODUCT}.`,
+    ].join("\n");
+
+    return this.transport.send({
+      to: letter.to,
+      // From the firm (CA#12), as every letter about one firm's business is.
+      ...(firm === null ? {} : { fromName: firm }),
+      subject: `${what} not paid yet${firm === null ? "" : ` · ${firm}`}`,
+      text,
+      html: page([
+        paragraph(esc(hello === null ? "Hello," : `Hello ${hello},`)),
+        paragraph(esc(intro)),
+        `<ul style="margin:0 0 16px;padding-left:20px">` +
+          lines.map((l) => `<li style="margin:0 0 6px">${esc(l)}</li>`).join("") +
+          `</ul>`,
+        button(letter.advancesUrl, "Open the advances"),
+        paragraph(
+          `<span style="font-size:13px;color:#666">` +
+            esc(`You get this every week as an administrator${firm === null ? "" : ` of ${firm}`} on ${PRODUCT}.`) +
+            `</span>`,
+        ),
+        fallback(letter.advancesUrl),
+      ]),
+    });
+  }
+}
+
+/** One advance as a line: whose, which letter, where it stands, for how long. */
+function digestLine(r: AdvanceDigestRow): string {
+  const stage =
+    r.stage === "on_draft"
+      ? "invoice is a draft, not issued yet"
+      : r.stage === "unpaid"
+        ? `${r.invoiceNumber ?? "invoice"} issued, not paid`
+        : r.stage === "part_paid"
+          ? `${r.invoiceNumber ?? "invoice"} part paid`
+          : r.stage === "not_raised"
+            ? "no invoice yet"
+            : "paid";
+  const owed = r.amount === null ? "" : `, ${digestMoney(r.amount, r.currency)} ${r.stage === "on_draft" || r.stage === "not_raised" ? "before tax" : "still owed"}`;
+  const days = r.daysSinceSigned === 1 ? "1 day" : `${String(r.daysSinceSigned)} days`;
+  return `${r.clientName}, ${r.letterRef} (${r.serviceName}): ${stage}${owed}. Signed ${days} ago.`;
 }
 
 /**
- * An ISO instant as words, in UTC, WITH the zone said out loud.
+ * Money as the screens write it: rupees in lakhs ("INR 1,18,000"), every other
+ * currency in its own thousands, no ".00" on a whole amount. Grouped from the
+ * western string rather than asked of `en-IN`, which a Node built with small
+ * ICU silently answers as en-US. Never a JavaScript number: Intl formats the
+ * decimal string exactly.
+ */
+function digestMoney(amount: string, currency: string): string {
+  const whole = /^-?\d+(\.0+)?$/.test(amount);
+  const western = new Intl.NumberFormat("en-US", {
+    minimumFractionDigits: whole ? 0 : 2,
+    maximumFractionDigits: whole ? 0 : 2,
+  }).format(amount as unknown as number);
+  if (currency !== "INR") return `${currency} ${western}`;
+  const negative = western.startsWith("-");
+  const [integer = "", fraction] = (negative ? western.slice(1) : western).split(".");
+  const digits = integer.replace(/,/g, "");
+  const last = digits.slice(-3);
+  const rest = digits.slice(0, -3);
+  const pairs = rest.length === 0 ? [] : (rest.match(/(\d{1,2})(?=(\d{2})*$)/g) ?? []);
+  return `INR ${negative ? "-" : ""}${[...pairs, last].join(",")}${fraction === undefined ? "" : `.${fraction}`}`;
+}
+
+/**
+ * An ISO instant as words, WITH the zone said out loud.
  *
  * The reader's own zone would be better and this server does not know it: an
  * email has no browser to ask. So the choice is between a zone nobody chose and
  * a zone that is named, and naming it is the same rule `instant.ts` applies to
  * every date this product renders — "2 September 2026, 14:05 UTC" is
  * unambiguous everywhere, and a bare "14:05" is wrong for most of the planet.
+ *
+ * A letter that comes FROM A FIRM is written on the firm's clock (audit
+ * 2026-10-03, CA#50): an Indian firm's new colleague read "06:53 UTC" for a
+ * link that stopped at 12:23 their time. With `timeZone` the time is that
+ * zone's and the zone is named in words ("19:35 India Standard Time"); without
+ * it, or for UTC, it is UTC as before. The sign-in and reset letters belong to
+ * a global account with no one firm, and pass none.
  */
-function readableInstant(iso: string): string {
+function readableInstant(iso: string, timeZone?: string | null): string {
   const at = new Date(iso);
   if (Number.isNaN(at.getTime())) return iso;
+  if (timeZone !== undefined && timeZone !== null && timeZone !== "UTC" && timeZone !== "Etc/UTC") {
+    try {
+      const parts = new Intl.DateTimeFormat("en-GB", {
+        timeZone,
+        day: "numeric",
+        month: "long",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+        timeZoneName: "long",
+      }).formatToParts(at);
+      const read = (type: string): string => parts.find((p) => p.type === type)?.value ?? "";
+      return `${read("day")} ${read("month")} ${read("year")}, ${read("hour")}:${read("minute")} ${read("timeZoneName")}`;
+    } catch {
+      // A zone this runtime does not know: UTC, named, rather than no letter.
+    }
+  }
   const day = at.toLocaleDateString("en-GB", {
     timeZone: "UTC",
     day: "numeric",

@@ -170,6 +170,7 @@ export class FakeJobRepo implements JobRepository {
           clientPartyId: this.clientPartyIds.get(jobId) ?? null,
           periodLabel: this.rows.find((j) => j.id === jobId)?.periodLabel ?? null,
           dueOn: this.dueOns.get(jobId) ?? null,
+          filingDueOn: this.filingDueOns.get(jobId) ?? null,
           services,
         });
       }
@@ -179,6 +180,7 @@ export class FakeJobRepo implements JobRepository {
   entityPartyIds = new Map<string, string>();
   clientPartyIds = new Map<string, string>();
   dueOns = new Map<string, string>();
+  filingDueOns = new Map<string, string>();
 
   findById(tenantId: string, jobId: string): Promise<Job | null> {
     return Promise.resolve(

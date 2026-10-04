@@ -29,6 +29,7 @@ import type {
   WorkItemCheck,
   WorkItemDependency,
   WorkItemDependencyRecord,
+  WorkItemNote,
   WorkItemPriority,
   WorkItemRecord,
   WorkItemState,
@@ -36,6 +37,7 @@ import type {
 import {
   DEFAULT_WORK_ITEM_PRIORITIES,
   DEFAULT_WORK_ITEM_STATES,
+  MAX_NOTE_LENGTH,
   TAKEN_OFF_BY_HAND_NOTE,
   boardOrder,
   catchUpMove,
@@ -43,6 +45,9 @@ import {
   dueOnFrom,
   initialState,
   cancelledState,
+  completedState,
+  openChecklistLines,
+  reworkState,
   underReviewState,
   isIsoDate,
   isValidRank,
@@ -59,6 +64,7 @@ import {
   AssigneeNotStaff,
   BlockReasonRequired,
   ChecklistItemDone,
+  ChecklistOpen,
   ChecklistItemNotFound,
   ConflictingStateFlags,
   DependencyCycle,
@@ -73,11 +79,14 @@ import {
   NoDefaultPriority,
   NoInitialState,
   NoCancelledState,
+  NoteRequired,
+  NoteTooLong,
   PriorityNotFound,
   PriorityRetired,
   ReviewAlreadyDecided,
   ReviewAlreadyOpen,
   ReviewNotFound,
+  ReviewRuleNeeded,
   ReviewRejectionNeedsNote,
   ReviewSelfApproval,
   ReviewerNotEligible,
@@ -101,6 +110,7 @@ import {
 import type { CheckerCandidate, Maker, VerificationPolicy } from "../../domain/verification/model";
 import { INELIGIBILITY_MESSAGES, isEligible } from "../../domain/verification/model";
 import type {
+  LinkableFiling,
   EngagementWorkSource,
   JobStepHandover,
   LetterWorkSource,
@@ -659,14 +669,24 @@ export interface RequestReviewInput {
   /**
    * Which of the firm's published rules decides who may check this.
    *
-   * OPTIONAL, and a default was deliberately not invented. There is no template
-   * step here to name one (that is where T2.9 gets its key), and picking a rule
-   * on the firm's behalf would be this product deciding who signs off its work.
-   * Absent means maker != checker alone — exactly what T2.9 does for a step
-   * whose firm has published no rule, and strictly more than the nothing that
-   * existed before.
+   * OPTIONAL. There is no template step here to name one (that is where T2.9
+   * gets its key), so absent means THE FIRM'S OWN (audit 2026-10-03, CA#27):
+   * its one published rule, or a refusal asking which when it has several.
+   * Absent at a firm with none is maker != checker alone. It meant that at
+   * every firm until the audit, and a firm whose rule was "a Manager checks
+   * it" had its tasks checked by anybody but the maker.
    */
   readonly policyKey?: string | null | undefined;
+  /** What the maker says to the checker (0330, CA#30). Blank means none. */
+  readonly note?: string | null | undefined;
+}
+
+export interface AddNoteInput {
+  readonly tenantId: string;
+  readonly workItemId: string;
+  readonly body: string;
+  /** The session's user, always: who wrote a note is not a field anybody sets. */
+  readonly authorUserId: string;
 }
 
 export interface DecideReviewInput {
@@ -768,6 +788,8 @@ export interface WorkItemDetail {
   /** Every review it has ever had, newest first — the rejections are the
    *  point. */
   readonly reviews: readonly WorkItemCheck[];
+  /** The task's own notes, oldest first (0330, CA#30). */
+  readonly notes: readonly WorkItemNote[];
   /**
    * MAY THE CALLER DECIDE THE OPEN REVIEW — the same verdict the queue puts on
    * every one of its rows, and null when there is no open review.
@@ -837,6 +859,7 @@ export class WorkItemService {
       // needs every edge; a detail read that borrowed it grew with the firm.
       dependencies: await this.deps.items.listDependenciesFor(tenantId, workItemId),
       reviews,
+      notes: await this.deps.items.listNotes(tenantId, workItemId),
       openReviewViewer: await this.verdictOnOpenReview(tenantId, reviews, viewer ?? null),
     };
   }
@@ -1087,6 +1110,20 @@ export class WorkItemService {
     let created = 0;
     for (const w of work) {
       if (covered.has(w.engagementId)) continue;
+      // NEVER AFTER THE LAW'S DATE (audit 2026-10-03, CA#11). A month's task
+      // is due its period's end plus the service's turnaround, unless a
+      // filing the work is for falls due sooner: GST returns · Sep 2026 read
+      // 20 Oct while its GSTR-1 was due 11 Oct. Then the task carries the
+      // statute's date, and says so.
+      const turnaround = dueOnFrom(period ? period.end : w.effectiveFrom, w.slaDays);
+      const filingDue =
+        period?.start === undefined
+          ? null
+          : await this.deps.obligations.earliestFilingDue(tenantId, w.engagementId, {
+              start: period.start,
+              end: period.end,
+            });
+      const statutory = filingDue !== null && (turnaround === null || filingDue < turnaround);
       // Statutory work is what a STATUTE dates, and an engagement's SLA is the
       // firm's own promise. So a work item spawned from an engagement is NOT
       // statutory — T3.2's obligations are what set that flag, from the law.
@@ -1117,9 +1154,9 @@ export class WorkItemService {
         assignmentNote: routing.outcome.note,
         // From the END of the period for a month's task, from SIGNING for a
         // one-time one. Same field, same snapshot; the clock starts at the
-        // event that makes sense for the work.
-        dueOn: dueOnFrom(period ? period.end : w.effectiveFrom, w.slaDays),
-        isStatutoryDue: false,
+        // event that makes sense for the work. Earlier when a filing is (CA#11).
+        dueOn: statutory ? filingDue : turnaround,
+        isStatutoryDue: statutory,
         // The SLA in force AT CREATION, copied. A later catalogue revision must
         // not make finished work retroactively late — G2.3's whole argument.
         slaDaysSnapshot: w.slaDays,
@@ -1312,6 +1349,20 @@ export class WorkItemService {
    * item.
    */
   async moveToState(input: MoveStateInput, actor: Actor): Promise<WorkItem> {
+    return this.move(input, actor, null);
+  }
+
+  /**
+   * `moveToState`, with the one fact a review decision adds (CA#28): WHICH
+   * decision moved it. A person choosing Completed from the dropdown and a
+   * checker's Approve are the same write and not the same fact, the argument
+   * `byReviewRequest` already makes for the move INTO review.
+   */
+  private async move(
+    input: MoveStateInput,
+    actor: Actor,
+    byReviewDecision: "approved" | "rejected" | null,
+  ): Promise<WorkItem> {
     const item = await this.requireItem(input.tenantId, input.workItemId);
     const from = await this.requireStateRow(input.tenantId, item.stateId);
     const to = await this.requireStateRow(input.tenantId, input.stateId);
@@ -1327,6 +1378,15 @@ export class WorkItemService {
       if (blockers.length > 0) {
         throw new WorkItemBlockedByDependency(blockers.map((b) => b.title));
       }
+    }
+
+    // SAYING THE WORK IS DONE WAITS FOR THE CHECKLIST (CA#30), as a process
+    // step's Done waits for its sub-steps. Only the move INTO a successful
+    // finished state: cancelling is not saying the work was done, and a task
+    // already finished moving between two finished states says nothing new.
+    if (to.isTerminal && to.isSuccess && !(from.isTerminal && from.isSuccess)) {
+      const open = openChecklistLines(await this.deps.items.listChecklist(input.tenantId, item.id));
+      if (open.length > 0) throw new ChecklistOpen(open, "doer");
     }
 
     const now = this.deps.clock.now().toISOString();
@@ -1358,6 +1418,8 @@ export class WorkItemService {
         // cannot. Carried here so the log answers "what did we abandon" as well
         // as "what did we finish", without a verb of its own.
         isSuccess: to.isSuccess,
+        // A checker's decision moved it, not a person at the dropdown (CA#28).
+        ...(byReviewDecision === null ? {} : { byReviewDecision }),
       },
     });
 
@@ -1676,6 +1738,84 @@ export class WorkItemService {
     await this.deps.items.removeChecklistItem(tenantId, checklistItemId);
   }
 
+  // ── the filing a task files (audit 2026-10-03, CA#36) ────────────────────
+
+  /**
+   * The filing this task files, and the ones it could: the company's open
+   * filings with no task yet. The company is the task's entity, or else its
+   * client (a task raised for one company names it as the client).
+   */
+  async filingFor(
+    tenantId: string,
+    workItemId: string,
+  ): Promise<{ readonly linked: LinkableFiling | null; readonly open: readonly LinkableFiling[] }> {
+    const item = await this.requireItem(tenantId, workItemId);
+    return this.deps.filings.filingsForTask(tenantId, item.id, item.entityPartyId ?? item.clientPartyId);
+  }
+
+  /**
+   * Make this task the one that files that filing (CA#36). The task's two
+   * facts are read here: the company it is for, and whether it is DONE
+   * (terminal and a success, the flag `reconcileFiling` is told on every
+   * move), so a task already approved files the filing at once.
+   */
+  async linkFiling(
+    tenantId: string,
+    workItemId: string,
+    obligationId: string,
+    actor: Actor,
+  ): Promise<void> {
+    const item = await this.requireItem(tenantId, workItemId);
+    const state = await this.requireStateRow(tenantId, item.stateId);
+    await this.deps.filings.linkTask(
+      tenantId,
+      obligationId,
+      {
+        id: item.id,
+        entityPartyId: item.entityPartyId ?? item.clientPartyId,
+        discharged: state.isTerminal && state.isSuccess,
+      },
+      actor,
+    );
+  }
+
+  /** Take this task off the filing it files, while that is not filed. */
+  async unlinkFiling(tenantId: string, workItemId: string, actor: Actor): Promise<void> {
+    await this.requireItem(tenantId, workItemId);
+    await this.deps.filings.unlinkTask(tenantId, workItemId, actor);
+  }
+
+  // ── notes (0330, CA#30) ──────────────────────────────────────────────────
+
+  /**
+   * Write a note on a task: "challan shared with the client on WhatsApp".
+   *
+   * Append-only, and the ledger records only THAT one was written: the text
+   * is prose about a client's work that routinely names a person, and the log
+   * cannot be erased (the rule a block reason and a send-back note follow).
+   */
+  async addNote(input: AddNoteInput, actor: Actor): Promise<WorkItemNote> {
+    const body = noteText(input.body);
+    if (body === null) throw new NoteRequired();
+    await this.requireItem(input.tenantId, input.workItemId);
+    const note = await this.deps.items.addNote({
+      id: this.deps.ids.newId(),
+      tenantId: input.tenantId,
+      workItemId: input.workItemId,
+      authorUserId: input.authorUserId,
+      body,
+      createdAt: this.deps.clock.now().toISOString(),
+    });
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "work_item.note_added",
+      objectId: input.workItemId,
+      actor,
+      payload: { noteId: note.id },
+    });
+    return note;
+  }
+
   // ── dependencies ─────────────────────────────────────────────────────────
 
   /**
@@ -1783,9 +1923,30 @@ export class WorkItemService {
   async requestReview(input: RequestReviewInput, actor: Actor): Promise<WorkItemApproval> {
     const item = await this.requireItem(input.tenantId, input.workItemId);
 
+    // SENT FOR REVIEW SAYS THE WORK IS DONE, so the checklist is finished first
+    // (CA#30): the roleplay's article sent a GSTR-3B with 2 of 3 lines ticked.
+    // A process step's sub-steps hold its Done shut the same way (T6.15).
+    const open = openChecklistLines(await this.deps.items.listChecklist(input.tenantId, item.id));
+    if (open.length > 0) throw new ChecklistOpen(open, "doer");
+    const requestNote = noteText(input.note);
+
     let policyVersionId: string | null = null;
     let policyKey: string | null = null;
-    if (input.policyKey !== undefined && input.policyKey !== null && input.policyKey.length > 0) {
+    if (input.policyKey === undefined || input.policyKey === null || input.policyKey.length === 0) {
+      // NO RULE NAMED: THE FIRM'S OWN APPLIES (audit 2026-10-03, CA#27). A task
+      // has no template step to name one, and this used to open the check under
+      // maker != checker alone, so at a firm whose rule is "a Manager checks
+      // it" an Analyst approved another Analyst's GSTR-3B. One rule in force is
+      // that rule; several is the sender's pick, asked rather than guessed; none
+      // is maker != checker alone, as before (the floor, never a setting).
+      const rules = await this.deps.policies.publishedPolicies(input.tenantId);
+      if (rules.length > 1) throw new ReviewRuleNeeded(rules.map((r) => r.policy.label));
+      const only = rules[0];
+      if (only !== undefined) {
+        policyVersionId = only.versionId;
+        policyKey = only.key;
+      }
+    } else {
       const resolved = await this.deps.policies.publishedPolicy(
         input.tenantId,
         input.policyKey,
@@ -1794,9 +1955,8 @@ export class WorkItemService {
       // fall-through to "no rule": the caller asked for a particular bar, and
       // quietly opening the check without it would be this product lowering it.
       if (!resolved) throw new ReviewerNotEligible(
-        `This firm has published no verification policy called ${JSON.stringify(input.policyKey)}. ` +
-          `Publish it on the verification screen, or send the work for review with no ` +
-          `particular rule — the maker still cannot be the checker.`,
+        `Your firm has no rule in force called ${JSON.stringify(input.policyKey)}. Publish it ` +
+          `on Who checks work, or send the task without naming one and your firm's rule applies.`,
       );
       policyVersionId = resolved.versionId;
       policyKey = resolved.key;
@@ -1808,6 +1968,7 @@ export class WorkItemService {
       workItemId: item.id,
       policyVersionId,
       policyKey,
+      requestNote,
     });
     // Null means the unique partial index refused a second open check —
     // somebody clicked twice, or two people clicked together.
@@ -1856,11 +2017,16 @@ export class WorkItemService {
     item: WorkItem,
     actor: Actor,
   ): Promise<string | null> {
-    const to = underReviewState(await this.deps.vocabulary.listStates(tenantId));
-    if (!to || to.id === item.stateId) return null;
-
+    const states = await this.deps.vocabulary.listStates(tenantId);
     const from = await this.requireStateRow(tenantId, item.stateId);
     if (from.isTerminal) return null;
+    // The firm's "with a checker" state; failing that, a task still in its
+    // STARTING state goes to the working state (audit 2026-10-03, F28): the
+    // board read "In review" beside "Not Started", and sending work to be
+    // checked says it was done, so it was at least started. Both read by
+    // flags, never by a state's name.
+    const to = underReviewState(states) ?? (from.isInitial ? reworkState(states) : null);
+    if (!to || to.id === item.stateId) return null;
 
     const now = this.deps.clock.now().toISOString();
     await this.deps.items.setState(tenantId, item.id, {
@@ -1892,6 +2058,16 @@ export class WorkItemService {
       },
     });
     return to.id;
+  }
+
+  /**
+   * The rules a task can be checked under, for the screen that sends it
+   * (CA#27): the firm's published ones, by key, with their own labels. One
+   * means it is applied without asking; several means the sender picks.
+   */
+  async reviewRules(tenantId: string): Promise<readonly { key: string; label: string }[]> {
+    const rules = await this.deps.policies.publishedPolicies(tenantId);
+    return rules.map((r) => ({ key: r.key, label: r.policy.label }));
   }
 
   /**
@@ -1962,6 +2138,18 @@ export class WorkItemService {
       );
     }
 
+    // APPROVE IS HELD BY THE CHECKLIST TOO (CA#30), a wall under the one on
+    // Send for review: a line unticked after it was sent would otherwise be
+    // completed by the approval below. Send back is never held: it is how the
+    // lines get back to the person who ticks them. After eligibility, so
+    // somebody who may not check this at all is told that first.
+    if (input.decision === "approved") {
+      const open = openChecklistLines(
+        await this.deps.items.listChecklist(input.tenantId, approval.workItemId),
+      );
+      if (open.length > 0) throw new ChecklistOpen(open, "checker");
+    }
+
     const decided = await this.deps.approvals.decide(input.tenantId, input.approvalId, {
       decision: input.decision,
       notes: notes.length > 0 ? notes : null,
@@ -1986,7 +2174,48 @@ export class WorkItemService {
         hasMaker: decided.submittedBy !== null,
       },
     });
+
+    // AND THE TASK FOLLOWS THE DECISION (CA#28), after it is recorded, for
+    // `requestReview`'s reason: the decision is the act and the state is how
+    // the board renders it. A failed move leaves a decided review on a task in
+    // its old state, visible and recoverable; the reverse would show a task
+    // finished that nobody approved.
+    await this.followDecision(input.tenantId, decided, actor);
     return decided;
+  }
+
+  /**
+   * Approved: the task is DONE, so it moves to the firm's finished-and-done
+   * state (`completedState`) through the same path a hand move takes, which
+   * stamps `completedAt`, writes `work_item.completed` and tells the compliance
+   * calendar. Sent back: if it is sitting in the firm's "with a checker" state
+   * it goes back to the firm's working state (`reworkState`), because the work
+   * is the maker's again. Anything else is left where it is: a task already
+   * finished or cancelled is not reopened by a decision, and a firm with no
+   * such state keeps exactly the old behaviour.
+   */
+  private async followDecision(
+    tenantId: string,
+    decided: WorkItemApproval,
+    actor: Actor,
+  ): Promise<void> {
+    const item = await this.requireItem(tenantId, decided.workItemId);
+    const states = await this.deps.vocabulary.listStates(tenantId);
+    const current = states.find((s) => s.id === item.stateId);
+    if (current === undefined || current.isTerminal) return;
+
+    const target =
+      decided.decision === "approved"
+        ? completedState(states)
+        : current.isUnderReview
+          ? reworkState(states)
+          : null;
+    if (target === null || target.id === current.id) return;
+    await this.move(
+      { tenantId, workItemId: item.id, stateId: target.id },
+      actor,
+      decided.decision === "approved" ? "approved" : "rejected",
+    );
   }
 
   // ── internals ────────────────────────────────────────────────────────────
@@ -2250,4 +2479,16 @@ export class WorkItemService {
       },
     });
   }
+}
+
+/**
+ * A note as stored (0330): trimmed, null when nothing is left, and refused past
+ * the bound the database also holds. One definition for a task note and the
+ * maker's note on a review, so the two cannot disagree about "blank".
+ */
+function noteText(raw: string | null | undefined): string | null {
+  const body = (raw ?? "").trim();
+  if (body.length === 0) return null;
+  if (body.length > MAX_NOTE_LENGTH) throw new NoteTooLong(MAX_NOTE_LENGTH);
+  return body;
 }

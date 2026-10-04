@@ -8,13 +8,16 @@
 //     UNFINISHED tasks;
 //   - the task check queue (`work_item_approval`): the task's client and due day;
 //   - the escalation queue: the task's client by id (a filing has none).
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import postgres from "postgres";
 import { load } from "../../src/config/config";
 import { PostgresJobRepository } from "../../src/infrastructure/postgres/job-repository";
 import { PostgresWorkItemApprovalRepository } from "../../src/infrastructure/postgres/work-item-approval-repository";
 import { PostgresEscalationNoticeRepository } from "../../src/infrastructure/postgres/escalation-repository";
+import { PostgresObligationCoverage } from "../../src/infrastructure/postgres/obligation-coverage";
+import { PostgresWorkItemRepository } from "../../src/infrastructure/postgres/work-item-repository";
+import { PostgresStepApprovalRepository } from "../../src/infrastructure/postgres/step-approval-repository";
 
 const cfg = load();
 const owner = postgres(cfg.db.ownerUrl, { max: 1 });
@@ -22,6 +25,9 @@ const app = postgres(cfg.db.appUrl, { max: 2 });
 const jobs = new PostgresJobRepository(app);
 const approvals = new PostgresWorkItemApprovalRepository(app);
 const notices = new PostgresEscalationNoticeRepository(app);
+const coverage = new PostgresObligationCoverage(app);
+const items = new PostgresWorkItemRepository(app);
+const stepChecks = new PostgresStepApprovalRepository(app);
 
 const stamp = Date.now().toString(36);
 const ref = (): string => randomUUID();
@@ -35,6 +41,9 @@ let notStarted: string;
 let completed: string;
 let medium: string;
 let serviceV1: string;
+let serviceEntry: string;
+let pending: string;
+let filed: string;
 
 async function party(name: string): Promise<string> {
   const id = ref();
@@ -143,20 +152,24 @@ beforeAll(async () => {
     INSERT INTO delivery.work_item_priority (tenant_id, code, name, rank, is_default, is_statutory_default)
     VALUES (${tenant}, 'medium', 'Medium', 2, true, true) RETURNING id
   `;
-  await owner`
+  const [pend] = await owner<{ id: string }[]>`
     INSERT INTO delivery.obligation_state (tenant_id, code, name, is_initial, sort_order)
-    VALUES (${tenant}, 'pending', 'Pending', true, 10)
+    VALUES (${tenant}, 'pending', 'Pending', true, 10) RETURNING id
   `;
-  await owner`
+  const [fil] = await owner<{ id: string }[]>`
     INSERT INTO delivery.obligation_state (tenant_id, code, name, is_terminal, is_filed, sort_order)
-    VALUES (${tenant}, 'filed', 'Filed', true, true, 90)
+    VALUES (${tenant}, 'filed', 'Filed', true, true, 90) RETURNING id
   `;
+  if (!pend || !fil) throw new Error("no filing states");
+  pending = pend.id;
+  filed = fil.id;
   if (!ns || !done || !p) throw new Error("no vocabulary");
   notStarted = ns.id;
   completed = done.id;
   medium = p.id;
 
   const entryId = ref();
+  serviceEntry = entryId;
   await owner`INSERT INTO config.entry (id, tenant_id, kind, key) VALUES (${entryId}, ${tenant}, 'service', ${`books-${stamp}`})`;
   serviceV1 = ref();
   await owner`
@@ -202,6 +215,96 @@ describe("describeJobs names the client by id, the period and the job's due day 
   });
 });
 
+describe("a job is never due after the law's date for its filings (audit 2026-10-03, CA#11)", () => {
+  // Kulkarni's "GST returns · Sep 2026" job read due 20 Oct (period end + the
+  // service's 20-day turnaround) while its GSTR-1 was legally due 11 Oct, and
+  // TDS/ITR jobs read "No due date" though their filings had dates. A job's
+  // due day now also counts the earliest UNFILED filing its work is for: same
+  // company, a rule on the job's service, a period inside the job's.
+
+  /** A GSTR-1-like rule on the job's service, and its filing for `period`. */
+  async function filing(over: {
+    engagementId: string | null;
+    statutoryDueOn: string;
+    periodStart?: string;
+    periodEnd?: string;
+    state?: string;
+    withdrawn?: boolean;
+  }): Promise<string> {
+    const [rule] = await owner<{ id: string; lineage_id: string }[]>`
+      INSERT INTO delivery.obligation_template
+        (tenant_id, jurisdiction, name, recurrence, fiscal_year_start_month,
+         due_rule, due_month_offset, due_day_of_month, rule_pack, status)
+      VALUES (${tenant}, 'IN', ${`GSTR-1 ${ref()}`}, 'monthly', 4, 'day_of_month', 1, 11, ${`ca11-${stamp}`}, 'confirmed')
+      RETURNING id, lineage_id
+    `;
+    if (!rule) throw new Error("no rule");
+    await owner`
+      INSERT INTO delivery.obligation_rule_service (tenant_id, lineage_id, service_entry_id)
+      VALUES (${tenant}, ${rule.lineage_id}, ${serviceEntry})
+    `;
+    const [row] = await owner<{ id: string }[]>`
+      INSERT INTO delivery.obligation_instance
+        (tenant_id, template_id, lineage_id, entity_party_id, engagement_id, period_start, period_end,
+         period_label, statutory_due_on, internal_target_on, state_id, withdrawn_at, withdrawn_reason)
+      VALUES (${tenant}, ${rule.id}, ${rule.lineage_id}, ${entity}, ${over.engagementId},
+              ${over.periodStart ?? "2026-09-01"}, ${over.periodEnd ?? "2026-09-30"}, 'Sep 2026',
+              ${over.statutoryDueOn}, ${over.statutoryDueOn}, ${over.state ?? pending},
+              ${over.withdrawn === true ? new Date().toISOString() : null},
+              ${over.withdrawn === true ? "service_unlinked" : null})
+      RETURNING id
+    `;
+    if (!row) throw new Error("no filing");
+    return row.id;
+  }
+
+  // One company and one service across these tests, so each test's open
+  // filings would reach the next test's job through the service link, which
+  // is the rule working. Closed after each, so every test starts clean.
+  afterEach(async () => {
+    await owner`
+      UPDATE delivery.obligation_instance SET state_id = ${filed}
+       WHERE tenant_id = ${tenant} AND withdrawn_at IS NULL
+    `;
+  });
+
+  it("is due on the GSTR-1's legal date, not the turnaround after the month", async () => {
+    const { jobId, engagementId } = await septemberJob();
+    await task({ jobId, engagementId, dueOn: "2026-10-20" });
+    await filing({ engagementId, statutoryDueOn: "2026-10-11" });
+    const detail = (await jobs.describeJobs(tenant, [jobId])).get(jobId);
+    expect(detail).toMatchObject({ dueOn: "2026-10-11", filingDueOn: "2026-10-11" });
+  });
+
+  it("has a due day when only its filings carry one (TDS, ITR)", async () => {
+    const { jobId, engagementId } = await septemberJob();
+    await task({ jobId, engagementId, dueOn: null });
+    // Attached to no engagement: the generator gives a period's row to ONE
+    // engagement of the company, and this job's work is for it all the same.
+    await filing({ engagementId: null, statutoryDueOn: "2026-10-07" });
+    expect((await jobs.describeJobs(tenant, [jobId])).get(jobId)?.dueOn).toBe("2026-10-07");
+  });
+
+  it("dates a month's task by the same rule when it is created", async () => {
+    const { engagementId } = await septemberJob();
+    await filing({ engagementId: null, statutoryDueOn: "2026-10-11" });
+    await filing({ engagementId, statutoryDueOn: "2026-10-20" });
+    const sep = { start: "2026-09-01", end: "2026-09-30" };
+    expect(await coverage.earliestFilingDue(tenant, engagementId, sep)).toBe("2026-10-11");
+    expect(await coverage.earliestFilingDue(tenant, engagementId, { start: "2026-11-01", end: "2026-11-30" })).toBeNull();
+  });
+
+  it("ignores a filing already filed, withdrawn, or for another period", async () => {
+    const { jobId, engagementId } = await septemberJob();
+    await task({ jobId, engagementId, dueOn: "2026-10-20" });
+    await filing({ engagementId, statutoryDueOn: "2026-10-11", state: filed });
+    await filing({ engagementId, statutoryDueOn: "2026-10-09", withdrawn: true });
+    await filing({ engagementId, statutoryDueOn: "2026-09-11", periodStart: "2026-08-01", periodEnd: "2026-08-31" });
+    const detail = (await jobs.describeJobs(tenant, [jobId])).get(jobId);
+    expect(detail).toMatchObject({ dueOn: "2026-10-20", filingDueOn: null });
+  });
+});
+
 describe("the task check queue carries the task's client by id and its due day (V2.1)", () => {
   it("reads both off the task", async () => {
     const item = await task({ dueOn: "2026-10-12" });
@@ -211,6 +314,8 @@ describe("the task check queue carries the task's client by id and its due day (
     `;
     const row = (await approvals.listPending(tenant)).find((c) => c.workItemId === item);
     expect(row).toMatchObject({ clientName: "Kaveri Foods", clientPartyId: client, dueOn: "2026-10-12" });
+    // And the company the work is for (audit 2026-10-03, F32).
+    expect(row).toMatchObject({ entityPartyId: entity, entityName: "Kaveri Foods Private Limited" });
   });
 });
 
@@ -225,5 +330,83 @@ describe("the escalation queue carries the task's client by id (V2.1)", () => {
     `;
     const row = (await notices.listFor(tenant, null)).find((r) => r.workItemId === item);
     expect(row).toMatchObject({ clientName: "Kaveri Foods", clientPartyId: client, dueOn: "2026-09-20" });
+  });
+});
+
+describe("sent back shows on the maker's desk (audit 2026-10-03, CA#29)", () => {
+  let ravi: string;
+
+  beforeAll(async () => {
+    const [u] = await owner<{ id: string }[]>`
+      INSERT INTO tenancy.user_account (email, display_name)
+      VALUES (${`ravi-${stamp}@myday.test`}, 'Ravi Kumar') RETURNING id
+    `;
+    if (!u) throw new Error("no checker");
+    ravi = u.id;
+  });
+
+  it("carries the latest send-back's note on the task until it is sent again", async () => {
+    const item = await task({ dueOn: "2026-10-20" });
+    await owner`
+      INSERT INTO delivery.work_item_approval (tenant_id, work_item_id, decision, notes, decided_by, decided_at)
+      VALUES (${tenant}, ${item}, 'approved', NULL, ${ravi}, '2026-10-01T04:00:00Z'),
+             (${tenant}, ${item}, 'rejected', 'Two bills missing from the ITC working', ${ravi}, '2026-10-02T05:30:00Z')
+    `;
+    expect((await items.findRecord(tenant, item))?.sentBack).toEqual({
+      notes: "Two bills missing from the ITC working",
+      decidedAt: "2026-10-02T05:30:00.000Z",
+      decidedByName: "Ravi Kumar",
+    });
+
+    await owner`INSERT INTO delivery.work_item_approval (tenant_id, work_item_id) VALUES (${tenant}, ${item})`;
+    expect((await items.findRecord(tenant, item))?.sentBack).toBeNull();
+  });
+
+  it("is not said of a finished task, or of one whose latest decision was an approval", async () => {
+    const done = await task({ state: completed });
+    await owner`
+      INSERT INTO delivery.work_item_approval (tenant_id, work_item_id, decision, notes, decided_by, decided_at)
+      VALUES (${tenant}, ${done}, 'rejected', 'redo', ${ravi}, '2026-10-02T05:30:00Z')
+    `;
+    expect((await items.findRecord(tenant, done))?.sentBack).toBeNull();
+
+    const approved = await task({});
+    await owner`
+      INSERT INTO delivery.work_item_approval (tenant_id, work_item_id, decision, notes, decided_by, decided_at)
+      VALUES (${tenant}, ${approved}, 'rejected', 'redo', ${ravi}, '2026-10-01T05:30:00Z'),
+             (${tenant}, ${approved}, 'approved', NULL, ${ravi}, '2026-10-02T05:30:00Z')
+    `;
+    expect((await items.findRecord(tenant, approved))?.sentBack).toBeNull();
+  });
+
+  it("names the steps whose latest check sent them back, and none with a check open", async () => {
+    const { jobId } = await septemberJob();
+    const step = async (key: string): Promise<string> => {
+      const id = ref();
+      await owner`
+        INSERT INTO delivery.job_step
+          (id, tenant_id, job_id, step_key, label, executor, status, started_at, performed_by)
+        VALUES (${id}, ${tenant}, ${jobId}, ${key}, 'Reconcile the bank', 'human', 'blocked', now(), ${asha})
+      `;
+      return id;
+    };
+    const back = await step("reconcile");
+    const again = await step("collect");
+    const neverChecked = await step("file");
+    await owner`
+      INSERT INTO delivery.step_approval (tenant_id, job_id, job_step_id, decision, notes, decided_by, decided_at)
+      VALUES (${tenant}, ${jobId}, ${back}, 'rejected', 'Bank charges not booked', ${ravi}, '2026-10-02T05:30:00Z'),
+             (${tenant}, ${jobId}, ${again}, 'rejected', 'redo', ${ravi}, '2026-10-02T05:30:00Z')
+    `;
+    await owner`INSERT INTO delivery.step_approval (tenant_id, job_id, job_step_id) VALUES (${tenant}, ${jobId}, ${again})`;
+
+    expect(await stepChecks.sentBackFor(tenant, [back, again, neverChecked])).toEqual([
+      {
+        jobStepId: back,
+        notes: "Bank charges not booked",
+        decidedAt: "2026-10-02T05:30:00.000Z",
+        decidedByName: "Ravi Kumar",
+      },
+    ]);
   });
 });

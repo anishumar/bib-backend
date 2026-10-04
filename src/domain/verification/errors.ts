@@ -56,7 +56,7 @@ export class ApprovalAlreadyDecided extends VerificationError {
     super(
       "APPROVAL_ALREADY_DECIDED",
       `Check ${JSON.stringify(ref)} was already ${decision} by somebody else. Their decision ` +
-        `stands — reload the queue to see it.`,
+        `stands: reload the queue to see it.`,
     );
   }
 }
@@ -86,7 +86,7 @@ export class RejectionNeedsAReason extends VerificationError {
     super(
       "REJECTION_NEEDS_A_REASON",
       `Sending work back needs a note saying what is wrong with it. That note is the only ` +
-        `thing that ever explains why rework happened — approving needs none, this does.`,
+        `thing that ever explains why rework happened: approving needs none, this does.`,
     );
   }
 }
@@ -95,7 +95,7 @@ export class ReportsToCycle extends VerificationError {
   constructor(names: readonly string[]) {
     super(
       "REPORTS_TO_CYCLE",
-      `This would make the reporting line a loop — ${names.join(" reports to ")} — and then ` +
+      `This would make the reporting line a loop: ${names.join(" reports to ")}, and then ` +
         `nobody in it has a manager who could check their work.`,
     );
   }

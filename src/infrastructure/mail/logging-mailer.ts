@@ -14,8 +14,9 @@ import type {
   ProposalLetter,
   ProposalMailer,
 } from "../../usecase/proposal/ports";
+import type { AdvanceDigestLetter, BillingMailer } from "../../usecase/billing/ports";
 
-export class LoggingMailer implements Mailer, ProposalMailer {
+export class LoggingMailer implements Mailer, ProposalMailer, BillingMailer {
   constructor(private readonly log: Logger) {}
 
   sendMagicLink(to: string, url: string, expiresAt: string): Promise<void> {
@@ -109,6 +110,15 @@ export class LoggingMailer implements Mailer, ProposalMailer {
       { to: notice.to, ref: notice.ref, decision: notice.decision, proposalUrl: notice.proposalUrl },
       "proposal answer notice NOT emailed — the logging mailer is registered. The colleague " +
         "who prepared it will see the answer on the proposal's page, and nowhere else.",
+    );
+    return Promise.resolve();
+  }
+
+  sendAdvanceDigest(letter: AdvanceDigestLetter): Promise<void> {
+    this.log.warn(
+      { to: letter.to, weekOf: letter.weekOf, advances: letter.rows.length, advancesUrl: letter.advancesUrl },
+      "weekly advance summary NOT emailed — the logging mailer is registered. The administrator " +
+        "still sees each advance as escalated on My day.",
     );
     return Promise.resolve();
   }

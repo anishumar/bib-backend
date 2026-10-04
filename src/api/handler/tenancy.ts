@@ -9,6 +9,8 @@ import type { OpenAPIHono } from "@hono/zod-openapi";
 import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
 import type { TenancyService } from "../../usecase/tenancy/service";
+import type { Membership, UserAccount } from "../../domain/tenancy/model";
+import type { MemberRecord } from "../../usecase/tenancy/ports";
 import type { StaffInviteService } from "../../usecase/staffinvite/service";
 import { toEnvelope } from "../httpresp";
 import { scopeOf } from "../scope";
@@ -35,6 +37,20 @@ const TenantSchema = z
     reportingCurrency: z.string().length(3),
   })
   .openapi("Tenant");
+
+/** A firm as created: with the calendar it started on (audit 2026-10-03). */
+const CreatedTenantSchema = z
+  .object({
+    id: z.string().uuid(),
+    slug: z.string(),
+    name: z.string(),
+    status: z.enum(["active", "suspended"]),
+    reportingCurrency: z.string().length(3),
+    timeZone: z.string().openapi({
+      description: "The zone the firm starts on. UTC when nothing settled it; Setup then asks the firm.",
+    }),
+  })
+  .openapi("CreatedTenant");
 
 /** Who binds the firm — the "Yours sincerely, …, Director" block on every
  *  letter it sends. Null when the firm has not named anybody. */
@@ -209,6 +225,14 @@ const CreateTenantRequest = z
     name: z.string().min(1),
     slug: z.string().min(1),
     reportingCurrency: z.string().min(1),
+    country: z.string().optional().openapi({
+      description:
+        "Where the firm is, ISO 3166-1 alpha-2 (IN, AE). When the country keeps one time zone the " +
+        "firm starts on it (IN: Asia/Kolkata); otherwise it starts on UTC and Setup asks it to choose.",
+    }),
+    timeZone: z.string().optional().openapi({
+      description: "An IANA zone (Asia/Kolkata), over the country's. Never an offset.",
+    }),
   })
   .openapi("CreateTenantRequest");
 
@@ -320,7 +344,7 @@ const createTenantRoute = createRoute({
     body: { content: { "application/json": { schema: CreateTenantRequest } }, required: true },
   },
   responses: {
-    201: { description: "Tenant created", content: { "application/json": { schema: TenantSchema } } },
+    201: { description: "Tenant created", content: { "application/json": { schema: CreatedTenantSchema } } },
     400: errorResponse("Request failed validation"),
     401: errorResponse("Missing or wrong platform key"),
     409: errorResponse("Slug already taken"),
@@ -697,6 +721,42 @@ const myMembershipsRoute = createRoute({
   },
 });
 
+// ── Mapping ─────────────────────────────────────────────────────────────────
+//
+// FIELD BY FIELD (B48, audit 2026-10-03), as createTenant below already was
+// and for its reason: a forwarded membership or account ships whatever the
+// aggregate holds, undocumented, and the generated client never sees it.
+
+function membershipWire(m: Membership): z.infer<typeof MembershipSchema> {
+  return {
+    id: m.id,
+    tenantId: m.tenantId,
+    userId: m.userId,
+    audience: m.audience,
+    role: m.role,
+    commercialVisibility: m.commercialVisibility,
+    gradeId: m.gradeId,
+    reportsToUserId: m.reportsToUserId,
+    isActive: m.isActive,
+  };
+}
+
+function userWire(u: UserAccount): z.infer<typeof UserAccountSchema> {
+  return { id: u.id, email: u.email, displayName: u.displayName, status: u.status };
+}
+
+function memberWire(m: MemberRecord): z.infer<typeof MemberSchema> {
+  return {
+    membership: membershipWire(m.membership),
+    email: m.email,
+    displayName: m.displayName,
+    grade:
+      m.grade === null
+        ? null
+        : { id: m.grade.id, code: m.grade.code, name: m.grade.name, rank: m.grade.rank, isActive: m.grade.isActive },
+  };
+}
+
 // ── Registration ──────────────────────────────────────────────────────────
 
 /** Mount every tenancy route on the app. Inline handlers give the framework
@@ -720,6 +780,7 @@ export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDep
         name: tenant.name,
         status: tenant.status,
         reportingCurrency: tenant.reportingCurrency,
+        timeZone: tenant.timeZone,
       },
       201,
     );
@@ -728,7 +789,7 @@ export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDep
   app.openapi(registerUserRoute, async (c) => {
     const input = c.req.valid("json");
     const user = await deps.service.ensureUser(input.email, input.displayName);
-    return c.json(user, 201);
+    return c.json(userWire(user), 201);
   });
 
   app.openapi(setTenantStatusRoute, async (c) => {
@@ -769,7 +830,7 @@ export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDep
       ...input,
       provisionedBy: c.get("internalClient")?.name,
     });
-    return c.json(membership, 201);
+    return c.json(membershipWire(membership), 201);
   });
 
   // ── Firm administration. The tenant comes from the SESSION, so an admin can
@@ -778,7 +839,7 @@ export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDep
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const members = await deps.service.listMembers(s.tenantId);
-    return c.json({ members: [...members] }, 200);
+    return c.json({ members: members.map(memberWire) }, 200);
   });
 
   app.openapi(listColleaguesRoute, async (c) => {
@@ -809,7 +870,7 @@ export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDep
     const added = await deps.staffInvite.add({ tenantId: s.tenantId, ...body }, s.actor);
     return c.json(
       {
-        ...added.membership,
+        ...membershipWire(added.membership),
         invitationSent: added.invitationSent,
         invitationExpiresAt: added.invitationExpiresAt,
       },
@@ -826,7 +887,7 @@ export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDep
       { tenantId: s.tenantId, membershipId, role },
       s.actor,
     );
-    return c.json(membership, 200);
+    return c.json(membershipWire(membership), 200);
   });
 
   app.openapi(setMemberActiveRoute, async (c) => {
@@ -838,7 +899,7 @@ export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDep
       { tenantId: s.tenantId, membershipId, isActive },
       s.actor,
     );
-    return c.json(membership, 200);
+    return c.json(membershipWire(membership), 200);
   });
 
   app.openapi(changeMemberGradeRoute, async (c) => {
@@ -850,7 +911,7 @@ export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDep
       { tenantId: s.tenantId, membershipId, gradeId },
       s.actor,
     );
-    return c.json(membership, 200);
+    return c.json(membershipWire(membership), 200);
   });
 
   app.openapi(setReportsToRoute, async (c) => {
@@ -862,14 +923,22 @@ export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDep
       { tenantId: s.tenantId, membershipId, reportsToUserId },
       s.actor,
     );
-    return c.json(membership, 200);
+    return c.json(membershipWire(membership), 200);
   });
 
   app.openapi(firmSignatoryRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const signatory = await deps.service.firmSignatory(s.tenantId);
-    return c.json({ signatory: signatory === null ? null : { ...signatory } }, 200);
+    return c.json(
+      {
+        signatory:
+          signatory === null
+            ? null
+            : { userId: signatory.userId, displayName: signatory.displayName, title: signatory.title },
+      },
+      200,
+    );
   });
 
   app.openapi(setFirmSignatoryRoute, async (c) => {
@@ -908,7 +977,7 @@ export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDep
     return c.json(
       {
         memberships: memberships.map((m) => ({
-          ...m,
+          ...membershipWire(m),
           tenantName: names.get(m.tenantId) ?? null,
         })),
       },

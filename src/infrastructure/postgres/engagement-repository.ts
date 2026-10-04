@@ -28,7 +28,7 @@ import type {
   LetterLine,
   LetterStatus,
 } from "../../domain/engagement/model";
-import { sectionCode } from "../../domain/engagement/model";
+import { isLetterBillingTiming, sectionCode, type LetterBillingTiming } from "../../domain/engagement/model";
 import { readClauseBody, readServiceBody } from "../../domain/config/model";
 import { resolveTerms } from "../../domain/document/model";
 import type { BillingFrequency, OutOfPocketEstimate } from "../../domain/document/model";
@@ -114,6 +114,9 @@ interface LineRow {
   effective_from: Date | null;
   jurisdiction: string | null;
   billing_frequency: BillingFrequency | null;
+  billing_timing: string | null;
+  billing_on: Date | null;
+  advance_amount: string | null;
   scope_override: string | null;
   client_obligations_override: string | null;
   volume_limits_override: string | null;
@@ -132,7 +135,7 @@ const LINE_COLUMNS = `id, tenant_id, engagement_letter_id, entity_party_id, serv
                       effective_from, jurisdiction, billing_frequency, scope_override,
                       client_obligations_override, volume_limits_override, exclusions_override,
                       oop_estimate_min, oop_estimate_max, oop_currency, pricing_note,
-                      fee_group_id`;
+                      fee_group_id, billing_timing, billing_on, advance_amount`;
 
 /** Every column of a letter, for the same reason — it appeared SEVEN times,
  *  written out, until 0083 added `layout` and the choice was seven edits or
@@ -154,6 +157,8 @@ interface FeeGroupRow {
   position: number;
   title: string;
   billing_frequency: BillingFrequency;
+  billing_timing: string | null;
+  billing_on: Date | null;
   amount: string;
   currency: string;
   payment_terms: string | null;
@@ -165,7 +170,13 @@ interface FeeGroupRow {
 
 const FEE_GROUP_COLUMNS = `id, tenant_id, engagement_letter_id, position, title,
                            billing_frequency, amount, currency, payment_terms,
-                           fee_description, intro, deliverables, client_obligations`;
+                           fee_description, intro, deliverables, client_obligations,
+                           billing_timing, billing_on`;
+
+/** The column's word, narrowed: the CHECK (0319) admits only these. */
+function timingOf(value: string | null): LetterBillingTiming | null {
+  return isLetterBillingTiming(value) ? value : null;
+}
 
 function toFeeGroup(r: FeeGroupRow): FeeGroup {
   return {
@@ -175,6 +186,8 @@ function toFeeGroup(r: FeeGroupRow): FeeGroup {
     position: r.position,
     title: r.title,
     billingFrequency: r.billing_frequency,
+    billingTiming: timingOf(r.billing_timing),
+    billingOn: r.billing_on === null ? null : toDay(r.billing_on),
     amount: r.amount,
     currency: r.currency,
     paymentTerms: r.payment_terms,
@@ -217,12 +230,16 @@ export interface EngagementRow {
   ended_at: Date | null;
   paused_at: Date | null;
   resumed_on: Date | null;
+  paused_on: Date | null;
+  billing_from: Date | null;
+  first_invoice_on: Date | null;
 }
 
 /** Every column `toEngagement` reads, for a SELECT or a RETURNING (0314). */
 export const ENGAGEMENT_COLUMNS =
   "id, tenant_id, engagement_letter_id, engagement_letter_line_id, party_id, entity_party_id, " +
-  "status, activated_at, effective_from, ends_on, end_reason, ended_at, paused_at, resumed_on";
+  "status, activated_at, effective_from, ends_on, end_reason, ended_at, paused_at, resumed_on, " +
+  "paused_on, billing_from, first_invoice_on";
 
 
 
@@ -284,6 +301,9 @@ function toLine(r: LineRow): LetterLine {
     effectiveFrom: r.effective_from === null ? null : toDay(r.effective_from),
     jurisdiction: r.jurisdiction,
     billingFrequency: r.billing_frequency,
+    billingTiming: timingOf(r.billing_timing),
+    billingOn: r.billing_on === null ? null : toDay(r.billing_on),
+    advanceAmount: r.advance_amount,
     scopeOverride: r.scope_override,
     clientObligationsOverride: r.client_obligations_override,
     volumeLimitsOverride: r.volume_limits_override,
@@ -358,6 +378,9 @@ export function toEngagement(r: EngagementRow): Engagement {
     endedAt: r.ended_at?.toISOString() ?? null,
     pausedAt: r.paused_at?.toISOString() ?? null,
     resumedOn: r.resumed_on === null ? null : toDay(r.resumed_on),
+    pausedOn: r.paused_on === null ? null : toDay(r.paused_on),
+    billingFrom: r.billing_from === null ? null : toDay(r.billing_from),
+    firstInvoiceOn: r.first_invoice_on === null ? null : toDay(r.first_invoice_on),
   };
 }
 
@@ -498,7 +521,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
                l.effective_from, l.jurisdiction, l.billing_frequency, l.scope_override,
                l.client_obligations_override, l.volume_limits_override, l.exclusions_override,
                l.oop_estimate_min, l.oop_estimate_max, l.oop_currency, l.pricing_note,
-               l.fee_group_id,
+               l.fee_group_id, l.billing_timing, l.billing_on, l.advance_amount,
                -- NULL for an unpriced line, and deliberately not coalesced:
                -- there is no net of an amount that does not exist, and a zero
                -- here would be a line the client gets free.
@@ -820,9 +843,11 @@ export class PostgresEngagementRepository implements EngagementRepository {
            description, position, quantity, unit_amount, currency, discount_percent,
            effective_from, jurisdiction, billing_frequency, scope_override,
            client_obligations_override, volume_limits_override, exclusions_override,
-           oop_estimate_min, oop_estimate_max, oop_currency, pricing_note, fee_group_id)
+           oop_estimate_min, oop_estimate_max, oop_currency, pricing_note, fee_group_id,
+           billing_timing, billing_on, advance_amount)
         SELECT $1, $2, $3, $4, $5, $6, coalesce(max(position), 0) + 1,
-               $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
+               $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
+               $23, $24::date, $25::numeric
         FROM crm.engagement_letter_line
         WHERE engagement_letter_id = $3 AND removed_at IS NULL
         RETURNING ${LINE_COLUMNS}
@@ -850,6 +875,9 @@ export class PostgresEngagementRepository implements EngagementRepository {
           l.oopEstimate?.currency ?? null,
           l.pricingNote,
           l.feeGroupId,
+          l.billingTiming,
+          l.billingOn,
+          l.advanceAmount ?? null,
         ],
       );
       if (!row) throw new Error("engagement letter line insert returned no row");
@@ -898,6 +926,9 @@ export class PostgresEngagementRepository implements EngagementRepository {
                effective_from = ${edit.effectiveFrom}::date,
                jurisdiction = ${edit.jurisdiction},
                billing_frequency = ${edit.billingFrequency},
+               billing_timing = ${edit.billingTiming},
+               billing_on = ${edit.billingOn}::date,
+               advance_amount = ${edit.advanceAmount}::numeric,
                scope_override = ${edit.scopeOverride},
                client_obligations_override = ${edit.clientObligationsOverride},
                volume_limits_override = ${edit.volumeLimitsOverride},
@@ -1016,7 +1047,10 @@ export class PostgresEngagementRepository implements EngagementRepository {
       const [row] = await db.unsafe<LineRow[]>(
         `
         UPDATE crm.engagement_letter_line
-           SET fee_group_id = $4, unit_amount = $5, discount_percent = $6, pricing_note = $7
+           SET fee_group_id = $4, unit_amount = $5, discount_percent = $6, pricing_note = $7,
+               -- A line moved into a group gives up its own advance with its
+               -- price (0320): the group's advance is the letter's.
+               advance_amount = CASE WHEN $4::uuid IS NULL THEN advance_amount END
          WHERE id = $1 AND engagement_letter_id = $2 AND tenant_id = $3 AND removed_at IS NULL
         RETURNING ${LINE_COLUMNS}
       `,
@@ -1043,11 +1077,12 @@ export class PostgresEngagementRepository implements EngagementRepository {
       const [row] = await db<FeeGroupRow[]>`
         INSERT INTO crm.engagement_letter_fee_group
           (id, tenant_id, engagement_letter_id, currency, position, title, billing_frequency,
-           amount, payment_terms, fee_description, intro, deliverables, client_obligations)
+           amount, payment_terms, fee_description, intro, deliverables, client_obligations,
+           billing_timing, billing_on)
         SELECT ${g.id}, ${g.tenantId}, ${g.engagementLetterId}, ${g.currency},
                coalesce(max(position), 0) + 1, ${g.title}, ${g.billingFrequency}, ${g.amount},
                ${g.paymentTerms}, ${g.feeDescription}, ${g.intro}, ${g.deliverables},
-               ${g.clientObligations}
+               ${g.clientObligations}, ${g.billingTiming}, ${g.billingOn}::date
         FROM crm.engagement_letter_fee_group
         WHERE engagement_letter_id = ${g.engagementLetterId} AND removed_at IS NULL
         RETURNING ${db.unsafe(FEE_GROUP_COLUMNS)}
@@ -1073,6 +1108,10 @@ export class PostgresEngagementRepository implements EngagementRepository {
            SET title = CASE WHEN ${keep(edit.title)} THEN title ELSE ${edit.title ?? null} END,
                billing_frequency = CASE WHEN ${keep(edit.billingFrequency)} THEN billing_frequency
                                         ELSE ${edit.billingFrequency ?? null} END,
+               billing_timing = CASE WHEN ${keep(edit.billingTiming)} THEN billing_timing
+                                     ELSE ${edit.billingTiming ?? null} END,
+               billing_on = CASE WHEN ${keep(edit.billingTiming)} THEN billing_on
+                                 ELSE ${edit.billingOn ?? null}::date END,
                amount = CASE WHEN ${keep(edit.amount)} THEN amount
                              ELSE ${edit.amount ?? null}::numeric END,
                payment_terms = CASE WHEN ${keep(edit.paymentTerms)} THEN payment_terms
@@ -1199,7 +1238,15 @@ export class PostgresEngagementRepository implements EngagementRepository {
                -- three columns above so a letter can never go out with a
                -- signatory recorded and the image resolved a moment later from
                -- a brand asset somebody replaced in between.
-               firm_signature_version_id = ${firm?.signatureVersionId ?? null}
+               firm_signature_version_id = ${firm?.signatureVersionId ?? null},
+               -- WHO IT IS FROM AND TO, FROZEN (0334): the firm's company and
+               -- the client as they stand today on the firm's calendar, in the
+               -- write that sends it (the only one the trigger lets set it).
+               printed_parties = (
+                 SELECT jsonb_build_object(
+                          'issuer', crm.print_identity(crm.engagement_letter.issuing_entity_party_id, (now() AT TIME ZONE t.time_zone)::date),
+                          'recipient', crm.print_identity(crm.engagement_letter.party_id, (now() AT TIME ZONE t.time_zone)::date))
+                   FROM tenancy.tenant t WHERE t.id = crm.engagement_letter.tenant_id)
          WHERE id = ${letterId} AND status = 'draft'
         RETURNING ${db.unsafe(LETTER_COLUMNS)}
       `;
@@ -1333,32 +1380,20 @@ export class PostgresEngagementRepository implements EngagementRepository {
     );
   }
 
-  async recordAdvance(
+  async releaseEngagements(
     tenantId: string,
-    letterId: string,
-    recordedByUserId: string,
+    engagementIds: readonly string[],
     at: string,
-  ): Promise<{ letter: EngagementLetter; released: readonly Engagement[] }> {
+  ): Promise<readonly Engagement[]> {
+    if (engagementIds.length === 0) return [];
     return withTenant(this.app, tenantId, async (db) => {
-      const [letter] = await db<LetterRow[]>`
-        UPDATE crm.engagement_letter
-           SET advance_recorded_at = ${at}::timestamptz, advance_recorded_by = ${recordedByUserId}
-         WHERE id = ${letterId} AND advance_recorded_at IS NULL
-        RETURNING ${db.unsafe(LETTER_COLUMNS)}
-      `;
-      // Same trick as the signature: `advance_recorded_at IS NULL` is the lock,
-      // so two clicks cannot both release the engagements.
-      if (!letter) {
-        throw new Error(`the advance on engagement letter ${letterId} was already recorded`);
-      }
-
       const released = await db<EngagementRow[]>`
         UPDATE crm.engagement
            SET status = 'active', activated_at = ${at}::timestamptz
-         WHERE engagement_letter_id = ${letterId} AND status = 'pending_advance'
+         WHERE id = ANY(${db.array(engagementIds as string[])}::uuid[]) AND status = 'pending_advance'
         RETURNING ${db.unsafe(ENGAGEMENT_COLUMNS)}
       `;
-      return { letter: toLetter(letter), released: released.map(toEngagement) };
+      return released.map(toEngagement);
     });
   }
 
@@ -1393,6 +1428,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
         SELECT e.id, e.entity_party_id, e.status,
                e.effective_from::text AS effective_from, e.ends_on::text AS ends_on,
                e.end_reason,
+               e.billing_from::text AS billing_from, e.first_invoice_on::text AS first_invoice_on,
                ep.display_name AS entity_name,
                l.id AS letter_id, l.ref AS letter_ref,
                l.issuing_entity_party_id, ip.display_name AS issuing_entity_name,
@@ -1449,6 +1485,8 @@ export class PostgresEngagementRepository implements EngagementRepository {
         effectiveFrom: r.effective_from,
         endsOn: r.ends_on,
         endReason: r.end_reason,
+        billingFrom: r.billing_from,
+        firstInvoiceOn: r.first_invoice_on,
         feeGroup:
           r.fee_group_id === null ||
           r.fee_group_rank === null ||
@@ -1492,6 +1530,8 @@ interface BillableRow {
   effective_from: string;
   ends_on: string | null;
   end_reason: string | null;
+  billing_from: string | null;
+  first_invoice_on: string | null;
   fee_group_id: string | null;
   fee_group_rank: number | null;
   fee_group_title: string | null;

@@ -9,7 +9,7 @@ import { describe, expect, it } from "vitest";
 import { DunningService } from "../../src/usecase/dunning/service";
 import { FakeDunningLadder, FakeDunningRepo } from "../../src/testfakes/dunning";
 import { FakeTenantDirectory } from "../../src/testfakes/scheduler";
-import { FakeFirmEntities, FakeInvoiceRepo, FakeIssuedCopies } from "../../src/testfakes/invoice";
+import { FakeFirmEntities, FakeInvoiceFirmSettings, FakeInvoiceRepo, FakeIssuedCopies } from "../../src/testfakes/invoice";
 import { FakePartyStanding } from "../../src/testfakes/party";
 import { InvoiceService } from "../../src/usecase/invoice/service";
 import { FakeIds } from "../../src/testfakes/ids";
@@ -21,6 +21,7 @@ import {
   DunningNotAwaitingApproval,
 } from "../../src/domain/invoice/errors";
 import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
+import { FakeStaffDirectory } from "../../src/testfakes/lead";
 
 const TENANT = "00000000-0000-0000-0000-0000000000aa";
 const CLIENT = "00000000-0000-0000-0000-0000000000bb";
@@ -48,6 +49,7 @@ function setup(): {
   invoices: FakeInvoiceRepo;
   billing: InvoiceService;
   events: RecordingEventSink;
+  clock: FakeClock;
 } {
   const dunning = new FakeDunningRepo();
   const ladders = new FakeDunningLadder();
@@ -63,6 +65,8 @@ function setup(): {
     clock,
     events,
     issuedCopies: new FakeIssuedCopies(),
+    staff: new FakeStaffDirectory(),
+    settings: new FakeInvoiceFirmSettings(),
   });
   const service = new DunningService({
     timeZones: new FakeFirmTimeZone(),
@@ -74,11 +78,15 @@ function setup(): {
     clock,
     events,
   });
-  return { service, dunning, ladders, invoices, billing, events };
+  return { service, dunning, ladders, invoices, billing, events, clock };
 }
 
-/** An issued invoice for 10,000 that fell due on `dueOn`. */
+/** An issued invoice for 10,000 that fell due on `dueOn`: issued ON its due
+ *  day (an invoice is not issued already overdue, B21), then the clock is
+ *  back at today. */
 async function overdueInvoice(s: ReturnType<typeof setup>, dueOn: string): Promise<string> {
+  const today = s.clock.now();
+  s.clock.set(`${dueOn}T06:00:00Z`);
   const invoice = await s.billing.raise(
     {
       tenantId: TENANT,
@@ -99,6 +107,7 @@ async function overdueInvoice(s: ReturnType<typeof setup>, dueOn: string): Promi
     unitAmount: "10000",
   });
   await s.billing.issue(TENANT, invoice.id, SYSTEM_ACTOR);
+  s.clock.set(today);
   return invoice.id;
 }
 
@@ -331,5 +340,74 @@ describe("the terminal rung needs a partner — the acceptance", () => {
     await expect(
       s.service.decide({ tenantId: TENANT, actionId: pending.action.id, approve: false }, PARTNER),
     ).rejects.toBeInstanceOf(DunningAlreadyDecided);
+  });
+});
+
+describe("one firm's failure (audit 2026-10-03, B13)", () => {
+  it("never stops the sweep for the firms after it, and is reported", async () => {
+    // The dunning sweep had no per-firm catch: one firm's bad ladder or zone
+    // read stopped dunning for every later firm, every day.
+    const BROKEN = "00000000-0000-0000-0000-0000000000b1";
+    const s = setup();
+    s.ladders.ladders.set(TENANT, LADDER);
+    await overdueInvoice(s, "2026-07-15");
+    const ladders = {
+      ladderFor: (tenantId: string) =>
+        tenantId === BROKEN ? Promise.reject(new Error("firm BROKEN's ladder is unreadable")) : s.ladders.ladderFor(tenantId),
+    };
+    const service = new DunningService({
+      timeZones: new FakeFirmTimeZone(),
+      dunning: s.dunning,
+      ladders,
+      invoices: s.invoices,
+      tenants: new FakeTenantDirectory([BROKEN, TENANT]),
+      ids: new FakeIds(),
+      clock: new FakeClock(TODAY),
+      events: s.events,
+    });
+
+    const reports = await service.sweep();
+
+    expect(reports.map((r) => r.tenantId)).toEqual([BROKEN, TENANT]);
+    expect(reports[0]).toMatchObject({ escalated: 0, failure: expect.stringContaining("BROKEN") });
+    expect(reports[1]).toMatchObject({ escalated: 1 });
+    expect(reports[1]?.failure).toBeUndefined();
+  });
+});
+
+describe("a credit hold over nothing owed (B22, audit 2026-10-03)", () => {
+  // The queue read a CANCELLED invoice's full total as outstanding, and a
+  // partner could approve a credit hold over a withdrawn bill.
+  async function pendingHold(s: ReturnType<typeof setup>) {
+    s.ladders.ladders.set(TENANT, LADDER);
+    const id = await overdueInvoice(s, "2026-06-30");
+    await s.service.sweep();
+    const [pending] = await s.service.pending(TENANT);
+    if (pending === undefined) throw new Error("nothing pending");
+    return { id, pending };
+  }
+
+  it("refuses to approve a hold once the invoice was cancelled, and still lets it be rejected", async () => {
+    const s = setup();
+    const { id, pending } = await pendingHold(s);
+    await s.billing.cancel(TENANT, id, PARTNER);
+
+    await expect(
+      s.service.decide({ tenantId: TENANT, actionId: pending.action.id, approve: true }, PARTNER),
+    ).rejects.toMatchObject({ code: "DUNNING_NOTHING_OWED" });
+    const rejected = await s.service.decide({ tenantId: TENANT, actionId: pending.action.id, approve: false }, PARTNER);
+    expect(rejected.state).toBe("rejected");
+  });
+
+  it("refuses to approve a hold once the invoice is paid in full", async () => {
+    const s = setup();
+    const { id, pending } = await pendingHold(s);
+    await s.billing.recordPayment(
+      { tenantId: TENANT, invoiceId: id, amount: "10000", receivedOn: "2026-07-19", method: "upi" },
+      PARTNER,
+    );
+    await expect(
+      s.service.decide({ tenantId: TENANT, actionId: pending.action.id, approve: true }, PARTNER),
+    ).rejects.toMatchObject({ code: "DUNNING_NOTHING_OWED" });
   });
 });

@@ -217,8 +217,48 @@ export class PostgresDocumentStoreRepository implements DocumentStoreRepository 
     readonly tenantId: string;
     readonly documentId: string;
     readonly visible: boolean;
-  }): Promise<DocumentRecord | null> {
+  }): Promise<DocumentRecord | null | "draft"> {
     return withTenant(this.app, input.tenantId, async (db) => {
+      // A DRAFT IS NEVER SHARED (B10, audit 2026-10-03), decided here, in the
+      // same transaction as the write and before it. A draft is:
+      //   - a copy filed as the firm's draft copy (2026-09-29), which says
+      //     "Draft" on it whatever its record is now; or
+      //   - a copy the product drew from a proposal, a letter or an invoice
+      //     that was still a draft when it was drawn: the record is a draft
+      //     now, or went out after the copy was made. That covers the copies
+      //     filed before 2026-09-29, all `rendered`. An invoice has a DAY of
+      //     issue and no instant, so a copy drawn on an earlier day (the
+      //     firm's calendar) counts.
+      // Taking a document off the portal is never refused.
+      if (input.visible) {
+        const [draft] = await db<{ is_draft: boolean }[]>`
+          SELECT EXISTS (
+            SELECT 1
+              FROM files.document d
+              JOIN files.document_link l ON l.document_id = d.id AND l.tenant_id = d.tenant_id
+             WHERE d.id = ${input.documentId}
+               AND (
+                 l.role = 'draft_copy'
+                 OR (d.origin = 'generated' AND (
+                      (l.subject_kind = 'invoice' AND EXISTS (
+                         SELECT 1 FROM crm.invoice i
+                           JOIN tenancy.tenant firm ON firm.id = i.tenant_id
+                          WHERE i.id = l.subject_ref
+                            AND (i.issued_on IS NULL
+                                 OR (d.created_at AT TIME ZONE firm.time_zone)::date < i.issued_on)))
+                   OR (l.subject_kind = 'engagement_letter' AND EXISTS (
+                         SELECT 1 FROM crm.engagement_letter el
+                          WHERE el.id = l.subject_ref
+                            AND (el.sent_at IS NULL OR d.created_at < el.sent_at)))
+                   OR (l.subject_kind = 'proposal' AND EXISTS (
+                         SELECT 1 FROM crm.proposal p
+                          WHERE p.id = l.subject_ref
+                            AND (p.sent_at IS NULL OR d.created_at < p.sent_at)))))
+               )
+          ) AS is_draft
+        `;
+        if (draft?.is_draft === true) return "draft";
+      }
       // `party_id IS NOT NULL` IS PART OF THE WRITE, not a check above it. A
       // document with no party is the FIRM's own — the portal denies it by
       // arithmetic whatever this flag says (0063) — so setting the flag on one
@@ -469,7 +509,10 @@ export class PostgresDocumentStoreRepository implements DocumentStoreRepository 
         SELECT l.id, l.tenant_id, l.document_id, l.subject_kind, l.subject_ref,
                l.role, l.created_by, l.created_at, l.withdrawn_at, l.withdrawn_by,
                COALESCE(p.display_name, ld.title, pr.ref, el.ref,
-                        eng_p.display_name, i.number, j.source_kind,
+                        eng_p.display_name,
+                        -- A draft has no number until it is issued (0322).
+                        CASE WHEN i.id IS NOT NULL THEN coalesce(i.number, 'Draft invoice') END,
+                        j.source_kind,
                         wi.title) AS subject_label
         FROM files.document_link l
         LEFT JOIN core.party p

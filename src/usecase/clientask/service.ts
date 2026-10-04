@@ -535,11 +535,6 @@ export class ClientAskService {
     return id;
   }
 
-  /** The server's calendar day — the honest fallback for a caller that did not
-   *  say which day it is on, and never the answer when one did. */
-  private today(): string {
-    return this.deps.clock.now().toISOString().slice(0, 10);
-  }
 }
 
 export type { AskKind, AskRecord, AskResponseRecord, PortalAskRow };

@@ -20,9 +20,19 @@ import { scopeOf } from "../scope";
 import { MAX_TIMELINE_LIMIT } from "../../usecase/ledger/service";
 import type { EventRecord } from "../../usecase/ledger/ports";
 import type { LedgerService } from "../../usecase/ledger/service";
+import type { AuthzService } from "../../usecase/authz/service";
+import type { Principal } from "../../platform/callctx";
+import { payloadWithoutFees } from "../../domain/ledger/fees";
 
 export interface LedgerDeps {
   readonly service: LedgerService;
+  /**
+   * The FEE AXIS only (B08, audit 2026-10-03). A payment's amount, a credit
+   * note's, what a bill was raised at: the timeline carries money, and for a
+   * login that cannot see fees each verb's money fields are null on the way
+   * out (`domain/ledger/fees.ts` names them). Gate 3 is middleware.
+   */
+  readonly authz: AuthzService;
 }
 
 const EventSchema = z
@@ -34,7 +44,11 @@ const EventSchema = z
     verb: z.string(),
     objectType: z.string(),
     objectId: z.string().uuid(),
-    payload: z.record(z.unknown()),
+    payload: z.record(z.unknown()).openapi({
+      description:
+        "The facts the event recorded. For a login that does not see fees, each money field " +
+        "(an amount paid, credited, billed or owed, an exchange rate, a discount) is null.",
+    }),
     occurredAt: z.string(),
     recordedAt: z.string(),
   })
@@ -108,21 +122,41 @@ const objectTimelineRoute = createRoute({
 });
 
 /** Named field by field, so a field added to the read model cannot reach the
- *  wire without also reaching the spec. */
-function toRecordBody(record: EventRecord): z.infer<typeof EventRecordSchema> {
+ *  wire without also reaching the spec (B48: this said so over two spreads).
+ *  `fees` false nulls the verb's money (B08). */
+function toRecordBody(record: EventRecord, fees: boolean): z.infer<typeof EventRecordSchema> {
+  const e = record.event;
   return {
-    event: { ...record.event },
-    actor: record.actor === null ? null : { ...record.actor },
+    event: {
+      id: e.id,
+      tenantId: e.tenantId,
+      actorType: e.actorType,
+      actorId: e.actorId,
+      verb: e.verb,
+      objectType: e.objectType,
+      objectId: e.objectId,
+      payload: fees ? { ...e.payload } : payloadWithoutFees(e.verb, e.payload),
+      occurredAt: e.occurredAt,
+      recordedAt: e.recordedAt,
+    },
+    actor:
+      record.actor === null
+        ? null
+        : { userId: record.actor.userId, displayName: record.actor.displayName, email: record.actor.email },
   };
 }
 
 export function registerLedgerRoutes(app: OpenAPIHono<AppEnv>, deps: LedgerDeps): void {
+  const seesFees = (principal: Principal | null): boolean =>
+    principal !== null && deps.authz.seesFees(principal);
+
   app.openapi(tenantTimelineRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const { limit } = c.req.valid("query");
     const events = await deps.service.recent(s.tenantId, limit);
-    return c.json({ events: events.map(toRecordBody) }, 200);
+    const fees = seesFees(c.get("principal"));
+    return c.json({ events: events.map((e) => toRecordBody(e, fees)) }, 200);
   });
 
   app.openapi(objectTimelineRoute, async (c) => {
@@ -130,6 +164,7 @@ export function registerLedgerRoutes(app: OpenAPIHono<AppEnv>, deps: LedgerDeps)
     if (!s.ok) return c.json(s.deny, s.status);
     const { objectType, objectId } = c.req.valid("param");
     const events = await deps.service.forObject(s.tenantId, objectType, objectId);
-    return c.json({ events: events.map(toRecordBody) }, 200);
+    const fees = seesFees(c.get("principal"));
+    return c.json({ events: events.map((e) => toRecordBody(e, fees)) }, 200);
   });
 }

@@ -83,6 +83,42 @@ export class PostgresObligationCoverage implements ObligationCoverage {
     );
   }
 
+  /** CA#11: the same rule `describeJobs` applies to a job, for one
+   *  engagement's period. See the port. */
+  async earliestFilingDue(
+    tenantId: string,
+    engagementId: string,
+    period: { readonly start: string; readonly end: string },
+  ): Promise<string | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ due: string | null }[]>`
+        SELECT min(oi.statutory_due_on)::text AS due
+          FROM crm.engagement e
+          JOIN crm.engagement_letter_line ln
+            ON ln.id = e.engagement_letter_line_id AND ln.tenant_id = e.tenant_id
+          JOIN config.version pinned
+            ON pinned.id = ln.service_version_id AND pinned.tenant_id = ln.tenant_id
+          JOIN delivery.obligation_instance oi
+            ON oi.tenant_id = e.tenant_id AND oi.entity_party_id = e.entity_party_id
+          JOIN delivery.obligation_state os
+            ON os.id = oi.state_id AND os.tenant_id = oi.tenant_id
+         WHERE e.id = ${engagementId}
+           AND oi.withdrawn_at IS NULL
+           AND NOT os.is_terminal
+           AND NOT os.is_filed
+           AND (oi.engagement_id = e.id
+                OR EXISTS (SELECT 1 FROM delivery.obligation_rule_service k
+                            WHERE k.tenant_id = oi.tenant_id
+                              AND k.lineage_id = oi.lineage_id
+                              AND k.service_entry_id = pinned.entry_id
+                              AND k.unlinked_at IS NULL))
+           AND oi.period_start <= ${period.end}::date
+           AND oi.period_end >= ${period.start}::date
+      `;
+      return row?.due ?? null;
+    });
+  }
+
   private async reached(
     tenantId: string,
     engagementIds: readonly string[],

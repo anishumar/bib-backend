@@ -90,9 +90,12 @@ locals {
     "docusign-private-key/api"     = { secret = "docusign-private-key", sa = google_service_account.api.email }
 
     # The worker reads and writes every firm's data in turn, so it needs the app
-    # role. It gets NO smtp password, because src/setup/worker.ts composes no
-    # Mailer — CLAUDE.md states the rule the chaser and the nudge both follow,
-    # that they send nothing and no mailer is injected.
+    # role. Since 0322 it holds the SMTP password too: the weekly summary of
+    # pending advances to each firm's administrators (Ashish: "once every week
+    # it should escalate to ceo coo ... through system notification/email") is a
+    # sweep, so this process sends it. The chaser and the nudge still send
+    # nothing to clients: no mailer is injected into either (asserted by test).
+    "smtp-password/worker"         = { secret = "smtp-password", sa = google_service_account.worker.email }
     #
     # It DOES get the DocuSign credential (0080). The signature sweep runs here:
     # it asks DocuSign how every envelope still out has ended and signs or

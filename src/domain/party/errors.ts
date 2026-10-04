@@ -3,6 +3,7 @@
 // (domainerr.ts). Adapters translate their own failures INTO these, never the
 // reverse. Match with `instanceof`, never by string.
 
+import { countryWords } from "../country";
 import { longDay } from "../day";
 
 export class PartyError extends Error {
@@ -18,9 +19,11 @@ export class PartyError extends Error {
 export type PartyErrorCode =
   | "PARTY_NOT_FOUND"
   | "NOT_AN_ORGANIZATION"
+  | "ALREADY_REGISTERED"
   | "INVALID_IDENTIFIER"
   | "INVALID_IDENTIFIER_TYPE"
   | "INVALID_RELATIONSHIP_TYPE"
+  | "RELATIONSHIP_DOES_NOT_FIT"
   | "INVALID_DATE_RANGE"
   | "SELF_RELATIONSHIP"
   | "DUPLICATE_IDENTIFIER"
@@ -46,6 +49,21 @@ export class NotAnOrganization extends PartyError {
     super(
       "NOT_AN_ORGANIZATION",
       `Party ${JSON.stringify(ref)} is not an organization; a legal entity can only register against one`,
+    );
+  }
+}
+/**
+ * ONE REGISTRATION PER COMPANY (audit 2026-10-03). `core.legal_entity` is
+ * keyed on the party: a company in another country is another company, its
+ * own client, linked to this one by group. The screen offered "Register in
+ * another country" and the key refused it with a message that read like a race.
+ */
+export class AlreadyRegistered extends PartyError {
+  constructor(jurisdiction: string) {
+    super(
+      "ALREADY_REGISTERED",
+      `This company is already registered in ${countryWords(jurisdiction)}. A company in another ` +
+        `country is its own client: add it as a client and link the two as one group.`,
     );
   }
 }
@@ -77,6 +95,28 @@ export class InvalidRelationshipType extends PartyError {
     super("INVALID_RELATIONSHIP_TYPE", `Unknown relationship type ${JSON.stringify(type)}`);
   }
 }
+/**
+ * A relationship that cannot be true of these two kinds of party (CA#53): a
+ * company as somebody's director, a person as a company's parent. Names the
+ * two parties so the reader sees which way round they had it.
+ */
+export class RelationshipDoesNotFit extends PartyError {
+  constructor(
+    fromName: string,
+    fromKind: "organization" | "person",
+    label: string,
+    toName: string,
+    toKind: "organization" | "person",
+  ) {
+    const kind = (k: "organization" | "person"): string => (k === "organization" ? "company" : "person");
+    super(
+      "RELATIONSHIP_DOES_NOT_FIT",
+      `"${fromName} is ${label} ${toName}" cannot be true: a ${kind(fromKind)} cannot be ${label} ` +
+        `a ${kind(toKind)}. Choose the sentence that is true.`,
+    );
+  }
+}
+
 export class InvalidDateRange extends PartyError {
   constructor(from: string, to: string | null) {
     super(
@@ -127,7 +167,7 @@ export class RelationshipEndsBeforeItBegan extends PartyError {
     super(
       "RELATIONSHIP_ENDS_BEFORE_IT_BEGAN",
       `A relationship cannot end before it began. This one began on ${longDay(validFrom)}, and ` +
-        `${longDay(validTo)} is not after that — the end date is the first day it is NO LONGER ` +
+        `${longDay(validTo)} is not after that: the end date is the first day it is NO LONGER ` +
         `in force, so the earliest it can be is the day after it began.`,
     );
   }
@@ -137,11 +177,38 @@ export class SelfRelationship extends PartyError {
     super("SELF_RELATIONSHIP", "A party cannot hold a relationship to itself");
   }
 }
+/** What each identifier is called on a screen. */
+const IDENTIFIER_WORDS: Readonly<Record<string, string>> = {
+  email: "email",
+  phone: "phone number",
+  pan: "PAN",
+  gstin: "GSTIN",
+  cin: "CIN",
+  llpin: "LLPIN",
+  tan: "TAN",
+  din: "DIN",
+  uen: "UEN",
+  trn: "TRN",
+  ein: "EIN",
+  crn: "CRN",
+  vat: "VAT number",
+  passport: "passport number",
+};
+
+/**
+ * The same contact detail is already on another party (CA#20, CA#39).
+ *
+ * It said "Identifier email ... already exists for this tenant", which names a
+ * word no CA firm uses and gives no clue where the email went. It now says who
+ * holds it, so the reader can find it and move it (end it there, add it here).
+ */
 export class DuplicateIdentifier extends PartyError {
-  constructor(type: string, value: string) {
+  constructor(type: string, value: string, holder?: string | null) {
+    const what = IDENTIFIER_WORDS[type] ?? type;
     super(
       "DUPLICATE_IDENTIFIER",
-      `Identifier ${type} ${JSON.stringify(value)} already exists for this tenant`,
+      `The ${what} ${value} is already recorded on ${holder ?? "another client"}. An email, ` +
+        `phone or registration number can be on one client or contact at a time.`,
     );
   }
 }

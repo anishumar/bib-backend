@@ -179,7 +179,7 @@ export class DocusignSigner implements ESignProvider {
     if (typed === "") {
       throw new SignatureIncomplete(
         `a DocuSign envelope id in "reference", and this one is empty. With ` +
-          `BIB_ESIGN_PROVIDER=docusign the reference is not a note — it is the envelope this ` +
+          `BIB_ESIGN_PROVIDER=docusign the reference is not a note: it is the envelope this ` +
           `firm sent for signature, and it is what gets checked. Valid: a 36-character ` +
           `envelope id such as 44e3e5a5-1f2e-4d0b-9d48-0b0f2c2e6a21, copied from the envelope ` +
           `in DocuSign Manage or from its URL`,
@@ -189,7 +189,7 @@ export class DocusignSigner implements ESignProvider {
       throw new SignatureIncomplete(
         `a DocuSign envelope id in "reference", and ${JSON.stringify(typed)} is not one. With ` +
           `BIB_ESIGN_PROVIDER=docusign the reference must be a 36-character envelope id such ` +
-          `as 44e3e5a5-1f2e-4d0b-9d48-0b0f2c2e6a21 — eight, four, four, four then twelve ` +
+          `as 44e3e5a5-1f2e-4d0b-9d48-0b0f2c2e6a21: eight, four, four, four then twelve ` +
           `hexadecimal characters separated by hyphens`,
       );
     }
@@ -243,7 +243,7 @@ export class DocusignSigner implements ESignProvider {
       throw new SignatureIncomplete(
         `an envelope bound to THESE terms. Envelope ${envelope.id} was raised over content ` +
           `hash ${JSON.stringify(stamped)} and this letter's terms hash to ` +
-          `${JSON.stringify(input.contentHash)}. The client signed a different document — ` +
+          `${JSON.stringify(input.contentHash)}. The client signed a different document: ` +
           `raise a fresh envelope from the letter as it now reads`,
       );
     }

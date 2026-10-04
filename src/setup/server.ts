@@ -26,11 +26,9 @@ import {
 } from "../infrastructure/postgres/identity-repository";
 import { ScryptPasswordHasher } from "../infrastructure/crypto/scrypt-hasher";
 import { RandomTokenFactory, Sha256ContentHasher } from "../infrastructure/crypto/random-tokens";
-import { LoggingMailer } from "../infrastructure/mail/logging-mailer";
-import { SmtpMailer } from "../infrastructure/mail/smtp-mailer";
+import { mailerFor } from "./mailer";
 import { PostgresFirmTimeZone } from "../infrastructure/postgres/firm-timezone-repository";
-import type { Mailer } from "../usecase/identity/ports";
-import { NodemailerTransport } from "../infrastructure/mail/nodemailer-transport";
+
 import { PostgresConfigRepository } from "../infrastructure/postgres/config-repository";
 import { PostgresStaffGradeRepository } from "../infrastructure/postgres/staff-grade-repository";
 import { PostgresClientAssignmentRepository } from "../infrastructure/postgres/client-assignment-repository";
@@ -93,6 +91,7 @@ import { PostgresEngagementRepository } from "../infrastructure/postgres/engagem
 import { PostgresEngagementLifecycle } from "../infrastructure/postgres/engagement-lifecycle";
 import { PostgresDocumentRepository } from "../infrastructure/postgres/document-repository";
 import { PostgresFirmEntityRepository } from "../infrastructure/postgres/firm-entity-repository";
+import { PostgresInvoiceFirmSettings } from "../infrastructure/postgres/invoice-settings";
 import { PostgresInvoiceRepository } from "../infrastructure/postgres/invoice-repository";
 import { PostgresDocumentStoreRepository } from "../infrastructure/postgres/document-store-repository";
 import { Sha256ByteDigest } from "../infrastructure/storage/filesystem-blob-store";
@@ -104,6 +103,26 @@ import { DashboardService } from "../usecase/dashboard/service";
 import { PostgresReadinessFacts } from "../infrastructure/postgres/readiness-facts";
 import { ReadinessService } from "../usecase/readiness/service";
 import { InvoiceService } from "../usecase/invoice/service";
+import { BillingDeskService } from "../usecase/billing/desk";
+import { GoLiveScheduler } from "../usecase/billing/golive";
+import { AdvanceBiller, AdvanceDesk } from "../usecase/billing/advance";
+import {
+  PostgresAdvancePolicy,
+  PostgresAdvanceReminderFacts,
+  PostgresIssuerTaxDefaults,
+} from "../infrastructure/postgres/advance-reminders";
+import { FinalBiller } from "../usecase/billing/final";
+import {
+  PostgresAutoBillingSetting,
+  PostgresBillingDueDesk,
+  PostgresBillingSchedules,
+} from "../infrastructure/postgres/billing-desk";
+import {
+  PostgresAutoBillingFirms,
+  PostgresBillingDueWriter,
+  PostgresBillingManagerFacts,
+} from "../infrastructure/postgres/billing-repository";
+import { PostgresAdvanceBillFacts, PostgresFinalBillFacts } from "../infrastructure/postgres/billing-facts";
 import { DunningService } from "../usecase/dunning/service";
 import { EscalationService } from "../usecase/escalation/service";
 import {
@@ -126,7 +145,6 @@ import { blobStoreFor } from "./blobs";
 import { signedCopyFiler } from "./signed-copies";
 import { proposalLinks, proposalPdfs } from "./proposal-delivery";
 import { invoiceIssuedCopies } from "./invoice-copies";
-import type { ProposalMailer } from "../usecase/proposal/ports";
 import type { LetterPdf } from "../usecase/engagement/ports";
 import { TenancyService } from "../usecase/tenancy/service";
 import { PartyService } from "../usecase/party/service";
@@ -147,6 +165,7 @@ import { PortalLibraryService } from "../usecase/portallibrary/service";
 import { ClientRequestService } from "../usecase/clientrequest/service";
 import { ClientAskService } from "../usecase/clientask/service";
 import { ChaserService } from "../usecase/chaser/service";
+import { obligationFilingPort } from "./filing-link";
 import { WorkItemService, WorkVocabularyService } from "../usecase/workitem/service";
 import { ObligationService } from "../usecase/obligation/service";
 import { ObligationVocabularyService } from "../usecase/obligation/vocabulary";
@@ -313,10 +332,8 @@ export function wire(cfg: Config, log: Logger): Wired {
     // first, so this closure defers the lookup to CALL time — by which point
     // `obligations` has long been assigned, since nothing calls it before a
     // request. Neither use case imports the other; only this line knows both.
-    filings: {
-      reconcileFiling: (tenantId, workItemId, discharged, actor): Promise<void> =>
-        obligations.reconcileFiling(tenantId, workItemId, discharged, actor),
-    },
+    // Built once for both processes in `setup/filing-link.ts` (CA#36).
+    filings: obligationFilingPort(() => obligations),
     ids: systemIds,
     clock: systemClock,
     events: ledger,
@@ -417,7 +434,48 @@ export function wire(cfg: Config, log: Logger): Wired {
   // person completes a step the service asks whether an agent exists for it, and
   // an API that answered differently from the worker would let somebody tick off
   // work a machine was already doing.
+  // THE ADVANCE AND THE FINAL BILL (0320). A one-time service's final bill is
+  // written when its job finishes; the advance bill when a letter is signed.
+  const finalBills = new FinalBiller({
+    facts: new PostgresFinalBillFacts(pools.app),
+    dues: new PostgresBillingDueWriter(pools.app),
+    managers: new PostgresBillingManagerFacts(pools.app),
+    setting: new PostgresAutoBillingSetting(pools.app),
+    firms: new PostgresAutoBillingFirms(pools.app),
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    clock: systemClock,
+    ids: systemIds,
+    events: ledger,
+  });
+  // 0322: the advance holds no work. Signing writes the bill and drafts its
+  // invoice through the billing desk (composed further down: a closure, reached
+  // only on a request, by which time it exists).
+  const advanceBills = new AdvanceBiller({
+    facts: new PostgresAdvanceBillFacts(pools.app),
+    dues: new PostgresBillingDueWriter(pools.app),
+    managers: new PostgresBillingManagerFacts(pools.app),
+    ids: systemIds,
+    events: ledger,
+    drafter: {
+      draftAdvance: (tenantId, dueId, actor) => billing.draftAdvance(tenantId, dueId, actor),
+    },
+  });
+  const advancePolicy = new PostgresAdvancePolicy(pools.app);
+  const taxDefaults = new PostgresIssuerTaxDefaults(pools.app);
+  // Where each advance stands and who is reminded (0322): My day and the
+  // Advances list read it.
+  const advanceDesk = new AdvanceDesk({
+    desk: new PostgresBillingDueDesk(pools.app),
+    policy: advancePolicy,
+    people: new PostgresAdvanceReminderFacts(pools.app),
+    taxDefaults,
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    clock: systemClock,
+  });
+
   const orchestrator = new OrchestratorService({
+    // A finished job may make a one-time service's final bill due (0320).
+    jobDone: finalBills,
     // A cancelled job closes its tasks through the work-item module (V2.4).
     jobTasks: workItems,
     timeZones: new PostgresFirmTimeZone(pools.app),
@@ -540,6 +598,36 @@ export function wire(cfg: Config, log: Logger): Wired {
     // Its PDF, filed as it is issued: the copy of record (2026-09-29). Built
     // after the document store for this.
     issuedCopies: invoiceIssuedCopies(fileStore, log),
+    // A manager a person names must be on the roster today (T4).
+    staff: memberships,
+    // Reporting currency, financial year start and payment terms (audit 2026-10-03).
+    settings: new PostgresInvoiceFirmSettings(pools.app),
+  });
+
+  // BILL DUES (0318): what a manager does with a bill the sweep found owed.
+  // Raising goes through the InvoiceService above, so every invoice rule (the
+  // issuer, the client, the currency, the gapless number) applies exactly as
+  // to an invoice raised by hand.
+  const billing = new BillingDeskService({
+    desk: new PostgresBillingDueDesk(pools.app),
+    invoices: {
+      prepareDraft: (input) => invoices.prepareDraft(input),
+      prepareLine: (draft, input) => invoices.prepareLine(draft, input),
+      recordRaised: (invoice, actor) => invoices.recordRaised(invoice, actor),
+      find: (tenantId, invoiceId) => invoiceRepository.find(tenantId, invoiceId),
+      issueCreditNote: (input, actor) => invoices.issueCreditNote(input, actor),
+    },
+    schedules: new PostgresBillingSchedules(pools.app),
+    setting: new PostgresAutoBillingSetting(pools.app),
+    fiscalYears: configRepository,
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    clock: systemClock,
+    events: ledger,
+    // 0322: the automatic advance draft's rate, and how advances are chased.
+    taxDefaults,
+    policy: advancePolicy,
+    // A default tax rate is for one of the firm's own companies.
+    firmEntities: documents,
   });
 
   // THE LEADERSHIP FIGURES (T3.7). No writes: every number is derived from
@@ -549,6 +637,7 @@ export function wire(cfg: Config, log: Logger): Wired {
   const dashboards = new DashboardService({
     dashboards: new PostgresDashboardRepository(pools.app),
     timeZones: new PostgresFirmTimeZone(pools.app),
+    fiscalYears: configRepository,
     clock: systemClock,
   });
 
@@ -741,6 +830,8 @@ export function wire(cfg: Config, log: Logger): Wired {
     identity,
     memberships: tenancy,
     firms: tenancy,
+    // CA#50: the welcome letter's expiry on the firm's clock.
+    timeZones: new PostgresFirmTimeZone(pools.app),
   });
 
   const tenancyDeps: TenancyDeps = { service: tenancy, staffInvite };
@@ -832,6 +923,8 @@ export function wire(cfg: Config, log: Logger): Wired {
       memberships: tenancy,
       access: portalAccess,
       firms: tenancy,
+      // CA#50: the invitation's expiry on the firm's clock.
+      timeZones: new PostgresFirmTimeZone(pools.app),
       // `invite` records nothing itself — its three writes each emit their own
       // event. `resend` writes no row at all, so this is the only record that a
       // credential was mailed outside the firm and who said so.
@@ -1139,6 +1232,18 @@ export function wire(cfg: Config, log: Logger): Wired {
   const esign = esignFor(cfg, log);
 
   const engagement = new EngagementService({
+    // 0320: a signed letter's advance becomes a bill to raise.
+    advanceBilling: advanceBills,
+    // CA#24: a signed letter's filings reach the calendar at once, through the
+    // nightly sweep's own generator, not tonight.
+    calendar: obligations,
+    // 0319: a signed letter's billing terms set each engagement's schedule.
+    goLiveBilling: new GoLiveScheduler({
+      schedules: new PostgresBillingSchedules(pools.app),
+      setting: new PostgresAutoBillingSetting(pools.app),
+      fiscalYears: configRepository,
+      events: ledger,
+    }),
     letters: new PostgresEngagementRepository(pools.app),
     library: configRepository,
     // The SAME instance proposals hold. Two documents of the same firm must not
@@ -1235,7 +1340,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         staffGrades: { service: staffGrades },
         serviceAxes: { service: serviceAxes },
         clientAssignments: { service: clientAssignments },
-        clientImports: { service: clientImports },
+        clientImports: { service: clientImports, authz },
         portalAccess: { service: portalAccess },
         portalHome: { service: portalHome },
         clientAsks: { service: clientAsks },
@@ -1257,8 +1362,8 @@ export function wire(cfg: Config, log: Logger): Wired {
         orchestrator: { service: orchestrator, grades: staffGrades, jobs: scheduler },
         scheduler: { service: scheduler },
         party: { service: party },
-        ledger: { service: ledger },
-        config: { service: config },
+        ledger: { service: ledger, authz },
+        config: { service: config, authz },
         lead: { service: lead, authz },
         proposal: { service: proposal, authz },
         engagement: {
@@ -1284,7 +1389,8 @@ export function wire(cfg: Config, log: Logger): Wired {
           }),
         },
         invoice: { service: invoices, dunning, authz },
-        filestore: { service: fileStore },
+        billing: { service: billing, authz, advances: advanceDesk, finals: finalBills },
+        filestore: { service: fileStore, authz },
         dashboard: { service: dashboards, authz },
         readiness: { service: readiness },
       },
@@ -1319,48 +1425,4 @@ export function wire(cfg: Config, log: Logger): Wired {
       await assertLedgerAppendOnly(pools.app);
     },
   };
-}
-
-/**
- * Which mailer is registered, and the ONLY place that decides.
- *
- * The honest registry's shape, applied to notifications: the stub says what it
- * is, `validateServer` refuses it in a public environment, and the real one is
- * a second adapter behind the same port. `logging-mailer.ts` predicted exactly
- * this — *"nothing in the use case changes when it arrives"* — and nothing did:
- * `IdentityService` is untouched by the swap.
- *
- * The config → adapter mapping happens HERE because an adapter never imports
- * the config module. `NodemailerTransport` declares the connection shape it
- * needs and this function fills it in, the same arrangement
- * `FilesystemBlobStore(cfg.storage.root)` already has.
- *
- * The null branches are unreachable by the time this runs — `validateServer`
- * has already refused `smtp` without a host or a From address, naming the
- * variable. They are here because the TYPE says nullable and a non-null
- * assertion would be a claim this file cannot make on its own.
- */
-function mailerFor(cfg: Config, log: Logger): Mailer & ProposalMailer {
-  if (cfg.auth.mailTransport === "log") return new LoggingMailer(log);
-  const { smtp, from, fromName } = cfg.mail;
-  if (smtp === null || from === null) {
-    throw new Error(
-      "BIB_MAIL_TRANSPORT=smtp without BIB_SMTP_HOST or BIB_MAIL_FROM. validateServer should " +
-        "have refused this configuration before wiring — if you are seeing this, that check " +
-        "was skipped or removed.",
-    );
-  }
-  return new SmtpMailer(
-    new NodemailerTransport(
-      {
-        host: smtp.host,
-        port: smtp.port,
-        secure: smtp.secure,
-        user: smtp.user,
-        password: smtp.password,
-      },
-      { address: from, name: fromName },
-      log,
-    ),
-  );
 }

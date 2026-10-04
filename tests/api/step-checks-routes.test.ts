@@ -331,6 +331,8 @@ describe("GET /my-steps and GET /checks name the job each row belongs to (V2.1)"
       periodLabel: null,
       services: ["Monthly bookkeeping"],
       dueOn: "2026-10-10",
+      // No filing of the job's (CA#11): the fake carries none.
+      filingDueOn: null,
     });
   });
 

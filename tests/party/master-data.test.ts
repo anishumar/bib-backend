@@ -134,3 +134,54 @@ describe("an identifier typed wrong (V2.5)", () => {
     ).rejects.toMatchObject({ code: "IDENTIFIER_NOT_FOUND" });
   });
 });
+
+describe("a client's billing address (audit 2026-10-03, CA#22)", () => {
+  // Clients had no address anywhere, so an invoice's "Billed to" said a name
+  // and nothing else. One shape with the firm's own registered address: the
+  // printed lines, then the state, the postal code and the country.
+  it("records it, tidied, for a company or a person, and names the field, never the address", async () => {
+    const w = await world();
+    const updated = await w.service.updateParty(
+      {
+        tenantId: TENANT,
+        partyId: w.org.partyId,
+        billingAddress: { lines: [" Plot 4, MIDC Bhosari ", "  "], region: "Maharashtra", postalCode: "411026", country: "in" },
+      },
+      PARTNER,
+    );
+    expect(updated.billingAddress).toEqual({
+      lines: ["Plot 4, MIDC Bhosari"],
+      region: "Maharashtra",
+      postalCode: "411026",
+      country: "IN",
+    });
+    const event = w.events.recorded.at(-1);
+    expect(event?.payload).toEqual({ fields: ["billingAddress"] });
+    expect(JSON.stringify(event)).not.toMatch(/MIDC|Maharashtra|411026/);
+  });
+
+  it("clears it with null, and refuses one with no line or a country that is not one", async () => {
+    const w = await world();
+    await w.service.updateParty(
+      { tenantId: TENANT, partyId: w.org.partyId, billingAddress: { lines: ["Plot 4"], country: "IN" } },
+      PARTNER,
+    );
+    const cleared = await w.service.updateParty(
+      { tenantId: TENANT, partyId: w.org.partyId, billingAddress: null },
+      PARTNER,
+    );
+    expect(cleared.billingAddress).toBeNull();
+    await expect(
+      w.service.updateParty(
+        { tenantId: TENANT, partyId: w.org.partyId, billingAddress: { lines: [], region: "Maharashtra" } },
+        PARTNER,
+      ),
+    ).rejects.toThrow(/at least one line/);
+    await expect(
+      w.service.updateParty(
+        { tenantId: TENANT, partyId: w.org.partyId, billingAddress: { lines: ["Plot 4"], country: "India" } },
+        PARTNER,
+      ),
+    ).rejects.toThrow(/country from the list/);
+  });
+});

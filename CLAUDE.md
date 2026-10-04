@@ -190,6 +190,30 @@ by a typo must not look like policy working as intended. The fee axis is `AuthzS
 **redacts** money rather than omitting the record, so "you may not see this" never looks
 like "there is no fee".
 
+### The fee wall covers PDFs, writes and the timeline too (audit 2026-10-03)
+
+Redacting the JSON was not the whole wall. Since the 2026-10-03 audit (branch `fix/audit-money`):
+
+- **Documents.** `showsFees(kind)` (`domain/filestore/model.ts`): a proposal, an engagement
+  letter, an invoice and a credit note open (`/content`, `/versions/{v}/content`), render and
+  preview only for a login that sees fees. Refused WHOLE, by kind, never redacted: a figure
+  prints in too many places to promise a redaction catches them all. `Document.showsFees` is on
+  the wire so a screen offers Download only where it works.
+- **Writes.** Seeing a figure and setting one are one question. `AuthzService.requireFees(p,
+  what)` throws `FeesNotVisible` (403, reason `FEES_NOT_VISIBLE`, plain words) and guards: a
+  manual invoice, invoice lines, payments, credit notes and an advance's refund; a lead's
+  value (capture and details; the details value is OPTIONAL now, absent keeps it); and every
+  write of a `service` config (it carries the list price, and that login reads it as null).
+- **Reads.** A service's `listPrice` is null on `/config/service*`, a lead's `estimatedValue`
+  is null, the client import's line fee is null, and the timeline nulls each verb's money
+  fields, named in `domain/ledger/fees.ts` (`tests/ledger/fees.test.ts` fails on a
+  money-shaped payload key nobody named, so a new verb is decided, not missed).
+- **A line with neither `unitAmount` nor `pricingNote`** on a proposal or a letter is quoted at
+  the pinned version's list price in the document's currency (`SERVICE_HAS_NO_LIST_PRICE`
+  when there is none). It is how a drafter who cannot see fees adds a priced service.
+- **Issuing is `invoice:issue`** (0335), not `tenant:admin`: issue, cancel, credit notes and an
+  advance's refund or keep. 0335 gave it to every role that held `tenant:admin`.
+
 ## The configuration registry — data, not code (P2 / T2.5)
 
 The things a firm changes weekly are rows, not deploys: `config.entry` is the thing being
@@ -232,7 +256,8 @@ refused: it is unrecoverable from inside the product.
 
 ## Setup readiness — is the firm set up well enough to run its work (V2.6, 2026-09-28)
 
-`GET /api/v1/tenancy/readiness` (`tenant:admin`): eight lines, each `done` or naming its gaps.
+`GET /api/v1/tenancy/readiness` (`tenant:admin`): thirteen lines (eight until 2026-10-03), each
+`done`, `to_do` naming its gaps, or `nothing_to_check`.
 Setting up a firm is about sixteen ordered steps and several fail SILENTLY (a client with no
 SPOC gets work on nobody's desk, no ladder escalates nothing, an unconfirmed rule files
 nothing); the QA firm stopped half-way on 27 Sep 2026 and no screen said so.
@@ -257,6 +282,23 @@ nothing); the QA firm stopped half-way on 27 Sep 2026 and no screen said so.
   Dept its services name), `portal_contacts` (each such client has a live portal login).
 - **The API ships codes, the screen ships words.** `gaps[].missing` is a closed vocabulary per
   line (documented on the schema); `id`/`ref` let the screen link the client or service.
+- **Nothing to check is not done (audit 2026-10-03, CA#15).** An empty firm read "4 of 8 done":
+  `reporting_lines` with no reporting-line check rule, `processes` with no live service, and
+  `account_team` / `portal_contacts` with no active client now answer `state: nothing_to_check`
+  (`done: false`), and the screen counts only the lines that apply. `done` stays on the wire.
+- **The first-week lines (2026-10-03), first in the order:** `company_details` (every firm
+  company, not archived or retired, has a country and a registered address), `time_zone` (not
+  done while UTC: it was every firm's default; `ref` offers the ONE zone the companies'
+  countries settle, never applied), `staff` (a second active staff login), `services` (a live
+  service) and `standard_terms` (a published clause; no letter can be written without one). No
+  line for the firm's GSTIN or PAN: there is nowhere to record them yet.
+
+**A NEW FIRM STARTS ON ITS COUNTRY'S CALENDAR WHEN THE COUNTRY SETTLES IT (F07).**
+`POST /internal/v1/tenants` takes optional `country` and `timeZone`: a named zone wins; else a
+country with ONE zone (`zoneForCountry`, IN -> Asia/Kolkata) sets it; else the firm stays on UTC
+and Setup asks. Never from the currency (a Dubai firm may keep rupee books). `tenant.created`
+records `timeZone` and `timeZoneFrom` (`provisioning` | `country` | `unset`). Existing firms were
+NOT moved: their zone is their call, and Setup flags UTC. The setting itself is on Your firm.
 
 ## Firm administration — the roster is the other half of access control
 
@@ -790,6 +832,45 @@ Letters already sent or signed keep their stored days.
 `tests/architecture/instant-format.test.ts` bans a bare `_at::date` across the adapters, beside
 the `_at::text` ban it already carried. Same family, same reason: **name the zone**.
 
+**THE AUDIT OF 2026-10-03 FOUND FIVE MORE UTC DAYS, ALL FIXED (fix/audit-dates).**
+- **Proposal expiry (B24):** every `isPastValidity` caller passed the UTC instant;
+  `ProposalService.firmToday` decides it on every path, the shared link included.
+- **Dashboard ageing and DSO (B29, 0328):** `crm.receivable_ageing` buckets on CURRENT_DATE,
+  the database session's day. The dashboard reads `crm.receivable_ageing_on(<firm's day>)`
+  (security invoker, the view's body); the view stays, unread, and
+  `tests/architecture/firm-day-reads.test.ts` bans it and CURRENT_DATE in the dashboard adapter.
+- **The chaser (B41):** its today and a lifted freeze's default day were the server's.
+- **Handlers (B44):** the decision queue and the portal-scope echo used `new Date()`;
+  `ObligationService.decisionDay` and `scopeFor(...).onDate` answer from the injected clock.
+- **Escalations (F11):** each row also ships `daysPastNow` = `daysPast` + days since `raisedOn`
+  on the firm's day; `daysPast` stays the record of the day it fired.
+- **Emails (CA#50):** letters FROM a firm (portal invite and welcome, staff welcome, proposal
+  decision notice) print times on the firm's clock, zone named in words; the sign-in and reset
+  letters belong to a global account and stay UTC.
+
+**A date is a real day (B43).** `domain/day.ts` `isCalendarDay` is the one check (split
+arithmetic, no `Date`); `isDay` and the shape-only `isIsoDate`s use it, and `mapError` answers
+SQLSTATE 22008/22007 as a 400 as the floor.
+
+**A job is never due after the legal date of its filings (CA#11).** `describeJobs.dueOn` is the
+earlier of the open tasks' date and `filingDueOn`, the earliest UNFILED filing of the same
+company for a rule on the engagement's service (or generated for it) in a period inside the
+job's; a period's umbrella task is created with the same cap (`earliestFilingDue`) and
+`isStatutoryDue` when the law's date won. Tasks created before keep their stored date.
+
+**Signing fills the calendar (CA#24).** `ObligationService.fillCalendar` (the sweep's own
+generate step: same window and floor, no task raised, nothing flagged) runs through the
+engagement use case's `CalendarFiller` port after a signature that made work active, so the
+calendar is not empty until tonight. A failure is swallowed; the sweep fills it.
+
+**Sweeps isolate firms and say so (B11, B13, B14, B16, B32).** The orchestrator sweep catches per
+firm and per job (`failed`, `failure`), dunning per firm, the chaser and nudge lists are ACTIVE
+firms only, the weekly advance digest releases its claim when every send failed, and
+`setup/sweep-log.ts` logs any `failure` at error first (the spawn sweep used to skip a failed
+report with nothing spawned). B54, measured: at 96 firms the slowest sweep (the nightly
+calendar) takes 2.8 s and the five-minute orchestrator walk 0.9 s, about 9 ms a firm; serial is
+fine at this size (see `bib/qa/audit-2026-10-03/fix-dates.md`).
+
 ## Migrations
 
 `migrations/NNNN_name.{up,down}.sql`, immutable once applied, fix forward with a new number.
@@ -1057,6 +1138,24 @@ long as the link is left alone. It names no firm, unlike the three unasked-for l
 it was asked for seconds ago and the account is GLOBAL (ADR-02) — naming one firm would say
 something false about which password is being reset.
 
+**A colleague's FIRST password is chosen on the welcome link (audit 2026-10-03, CA#38).** The
+welcome used to sign a new colleague in and stop; their only way to a password was "Email me a
+link to set one", which arrived as "Reset your BiB password" for a password they never had.
+Now `welcomeStaff` asks whether the account has a credential: with none, the letter's button is
+"Choose your password" and the link goes to `/auth/welcome`, whose form calls
+`POST /auth/magic-link/redeem` WITH a `password` (`redeemWelcome`: welcome purpose only, account
+with no password only, checked for length before the link is spent, then set + signed in in one
+call). "Skip" on that page is the same route without a password, so sign-in links stay the way
+in for anybody who skips. An account that already has a password (identity is global; a second
+firm's welcome) is sent to `/auth/magic-link` as before, and a password sent for it is refused
+`PASSWORD_ALREADY_SET` (409) WITHOUT spending the link. No new public route: the redeem route
+already proved the mailbox. The letter also names the colleague who added them (CA#50) and goes
+out under the firm's name, as the portal invite and welcome now do (CA#40, `fromName`).
+
+A wrong CURRENT password on `POST /auth/password` is `CURRENT_PASSWORD_INCORRECT` (400, "That is
+not your current password.") rather than the sign-in page's 401 "Email or password is
+incorrect" (F26): the form has no email box, and a 401 is what a screen reads as signed out.
+
 **`/auth/me` carries `hasPassword`** so the account screen offers the form that will work. It
 is the same rule the permissions list follows: most colleagues have never had a password, and
 showing all of them a change form whose only outcome is a 409 is the product discovering its
@@ -1091,6 +1190,30 @@ definition and each hash holds ~32 MB.
 The store is a port with an in-process implementation — **per-process, so behind N pods
 every limit is N times looser**. That is fine at one pod and is why the interface is async:
 Redis drops in unchanged.
+
+**The signed-in surface is counted per SESSION (audit 2026-10-03, B28 / F15 / CA#14).** Keying
+every request on the address put a whole office behind one NAT gateway in one 300-a-minute
+bucket, and the frontend read the resulting 429 on `/auth/me` as "signed out". Now:
+
+| Request | Bucket | Key |
+|---|---|---|
+| a sign-in route (`PUBLIC_PATHS`) | `auth` (10/min) | the address, as before |
+| `/api/v1/*` whose credential resolves | `general` (300/min) | `session:` + SHA-256 of the session id (`sessionRateLimit`, mounted straight after `sessionGuard`) |
+| `/api/v1/*` with no credential, or one that does not resolve | `general` | the address, charged AFTER the lookup failed; an address that has spent it is refused BEFORE the next lookup (`RateLimiter.peek`) |
+| `/internal`, `/health`, the docs | `general` | the address |
+
+The third row is what stops the session key being a way out of the limit: a credential is
+only known to be real after the lookup, so inventing a fresh cookie per request would
+otherwise buy a fresh bucket and a free lookup each time. Its cost is that an address which
+has spent its budget on bad credentials holds back everyone at it until the window clears,
+which is no worse than before. A real session's own requests never touch the address
+bucket. The numbers (`BIB_RATELIMIT_*`) did not move. Tests: `tests/api/auth-coverage.test.ts`
+"the rate limit keys a signed-in caller on the SESSION", `tests/platform/ratelimit.test.ts`
+"peeks without counting".
+
+One thing the session key does NOT bound: somebody who signs in N times holds N buckets.
+Sessions come from the sign-in routes, which stay on the address and the account budgets;
+if that ever matters, a per-USER key on the same middleware is the next step.
 
 ## The audit ledger
 
@@ -1344,8 +1467,9 @@ country in ONE transaction (`PostgresFirmEntityRepository`, reusing the party ad
 no role sitting in the CLIENT list; the three usual events are recorded after. A country another
 company already issues for is refused (`COUNTRY_ALREADY_SERVED`) rather than silently re-routed, and
 a company's registered country never moves (`JURISDICTION_FIXED`). `registered_address` is
-`{ "lines": [...] }` — the lines the firm prints, because the four countries do not agree on fields —
-stored and not printed yet (D15).
+`{ "lines": [...], "region", "postalCode" }` — the lines the firm prints, because the four countries
+do not agree on fields, plus the state and postal code a tax invoice names — and since 0334 it is
+PRINTED (see "Who a document is from and to" below).
 
 **One document, one issuer, one currency — deliberately kept** (D1). The lines are held to the
 document's currency by a composite key (0011), the firm invoices a client from one company, and a
@@ -1463,9 +1587,9 @@ one service across four companies (lines merge only when everything they print i
 company named once per section when every item covers the same ones and never on a one-company
 letter, lines priced on their own as a last section.
 
-**Not built, and said:** the firm's address and website in the footer (`registered_address` is a
-free-form record nothing writes a shape into), the signatory's phone, a page header, and fee
-groups on a PROPOSAL — a quote's lines carry across ungrouped and are grouped on the letter.
+**Not built, and said:** the signatory's phone, a page header, and fee groups on a PROPOSAL — a
+quote's lines carry across ungrouped and are grouped on the letter. (The firm's address, contact
+and registration numbers print under its name since 0334, below.)
 
 ## The proposal as a document — "Proposal For Services" (0084)
 
@@ -1585,6 +1709,12 @@ staff route can match them: `shared/decision` would have collided with `{proposa
 deployment (bib-qa: a personal Gmail, display name "10xcrm"). The user chose the firm's own
 mailbox; until its SMTP login is set, a proposal emailed from bib-qa comes from that Gmail under
 the firm's name. A second firm on one deployment would need a sender per firm — not built.
+**Every letter sent FOR a firm goes out under the firm's display name (CA#12, audit 2026-10-03):**
+the proposal, the portal invite, both welcomes, the decision notice and the weekly advances
+summary set `fromName`; only the sign-in link and the password reset, which belong to an account
+with no one firm, keep `BIB_MAIL_FROM_NAME`. So that setting should be the PRODUCT's name on a
+deployment that serves more than one firm, never one firm's. Per-firm addresses or domains wait for
+Sid and Anish (infrastructure).
 
 **Not built:** a confirmation copy to the client, reminders before expiry, a notice on first open,
 and a portal-authenticated answer.
@@ -1638,12 +1768,46 @@ claims them. `tests/render/anchors.test.ts` hashes a render with and without col
 document with and without anchor keys: equal both ways. `tests/render/layout.test.ts` is
 untouched and still matches its pinned hashes.
 
-**Rupees in lakhs on the PROPOSAL.** `wholeMoney` prints INR as "INR 12,50,000" (regrouped from
-the western string by `inLakhs`, never asked of `en-IN`: a Node built with small ICU answers that
-as en-US, which would make the bytes depend on the machine). Safe because a sent proposal keeps
-its pinned PDF. **Letters and invoices still group the western way** ("INR 1,250,000.00"): a
-signed letter must re-render byte for byte and `layout.test.ts` pins their hashes. Changing them
-is open, and is a decision about every issued letter's re-render.
+**Money: one formatter, the screens' shape (audit 2026-10-03, B19 / CA#49).** `documentMoney`
+(`domain/render/money.ts`) writes every amount on a document drawn since 0334: "₹12,50,000" in lakhs
+for rupees, "AED 5,000" with its code for every other currency, paise only when there are some, and
+always two places on a tax invoice ("₹5,900.00"). Digits regrouped by hand, never `Intl` and never
+a JS number (bytes must not depend on the machine's ICU). A letter or an invoice that went out
+BEFORE 0334 keeps the western "INR 1,250,000.00" it was issued in, recognised by having no
+`printed_parties` (below), and `layout.test.ts` still pins the classic letter and the invoice
+unchanged: the renderer only draws what a document carries, and everything new is opt-in.
+
+## Who a document is from and to (audit 2026-10-03, 0334)
+
+The "Tax Invoice" printed two names and nothing else; letters printed "Registered in IN".
+
+- **What is held.** A firm company's registered address gains its state and postal code; its tax
+  registration (GSTIN in India, held to the GSTIN's shape; TRN in the UAE; EIN in the US; a VAT
+  number elsewhere), PAN (India only), phone and email are the company's own PARTY IDENTIFIERS, set
+  from `PATCH /firm-entities/{id}` (each write voids the one in force; a value another party holds
+  is refused, writing nothing). A client has `core.party.billing_address` (`PATCH /parties/{id}`,
+  CA#22). Same jsonb shape both sides (`domain/party/address.ts`).
+- **One reading.** `crm.print_identity(party, day)`: name, address (billing, else registered),
+  country, the identifiers in force (tax registration, PAN, company number, phone, email), website.
+- **Frozen when it goes out.** `printed_parties` on `crm.invoice` and `crm.engagement_letter` is
+  written by the issuing (sending) statement from that reading on the firm's day, and a trigger
+  refuses it any other write. A draft reads live. A rename or a new address after issue does not
+  reach an issued invoice's paper. NULL on a document already out = the print before 0334.
+- **What prints.** The invoice's From and Billed to blocks (address, state and country BY NAME,
+  GSTIN or the country's tax number, PAN, the firm's phone and email) and the total in words
+  ("Indian Rupees ... Only", lakhs and crores for rupees); the letter's letterhead under the
+  company's name; the proposal's at the foot of every page after the cover.
+- **Not printed, and waiting for the firm (Sid):** CGST/SGST/IGST, SAC codes, place of supply,
+  bank details, LUT, e-invoicing. A credit note has no PDF at all yet.
+
+**And the rest of the documents cluster (audit 2026-10-03):** a draft (a `draft_copy`, or a copy
+drawn while its record was a draft) is never shared with the client (`DRAFT_NOT_SHAREABLE`, B10);
+a draft is dated on the firm's day, as Send or Issue will date it, in the preview and the draft
+copy alike (B42); a rendered PDF is named "Invoice draft - <client>.pdf", "Invoice INV-2026-27-0001
+- <client>.pdf" (CA#56); an Annexure letter with nothing on its cover page is not sent
+(`LETTER_HAS_NO_BODY`, checked in `send()` only, never in the hash a signature verifies, CA#2); a
+Summary of Fees kept on one page with its heading and total, and a 34pt logo, on proposals and on
+letters drawn since 0334 (CA#60).
 
 ## Invoicing — the one number in this product that may not gap (T3.4)
 
@@ -1652,22 +1816,35 @@ A proposal reference may gap: `PR-2026-0007` missing means somebody abandoned a 
 Indian GST a series must be consecutive, and an auditor who finds one missing is entitled to
 read it as a suppressed sale.
 
-So `InvoiceRepository.create` **both allocates and writes**, and the signature is the
-guarantee. The mechanism is a counter row taken under `SELECT … FOR UPDATE` inside the same
-transaction as the insert: a second writer blocks until the first commits or rolls back, and
-a rollback releases the number because the counter never moved. **Never a sequence** —
-`nextval` survives rollback by design, which is what makes it wrong here and unfixable
-afterwards. Never `max(number)+1`, which reads a snapshot.
+**The number is drawn at ISSUE, not at the draft (0322).** It used to be drawn when the draft
+was created, so an automatic draft a firm then cancelled left a cancelled number in the series,
+which is why the billing desk only ever wrote bills. GST's consecutive-serial rule is about
+ISSUED tax invoices, and a draft is not one (Tally and Zoho number at issue too). Now
+`InvoiceRepository.create` writes an UNNUMBERED draft (its financial year there is only
+provisional) and `InvoiceRepository.issue` **both allocates and writes**: the next number of
+the series of the ISSUE DATE's year (audit 2026-10-03, B03, 0326), in the same transaction as
+the status change. The
+mechanism is a counter row taken under `SELECT … FOR UPDATE`: a second writer blocks until the
+first commits or rolls back, and a rollback releases the number because the counter never
+moved. **Never a sequence** — `nextval` survives rollback by design, which is what makes it
+wrong here and unfixable afterwards. Never `max(number)+1`, which reads a snapshot. A draft
+cancelled before issue spends nothing and stays unnumbered; drafts made before 0322 keep the
+number they drew (removing it would leave the gap this exists to prevent). CHECKs: number and
+`sequence_number` both or neither, and an issued invoice is always numbered. Screens and APIs
+treat `number: null` as "Draft". `tests/invoice/numbering.integration.test.ts` (24) proves it.
 
 The series is per **(entity, financial year)**, because two of a firm's companies each file
 their own returns and each owes its own consecutive series. Both correctly issue
 `INV/2026-27/0001`, which is why `UNIQUE` is scoped to `(tenant, entity, number)`; the
 `prefix` on the series row is how a firm tells them apart when it wants to. The financial
-year is 1 April and that is hardcoded — right for India, wrong for the UK and the US, and
-generalising it through `core.legal_entity.financial_year_end` would make a series' year
-depend on a mutable column, which is a decision a firm has to take.
+year is the FIRM's (its compliance policy's `fiscalYearStartMonth`), else 1 April as before;
+read at issue, so changing it moves only numbers not yet drawn. A year starting in January is
+labelled as one year (`INV/2027/0001`). It is per firm, not per company: a firm whose
+companies keep different years (an Indian April year beside a Gulf calendar year) numbers all
+of them on the firm's, which is a decision still to take.
 
-**The number, the series and an issued invoice's money are frozen by a trigger**, not by a
+**The number, the series and an issued invoice's money are frozen by a trigger** (0322 admits
+one change: an empty number filled in the same write that issues the draft), not by a
 service check — "why is invoice 41 now numbered 43" is a question an auditor asks, and an
 application rule is one an import or a psql session walks past. A wrong invoice is CANCELLED
 and reissued; the cancelled row stays in the sequence saying so, which is exactly what shows
@@ -1693,6 +1870,50 @@ invoice number an auditor cannot account for. **Its reason is mandatory and clos
 without it the numbers always reconcile and *why* money came off does not — and "how much did
 we write off to service failures" is a GROUP BY, which free text cannot answer. The reason
 travels in the ledger payload for the same reason.
+
+## Invoice correctness (audit 2026-10-03, billing cluster; 0325-0327)
+
+Every rule below came from the audit of 3 October 2026 (`bib/qa/audit-2026-10-03/`,
+`fix-billing.md`), each with a test.
+
+- **Whole minor units (B02, 0325).** `crm.invoice_line_amount` rounds each line's gross, net
+  and tax (on the rounded net) half up to the currency's minor unit
+  (`crm.currency_minor_unit`: INR 2, JPY 0, KWD 3), at scale 4 on the wire; every total is a
+  sum of rounded lines. Before, tax kept four places and 0.003 stayed owed for ever.
+- **Positions among live lines (B04/B36, 0326)**: a partial unique index; `addLine` holds the
+  invoice row before `MAX(position)+1`.
+- **The year at issue (B03)**, above. A credit note is dated between its invoice's issue and
+  today (`CREDIT_NOTE_DATE_OUT_OF_RANGE`, B45) and numbered in its own date's year.
+- **Money on it, no cancelling (B05, 0326)**: `INVOICE_HAS_PAYMENTS`; a trigger refuses it too,
+  and the payment guard reads the invoice `FOR SHARE`. Reverse a mistaken payment first.
+- **Outstanding means issued (B22, 0326)**: `crm.invoice_balance.outstanding` is 0 for a draft or
+  a cancelled invoice; approving a credit hold over nothing owed is `DUNNING_NOTHING_OWED`; the
+  portal policy admits only invoices that were issued (F06).
+- **A credit note on an advance (B06/B15)** gives back only what bills have not taken
+  (`CREDIT_EXCEEDS_UNUSED_ADVANCE`), checked in the writing transaction under the invoice row
+  and the advance's advisory lock.
+- **The rate (B07)**: required when the currency is not the reporting one (`FX_RATE_REQUIRED`),
+  exactly 1 otherwise (`FX_RATE_NOT_ONE`).
+- **Due dates (B20/B21, 0327)**: `PUT /invoices/{id}/due-date` on a draft (today or later);
+  issue refuses a due date before the issue date (`DUE_BEFORE_ISSUE`); the firm's own payment
+  terms `tenancy.tenant.invoice_due_days` (NO default) fill an empty due date at issue.
+- **The desk** raises in ONE transaction (`raiseAtomically`, B34), lets a claim go only with its
+  token (B35), pages forward past 60 periods (B23), says when "Bill from" is before the work
+  started (CA#35), and the invoice read suggests a manual line's tax (`taxSuggestions`, CA#5).
+- **Quantity is how many each billing period** (the user, 2026-10-03, F03): a monthly line bills
+  quantity x fee x (1 - discount) every month. The screens say so; the demo seed uses 1.
+- The payment `reference` stays out of the ledger (`hasReference`, B26).
+- **A number drawn before 0322 is never renumbered (B51, the user, 2026-10-03).** Such a draft
+  issues as it is while its number is in order, and is refused otherwise
+  (`INVOICE_NUMBER_OUT_OF_ORDER`, 409: "Cancel this draft and raise it again: the new draft is
+  numbered when it is issued"). Out of order (`preDrawnNumberOrder`, domain): a later number of
+  its series (same company, same year) carries an issue date, issued or issued and cancelled
+  since (a later draft cancelled before issue does not count); or today's issue date is in
+  another financial year than its series. Decided in `issue` under the series' row lock, the
+  lock an unnumbered issue takes, so nothing can be issued between the check and the write
+  (`tests/invoice/predrawn.integration.test.ts` holds that lock and watches the issue wait).
+  The invoice read carries `issueBlocked` (the refusal's own sentence) so the screen says it
+  where Issue is offered.
 
 ## Billing by company — the one dashboard figure cut by MONTH (Wave 5, 2026-09-29)
 
@@ -1723,6 +1944,169 @@ currencies and cannot share an axis).
 - Proven in `tests/dashboard/revenue.integration.test.ts` (two companies, a credit note, a
   cancelled invoice, a draft, a USD invoice from the Gulf company, a second firm behind the wall)
   and `revenue.test.ts` (the month cut at 00:30 IST on 1 October, the assembly).
+
+## The advance and the final bill (auto-invoice phase 2, 0320)
+
+Phase 1 (0318/0319, `bib/prompts/auto-invoice/PLAN.md`) writes a `crm.billing_due` per period of
+recurring work and a person raises the invoice. 0320 gives a bill a `kind`: `period`, `advance` or
+`final`. The rules, each the firm's (Ashish) or the user's, 2026-10-01:
+
+- **Every advance is a GST tax invoice.** (0320 made its payment start the work; 0322 took that
+  away, see the next section.) The "Record advance" tick and its
+  route are GONE. Signing writes an ADVANCE BILL (`AdvanceBiller`, through the engagement use case's
+  `AdvanceBilling` port; the daily billing queue catches up every firm's letters still owing one,
+  WHATEVER the auto-billing switch says). A
+  letter has ONE advance for the whole of it or one per service (`engagement_letter_line.advance_amount`,
+  never on a grouped line), never both: refused by the service (`ONE_KIND_OF_ADVANCE`,
+  `INVALID_LINE_ADVANCE`) and by a trigger each way. The amount is BEFORE tax. An advance bill is
+  raised on an invoice of its own and cannot be skipped.
+- **The gate (`AdvanceGate`, Approve start, `MoneyMovedListener`, `recordAdvance`) is REMOVED in
+  0322.** Paid in full used to release the work and a part payment waited for an admin's Approve
+  start; since 0322 nothing waits on the money.
+- **The final bill** of a one-time service (or one-time fee group) is written when its job is DONE
+  (the orchestrator's `jobDone` port; the daily queue catches up), dated the day it finished, at the
+  letter's price. A service with no process has a job that never finishes, so **Bill it now** writes
+  it today. Finals follow the firm's switch; advances do not.
+- **FIFO, before tax.** `crm.advance_pool` (a view) is what is left of each advance on an ISSUED
+  invoice: its line's net, less credit notes at their pre-tax share, less what bills took (counted
+  while raised or covered). Raising a period or final bill takes from the service's own advance, else
+  the letter's, earliest bill first, and the line bills the BALANCE in words that name the fee, the
+  advance and its invoice. A bill the advance pays in full gets NO invoice (`covered`), because even a
+  zero invoice draws a gapless number. The take is re-checked in the write under
+  `pg_advisory_xact_lock` on the advance invoice, so two raises cannot both spend the last of it.
+- **The refund.** Once everything an advance covered is finished (ended with its last period billed,
+  or one-time with its final bill raised, covered or skipped) and no bill of it is open, what is left
+  is on "To refund": a credit note on the advance invoice, reason `advance_refund`, for the remainder
+  with its share of the tax (worked out in SQL, capped at what the invoice still carries). The money
+  goes back as a negative payment, as any refund. A firm may keep it instead, with a reason.
+- `crm.billing_due` now names an engagement letter, so it is the fourth entry in the signed-letter
+  freeze test's `NOT_TERMS`: what the letter CAUSED, written after the signature.
+
+## The advance starts the work, and is chased (0322, 2026-10-02)
+
+Ashish changed the rule (client fact, verbatim in `bib/prompts/auto-invoice/NEXT-SESSION.md`): the
+advance invoice is created as a DRAFT and the jobs start at once; the SPOC, the Key Manager and the
+partner are reminded on the dashboard while it is a draft or unpaid; once a week it escalates to the
+CEO/COO by notification and email. *"generally it comes within 5 to 15 days of starting of work"*.
+The user's calls the same night (memory `bib-auto-invoice-answers-2026-10-01`, SESSION 5):
+
+- **Signing = every engagement `active` + the advance DRAFTED** (`EngagementService.sign` →
+  `AdvanceBiller.billAdvances`; DocuSign, recorded acceptance and the client import all go through
+  `sign`). The draft's tax rate: the last rate invoiced on that work, else the ISSUING COMPANY's
+  default (`crm.issuer_tax_default`, Your firm); neither = no draft, the bill waits under To raise
+  with `draftBlocked: no_tax_rate`, never a guessed 0%. Drafting draws no number (see Invoicing).
+- **Catch-up at deploy** (`AdvanceBiller.catchUp`, in the daily billing queue): letters left in
+  `pending_advance` start their work (`startWaitingWork`, ledger
+  `engagement_letter.work_started_before_advance`) and get a draft, EXCEPT where an issued invoice
+  already bills that work on no bill (`handRaised`, told apart by two instants, never a zone-less
+  day): no draft, an admin Links it.
+- **Where an advance stands** (`advanceStage`, pure): `not_raised` (no invoice, or its draft was
+  cancelled) · `on_draft` · `unpaid` · `part_paid` · `paid` (money arrived and nothing owed, 0321's
+  rule). `advanceReminder`: pending until paid; `pendingSince` = signing (no invoice or a draft) or
+  the issue (unpaid); **Overdue** at the firm's `advance_draft_overdue_days` (3) or
+  `advance_unpaid_overdue_days` (15); `overdueOn` = that day, which My day dates the row by;
+  **escalated** 7 days after signing (`ADVANCE_ESCALATE_AFTER_DAYS`).
+- **Who is reminded** (`AdvanceDesk`, adapter `advance-reminders.ts`): the client's SPOCs for the
+  advance's Depts (in force, active staff), its Key Manager, and the PARTNER = the first person up the
+  Key Manager's `reports_to` chain whose grade rank is at least the firm's `advance_partner_min_rank`
+  (9, the default ladder's Director; a recursive CTE, depth 20). `GET /billing/advances?mine=true`
+  answers only the pending advances the caller chases, each with `duties`
+  (`spoc`/`key_manager`/`partner`/`admin`); an admin gets those waiting for an admin (`not_raised`,
+  `on_draft`) or escalated.
+- **The weekly summary** (`AdvanceDigest`): queue `billing.advance-digest` on
+  `BIB_WORKER_ADVANCE_DIGEST_CRON` (hourly); a firm's summary is due ON its `advance_digest_weekday`
+  from its `advance_digest_hour` in ITS zone (`digestDueOn`), never caught up on another day. The
+  week is CLAIMED first (`crm.advance_digest`, one row per firm per week), then ONE email per admin
+  (`is_administering_role`) listing every advance still pending 7+ days after signing; a reader who
+  may not see fees gets no amounts. Ledger `tenant.advance_digest_sent`. Sent through `SmtpMailer`
+  (`setup/mailer.ts`, shared with the server): the worker needs the SMTP settings too (Terraform
+  `run_worker.tf` + `iam.tf`, DEPLOY NOTE for Anish).
+- **Settings** (`GET/PUT /billing/settings`, PUT `tenant:admin`): a partial body, any of
+  `autoBilling`, `advancePolicy` (the whole policy, validated by `advancePolicyProblem`; ledger
+  `tenant.advance_policy_set`) and `taxDefaults` (rows sent are set, 0 to 100; a company left out
+  keeps its rate; ledger `tenant.tax_default_set`).
+- **Client dunning is unchanged**: an issued advance invoice is chased like any invoice.
+- **Low review items with it**: a one-time service whose jobs were ALL cancelled is billed like one
+  with no process (Bill it now), and a cancelled job never holds a final bill back (item 11);
+  `/billing/dues` applies `mine` and the default status (`pending` = open or drafted; `all` = history,
+  newest first) IN SQL before `LIMIT 5000` (14a), and leaves advances out of `mine` (they have their
+  own reminders).
+- Tests: `tests/billing/advance.test.ts`, `advance-flow.test.ts`, `advance.integration.test.ts`
+  (catch-up, auto-draft, AdvanceDesk on real SQL, digest claim), `sweep.integration.test.ts`,
+  `tests/invoice/numbering.integration.test.ts`. Walk: `bib/demo-assets/tools/ai-adv-walk.mjs`.
+
+## Billing safeguards: what the end-to-end review found (0321, 2026-10-02)
+
+Three review agents (code, regressions, a live probe on two firms) found ten real defects in
+0318-0320; all fixed, each with a test (unit, and `advance.integration.test.ts` 0321 blocks).
+
+- **A bill is CLAIMED before it is settled** (`billing_due.claimed_at`, 2 minutes then free).
+  Raise claims its bills AND the advance bills they take from, re-reads them, then draws the
+  number; link, skip, refund and keep claim too. A second request gets `BILL_BUSY` (409) with
+  nothing numbered. It closed: two raises of one bill = two invoices; two raises spending one
+  advance; a double-click refund crediting twice.
+- **Link**: never onto another bill's ADVANCE invoice (that money is the advance), and an advance
+  bill is linked only by `tenant:admin` (`ADVANCE_LINK_NEEDS_ADMIN`, 403), to an invoice no other
+  bill is on: a paid invoice starts the work. An associate linked an old paid invoice and started
+  work with no advance (and created a phantom advance).
+- **An advance raised again after its invoice was cancelled** moves the bills that took from it
+  onto the new invoice (`markInvoiced`, same transaction): the same advance came off twice.
+  `OPEN_DUE_SQL` now matches the read (a covered bill is open once its advance invoice is not
+  issued), so raising it no longer drew an orphan number.
+- **Paid means money arrived**: a credit note zeroing an unpaid advance is `unpaid`, not `paid`
+  (it started the work and logged "paid").
+- **An advance nothing waits on may be skipped** (`advanceHoldsWork` on the bill); refunds carry
+  `paid` so the screen pays back only what was received.
+- **Final bills** are written automatically only for work finished on/after
+  `tenant.auto_billing_since` (set on every switch-on; backfilled to the deploy day) and never for
+  an engagement a hand-raised line already bills. Switching on billed every audit ever finished.
+- **Raise amounts**: above zero; a priced bill billed at another figure only by a login that sees
+  fees (`PRICE_NOT_VISIBLE`, 403), both figures in the `billing_due.invoiced` payload.
+- **No amounts in invoice line text** ("…, less advance (INV/…)"): the description reached logins
+  the fee axis hides prices from.
+- **Dates**: an `on_date` before the first period moves forward by whole spans; a period that has
+  not begun is never billed; a schedule's first invoice may not precede its first period; years
+  2000-2099.
+- **Skipping is a permission**, `billing:skip` (Partner and Manager by default, 0321 re-publishes
+  untouched default roles), the user's call: "permission bana do iski and jispe woh hogi woh kr
+  skata with a reason".
+
+## Revenue by manager (auto-invoice T4, 2026-10-02, no migration)
+
+Ashish: "invoices come under the manager's name and revenue is tracked by manager". The manager
+is `crm.invoice.manager_user_id` (0318), set from the bills when raised, or picked by a person,
+and frozen at issue. `GET /api/v1/dashboard/revenue/by-manager?months=12` (1 to 24), behind the
+fee axis like the rest of `/dashboard`.
+
+- **BILLED** is "Billing by company"'s definition, document for document and rounded the same way,
+  grouped by manager instead of company. Proven: the managers of a month add up to the
+  `by-company` whole-firm total to the paisa (`revenue-by-manager.integration.test.ts`).
+- **COLLECTED** (the user asked for it beside billed; the definition is mine, industry standard)
+  is CASH: payments on the manager's issued invoices by `received_on`, WITH tax, at the invoice's
+  stored rate. A bounced cheque or a refund is a negative payment and comes off its own month.
+  Payments on an invoice cancelled since go with it, as every figure drops a cancelled invoice.
+- **OUTSTANDING** is owed NOW, from `crm.receivable_ageing`, the rows "Owed to the firm" sums,
+  so the managers add up to it (proven). Not cut by month: a balance is a state.
+- **Everything in the reporting currency**, every document at its own stored rate: a manager's
+  revenue in INR, AED and USD has to be one number, and no rate is ever looked up today.
+- **One row names nobody** (`userId: null`): invoices raised before 0318, a hand-raised one with
+  no manager, a bill that found none. Listed, not dropped, so the table adds up to the firm. No
+  backfill: an issued invoice's manager is frozen, and a guessed one would be wrong.
+- **Who is a "manager" is whoever invoices name.** A firm's ladder is its own config, so the
+  list is everybody with something in the window or something owed, never "ranks 5 to 8".
+  `activeStaff: false` keeps a leaver's revenue under their name. Names come FROM the membership
+  (behind the wall), never straight from the global `user_account`: an id from another firm gets
+  no name.
+- **`financialYearStartMonth`** rides along (the compliance policy's, null when unset), so the
+  screen can offer "this financial year" in any country instead of assuming April.
+- **The manager a PERSON names is checked** (`MANAGER_NOT_STAFF`, 409): the column's key reaches
+  the global `user_account`, so without it another firm's user could be credited. The raise
+  dialog sends `managerUserId` (preselected to the client's Key Manager on the screen); a draft's
+  manager changes with `PUT /invoices/{id}/manager` (`invoice.manager_set`; issued:
+  `INVOICE_MANAGER_FROZEN`, 409), because a wrong pick should not need a cancelled invoice.
+  The billing desk passes `managerFromBills: true` and is
+  NOT checked: those managers were resolved from the firm's own SPOCs, and a manager who has
+  left since still earned that period, so refusing would leave the bill stuck.
 
 ## Who a commercial document names — the client, not merely the firm (F-10-1, 0306)
 
@@ -2665,6 +3049,64 @@ falls behind.
 runs AHEAD of constraint validation, so `enforce_work_item_state_facts` catches a cross-tenant
 state BEFORE the composite foreign key does, and answers with a sentence naming the state and
 the firm. Both defences are real; the trigger is the outer one.
+
+### The review loop, the checklist, notes and the filing a task files (audit 2026-10-03, work cluster, 0330)
+
+The roleplay walked a task from an article's desk to a manager's approval and found the loop
+open at both ends. What changed, and where:
+
+- **Approving FINISHES the task (CA#28).** `decideReview` → `followDecision` moves an approved
+  task to `completedState` (active, terminal AND `isSuccess`, first by the firm's order), through
+  the same `move` a hand move takes, so `completedAt`, `work_item.completed` and the compliance
+  calendar's `reconcileFiling` all follow. A send-back moves a task sitting in the firm's "with a
+  checker" state to `reworkState` (active, not initial, terminal, blocked or under review: the
+  seed's In Progress). A finished or cancelled task is never moved by a decision, and a firm with
+  no such state keeps the old behaviour. `work_item.state_changed` carries `byReviewDecision`.
+  This supersedes the old screen comment that approval must not pick a terminal state:
+  `isSuccess` (0054) is exactly what tells Completed from Cancelled.
+- **The checklist is a gate (CA#30), the way a step's sub-steps hold Done.** `requestReview`, a
+  move INTO a successful terminal state, and Approve refuse `CHECKLIST_OPEN` (409) naming the open
+  lines (`openChecklistLines`). Cancelling is not held; Send back never is. A line that does not
+  apply is removed (an unticked line can be).
+- **A task is checked under the FIRM's rule (CA#27).** A task names no rule (no template step), and
+  absent used to mean maker != checker alone, so an Analyst approved another Analyst's GSTR-3B at a
+  firm whose rule was "Manager review". Now absent means: the firm's ONE published rule
+  (`ReviewPolicySource.publishedPolicies`), pinned as before; several is `REVIEW_RULE_NEEDED`
+  (400) naming them, and the sender picks; none is maker != checker alone. `GET
+  /api/v1/review-rules` (`party:read`) lists them by label. WAITS FOR SID: with two rules (manager
+  review and EQCR), should ad-hoc work default to one of them?
+- **A task sent for review is no longer "Not Started" (F28).** With no "with a checker" state
+  flagged (0073's shipped default), a task still in its STARTING state moves to `reworkState`.
+  0073's promise not to read "Under Review" as a mechanism is untouched.
+- **Notes (0330).** `delivery.work_item_note`: one person's sentence at one moment, APPEND-ONLY
+  (`bib_app` holds SELECT and INSERT; UPDATE and DELETE revoked), RLS, composite key to the task,
+  not blank by 0308's definition, at most 2,000 characters. `POST /work-items/{id}/notes`
+  (`work:write`); the detail read carries `notes` oldest first with the author's name.
+  `work_item_approval.request_note` is what the maker says when sending (`requestReview` takes
+  `note`). The ledger gets `work_item.note_added` with the note's id ONLY: note text never enters
+  the log. Notes live on the items repository (`addNote` / `listNotes`), beside the checklist.
+- **Sent back shows on the maker's desk (CA#29).** A board row carries `sentBack` (`{ notes,
+  decidedAt, decidedByName }`): the latest DECIDED review was a send-back, none is open, the task is
+  not finished; a lateral on `RECORD_SELECT`. `/my-steps` rows carry the same for a step
+  (`StepApprovalRepository.sentBackFor`, one `DISTINCT ON` read per desk).
+- **A task raised by hand can file a filing (CA#36).** The join already existed:
+  `obligation_instance.work_item_id`, the column the calendar's raised task uses. `PUT
+  /work-items/{id}/filing { obligationId }` writes a hand-raised task there
+  (`ObligationService.linkWorkItem`, refused in words for another company's filing, one filed,
+  withdrawn, decided or with its own task, and for a task already filing another); completing it
+  files the filing through `reconcileFiling`, a task already done files it at once, and the raise
+  pass raises no second task. `DELETE` unlinks while unfiled; `GET` lists the linked filing and
+  the company's open ones (entity, else the task's client). `obligation.work_linked` /
+  `obligation.work_unlinked` carry the task id and the statutory date. The `ObligationFiling` port
+  is built once for both processes in `setup/filing-link.ts`. **A process JOB finishing still files
+  nothing by itself**: a filing is filed by its own task (raised, or linked by hand). Whether
+  finishing the GST job should file its GSTR-1 and GSTR-3B is a design question with Sid, not built.
+- `WorkItemCheckRow` carries `entityPartyId` / `entityName` (F32), so a check row names the company
+  the work is for.
+
+`tests/workitem/service.test.ts`, `model.test.ts`, `notes.integration.test.ts`,
+`review-rules.integration.test.ts`, `my-day-reads.integration.test.ts`,
+`tests/obligation/service.test.ts`, `task-link.integration.test.ts`, `tests/verification/queue.test.ts`.
 
 ## Work always has an owner — the owner rule (Shrestha, 2026-09-27, 0311)
 
@@ -4247,3 +4689,27 @@ a partial unique index, which is what makes a duplicate capture *append* rather 
 Capture goes through `PartyService` behind the lead use case's own `ProspectDirectory` port,
 so prospects get the same validation and the same `party.created` events as any other party.
 A lead has no timeline table: its history is the ledger.
+
+## Audit 2026-10-03, the UX cluster: rules that came out of it
+
+- **A country is one of the 249 codes ISO 3166-1 assigns today** (`domain/country.ts`).
+  `isJurisdiction` (lead, territory rules, proposal and letter lines, firm companies, documents)
+  requires one, and so do filing rules, a client's registration and the import's Country and Where
+  columns. A retired or reserved code (DD, UK, SU, YU…) is refused with `countryCodeProblem()`,
+  which names what was meant ("For Germany, use DE"). Two capital letters is no longer enough: a
+  dead code is silently matched by no rule. Config bodies' `jurisdictions` arrays are NOT checked
+  against the list yet (published bodies are frozen; the screens only offer real codes).
+- **A refused amount says what is wrong with it** (`amountProblem()` in `domain/money`): "The
+  amount cannot be 0.", "The tax rate cannot be more than 100%.". The wire rule (decimal strings)
+  is unchanged; it is just not what a person is told.
+- **A lead's contact person** (`CaptureLeadInput.contact`, CA#20): with one named on a company
+  prospect, the email and phone go on a PERSON linked to the company in a contact's role, and the
+  company keeps the PAN and GSTIN. Dedup follows the person to the company through that
+  relationship, and a detail an older capture put on the company still matches the company.
+- **A relationship must be able to be true** (`relationshipFits`): nobody is a director or
+  shareholder OF a person, only a person is an employee or signatory, a parent and a subsidiary
+  are both companies. A company as a director is allowed (some countries allow it).
+- **Duplicate identifiers name the holder** ("The email x is already recorded on Acme…"), never
+  "for this tenant". The shipped rule pack's notes no longer speak as one firm; the pack KEY
+  (`in-firm-sheet@2026.08`) is unchanged because it is part of the seeding conflict key, and the
+  frontend prints it as words.

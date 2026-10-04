@@ -21,13 +21,15 @@ import { PostgresInvoiceRepository } from "../../src/infrastructure/postgres/inv
 import { PostgresEventStore } from "../../src/infrastructure/postgres/event-repository";
 import { LedgerService } from "../../src/usecase/ledger/service";
 import { InvoiceService } from "../../src/usecase/invoice/service";
+import { PostgresInvoiceFirmSettings } from "../../src/infrastructure/postgres/invoice-settings";
 import { PostgresFirmTimeZone } from "../../src/infrastructure/postgres/firm-timezone-repository";
 import { PostgresDocumentRepository } from "../../src/infrastructure/postgres/document-repository";
 import { PostgresPartyRepository } from "../../src/infrastructure/postgres/party-repository";
 import { systemIds } from "../../src/platform/ids";
-import { systemClock } from "../../src/platform/clock";
+import { FakeClock } from "../../src/testfakes/clock";
 import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
 import { FakeIssuedCopies } from "../../src/testfakes/invoice";
+import { FakeStaffDirectory } from "../../src/testfakes/lead";
 
 const cfg = load();
 const app = postgres(cfg.db.appUrl, { max: 4 });
@@ -41,10 +43,15 @@ const service = new InvoiceService({
   firmEntities: new PostgresDocumentRepository(app),
   parties: new PostgresPartyRepository(app),
   ids: systemIds,
-  clock: systemClock,
+  // PINNED (audit 2026-10-03): an invoice and a credit note are numbered in
+  // the year of the day they are issued, and these tests name FY 2026-27. On
+  // the real clock they would go red on 1 April 2027.
+  clock: new FakeClock(new Date("2026-10-03T06:30:00Z")),
   events: ledger,
   // No document store here: these tests are about the money and the series.
   issuedCopies: new FakeIssuedCopies(),
+  staff: new FakeStaffDirectory(),
+  settings: new PostgresInvoiceFirmSettings(app),
 });
 
 const stamp = Date.now().toString(36);
@@ -92,7 +99,6 @@ async function issued(amount = "10000", tax = "0"): Promise<string> {
       fxRate: "1",
       fxRateDate: "2026-07-01",
       seriesDate: "2026-07-01",
-      dueOn: "2026-07-31",
     },
     SYSTEM_ACTOR,
   );
@@ -114,17 +120,14 @@ describe("the two series do not interleave", () => {
     // invoice number missing because a credit note took it.
     const first = await issued();
     const credit = await service.issueCreditNote(
-      { tenantId: tenant, invoiceId: first, amount: "1000", reason: "goodwill", issuedOn: "2026-07-05" },
+      { tenantId: tenant, invoiceId: first, amount: "1000", reason: "goodwill" },
       SYSTEM_ACTOR,
     );
     expect(credit.number).toBe("CN/2026-27/0001");
 
-    // The invoice series carried on regardless.
-    const second = await service.raise(
-      { tenantId: tenant, partyId: client, entityPartyId: entity, currency: "INR", fxRate: "1", fxRateDate: "2026-07-01", seriesDate: "2026-07-01" },
-      SYSTEM_ACTOR,
-    );
-    expect(second.sequenceNumber).toBe(2);
+    // The invoice series carried on regardless: the next one ISSUED is 2 (0322).
+    const second = await repo.find(tenant, await issued());
+    expect(second?.sequenceNumber).toBe(2);
 
     // …and the two counters are two rows, which is what the key change bought.
     const rows = await owner<{ document_type: string; last_number: number }[]>`
@@ -144,7 +147,7 @@ describe("the two series do not interleave", () => {
     await Promise.all(
       Array.from({ length: 4 }, () =>
         service.issueCreditNote(
-          { tenantId: tenant, invoiceId: invoice, amount: "1000", reason: "goodwill", issuedOn: "2026-07-05" },
+          { tenantId: tenant, invoiceId: invoice, amount: "1000", reason: "goodwill" },
           SYSTEM_ACTOR,
         ),
       ),
@@ -195,7 +198,7 @@ describe("a credit note, once issued, says what it says", () => {
   it("refuses to restate the amount or the reason", async () => {
     const invoice = await issued();
     const credit = await service.issueCreditNote(
-      { tenantId: tenant, invoiceId: invoice, amount: "1000", reason: "service_failure", issuedOn: "2026-07-05" },
+      { tenantId: tenant, invoiceId: invoice, amount: "1000", reason: "service_failure" },
       SYSTEM_ACTOR,
     );
     for (const patch of [
@@ -232,7 +235,7 @@ describe("the balance is arithmetic, done by the database", () => {
       SYSTEM_ACTOR,
     );
     await service.issueCreditNote(
-      { tenantId: tenant, invoiceId: invoice, amount: "1800", reason: "billing_error", issuedOn: "2026-07-11" },
+      { tenantId: tenant, invoiceId: invoice, amount: "1800", reason: "billing_error" },
       SYSTEM_ACTOR,
     );
     const balance = await service.balanceOf(tenant, invoice);
@@ -280,6 +283,57 @@ describe("the balance is arithmetic, done by the database", () => {
   });
 });
 
+describe("an invoice adds up to whole paise (B02, 0325)", () => {
+  // The audit found drafts totalling 91,354.833: tax was rounded to four places,
+  // the PDF printed two, the client paid the printed figure and 0.003 stayed
+  // "owed" for ever, so reminders, dunning and the advance escalation never
+  // stopped. Each line's net and tax are rounded to the currency's minor unit,
+  // and a total is the sum of those rounded lines.
+  it("lets a client who pays the printed total owe exactly nothing", async () => {
+    // A pro-rata bill of 27,419.35 at 18%: tax 4,935.483 unrounded.
+    const invoice = await issued("27419.35", "18");
+    const before = await service.balanceOf(tenant, invoice);
+    expect(before.invoiced).toBe("32354.8300");
+
+    const record = await service.describe(tenant, invoice);
+    expect(record.lines.map((l) => [l.net, l.tax])).toEqual([["27419.3500", "4935.4800"]]);
+    expect(record.totals.total).toBe("32354.8300");
+
+    await service.recordPayment(
+      { tenantId: tenant, invoiceId: invoice, amount: "32354.83", receivedOn: "2026-07-10", method: "bank_transfer" },
+      SYSTEM_ACTOR,
+    );
+    expect((await service.balanceOf(tenant, invoice)).outstanding).toBe("0.0000");
+    const receivables = await service.outstanding(tenant);
+    expect(receivables.map((r) => r.balance.invoiceId)).not.toContain(invoice);
+  });
+
+  it("totals the rounded lines, never a rounding of the unrounded sum", async () => {
+    // Two lines of 0.25 at 18%: 0.045 of tax each, 0.05 each once rounded, so
+    // the invoice's tax is 0.10 (the sum of what each line prints), not 0.09.
+    const draft = await service.raise(
+      { tenantId: tenant, partyId: client, entityPartyId: entity, currency: "INR", fxRate: "1", fxRateDate: "2026-07-01", seriesDate: "2026-07-01" },
+      SYSTEM_ACTOR,
+    );
+    for (const description of ["Stamp", "Courier"]) {
+      await service.addLine({ tenantId: tenant, invoiceId: draft.id, description, quantity: "1", unitAmount: "0.25", taxPercent: "18" });
+    }
+    const totals = (await service.describe(tenant, draft.id)).totals;
+    expect([totals.net, totals.tax, totals.total]).toEqual(["0.5000", "0.1000", "0.6000"]);
+  });
+
+  it("rounds to the currency's own minor unit: none for yen", async () => {
+    const draft = await service.raise(
+      { tenantId: tenant, partyId: client, entityPartyId: entity, currency: "JPY", fxRate: "0.56", fxRateDate: "2026-07-01", seriesDate: "2026-07-01" },
+      SYSTEM_ACTOR,
+    );
+    await service.addLine({ tenantId: tenant, invoiceId: draft.id, description: "Filing", quantity: "1", unitAmount: "1235", taxPercent: "10" });
+    const totals = (await service.describe(tenant, draft.id)).totals;
+    // 123.5 of tax is 124 yen; there is no such thing as half a yen on a bill.
+    expect([totals.tax, totals.total]).toEqual(["124.0000", "1359.0000"]);
+  });
+});
+
 async function lastNumber(documentType: string): Promise<number> {
   const [row] = await owner<{ last_number: number }[]>`
     SELECT last_number FROM crm.invoice_series
@@ -288,3 +342,121 @@ async function lastNumber(documentType: string): Promise<number> {
   `;
   return row?.last_number ?? 0;
 }
+
+describe("a draft's lines can be struck off and added again (B04, B36)", () => {
+  async function draftWith(lines: number): Promise<string> {
+    const draft = await service.raise(
+      { tenantId: tenant, partyId: client, entityPartyId: entity, currency: "INR", fxRate: "1", fxRateDate: "2026-07-01", seriesDate: "2026-07-01" },
+      SYSTEM_ACTOR,
+    );
+    for (let i = 1; i <= lines; i += 1) {
+      await service.addLine({ tenantId: tenant, invoiceId: draft.id, description: `Line ${String(i)}`, quantity: "1", unitAmount: "100" });
+    }
+    return draft.id;
+  }
+
+  it("adds a line after the last line was struck off", async () => {
+    // The unique position counted STRUCK lines too: strike line 2, add one, and
+    // the new line took position 2 again and failed with a duplicate key.
+    const draft = await draftWith(2);
+    const [, second] = await service.describe(tenant, draft).then((r) => r.lines);
+    if (second === undefined) throw new Error("no second line");
+    await service.removeLine(tenant, draft, second.line.id);
+
+    const added = await service.addLine({ tenantId: tenant, invoiceId: draft, description: "Again", quantity: "1", unitAmount: "50" });
+    expect(added.position).toBe(2);
+    const lines = (await service.describe(tenant, draft)).lines.map((l) => [l.line.position, l.line.description]);
+    expect(lines).toEqual([[1, "Line 1"], [2, "Again"]]);
+  });
+
+  it("gives eight lines added at once eight positions", async () => {
+    // MAX()+1 inside the INSERT reads a snapshot under READ COMMITTED: two adds
+    // at once both took the same position and one surfaced as a 500.
+    const draft = await draftWith(0);
+    await Promise.all(
+      Array.from({ length: 8 }, (_, i) =>
+        service.addLine({ tenantId: tenant, invoiceId: draft, description: `Line ${String(i)}`, quantity: "1", unitAmount: "10" }),
+      ),
+    );
+    const positions = (await service.describe(tenant, draft)).lines.map((l) => l.line.position);
+    expect(positions).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+  });
+});
+
+describe("an issued invoice with money on it is not cancelled (B05, 0326)", () => {
+  it("refuses through the service, in plain words, and leaves it issued", async () => {
+    const invoice = await issued("50000");
+    await service.recordPayment(
+      { tenantId: tenant, invoiceId: invoice, amount: "50000", receivedOn: "2026-07-10", method: "bank_transfer" },
+      SYSTEM_ACTOR,
+    );
+    const refused = await service.cancel(tenant, invoice, SYSTEM_ACTOR).catch((e: unknown) => e);
+    expect(refused).toMatchObject({ code: "INVOICE_HAS_PAYMENTS" });
+    expect((await repo.find(tenant, invoice))?.status).toBe("issued");
+  });
+
+  it("refuses in the database too, for a session that walks past the service", async () => {
+    const invoice = await issued("1000");
+    await service.recordPayment(
+      { tenantId: tenant, invoiceId: invoice, amount: "1000", receivedOn: "2026-07-10", method: "cash" },
+      SYSTEM_ACTOR,
+    );
+    const err = await owner`UPDATE crm.invoice SET status = 'cancelled' WHERE id = ${invoice}`.catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("23001");
+  });
+
+  it("cancels once a mistaken payment has been reversed", async () => {
+    const invoice = await issued("1000");
+    for (const amount of ["1000", "-1000"]) {
+      await service.recordPayment(
+        { tenantId: tenant, invoiceId: invoice, amount, receivedOn: "2026-07-10", method: "cash" },
+        SYSTEM_ACTOR,
+      );
+    }
+    expect((await service.cancel(tenant, invoice, SYSTEM_ACTOR)).status).toBe("cancelled");
+  });
+});
+
+describe("a cancelled invoice owes nothing, in the view itself (B22, 0326)", () => {
+  it("reads outstanding 0 on the balance once cancelled, and on a draft", async () => {
+    const invoice = await issued("7080");
+    expect((await service.balanceOf(tenant, invoice)).outstanding).toBe("7080.0000");
+    await service.cancel(tenant, invoice, SYSTEM_ACTOR);
+    const after = await service.balanceOf(tenant, invoice);
+    expect(after.invoiced).toBe("7080.0000");
+    expect(after.outstanding).toBe("0");
+
+    const draft = await service.raise(
+      { tenantId: tenant, partyId: client, entityPartyId: entity, currency: "INR", fxRate: "1", fxRateDate: "2026-07-01" },
+      SYSTEM_ACTOR,
+    );
+    await service.addLine({ tenantId: tenant, invoiceId: draft.id, description: "Not sent", quantity: "1", unitAmount: "500" });
+    expect((await service.balanceOf(tenant, draft.id)).outstanding).toBe("0");
+  });
+});
+
+describe("the due date on a real database (B20, B21, 0327)", () => {
+  it("sets a draft's due date, and an invoice issued with none takes the firm's terms", async () => {
+    const draft = await service.raise(
+      { tenantId: tenant, partyId: client, entityPartyId: entity, currency: "INR" },
+      SYSTEM_ACTOR,
+    );
+    await service.addLine({ tenantId: tenant, invoiceId: draft.id, description: "Advisory", quantity: "1", unitAmount: "100" });
+    const far = "2099-01-31";
+    expect((await service.setDueDate(tenant, draft.id, far, SYSTEM_ACTOR)).dueOn).toBe(far);
+    expect((await service.setDueDate(tenant, draft.id, null, SYSTEM_ACTOR)).dueOn).toBeNull();
+
+    // The firm says 15 days; nothing was typed on the draft.
+    await owner`UPDATE tenancy.tenant SET invoice_due_days = 15 WHERE id = ${tenant}`;
+    try {
+      const issuedOne = await service.issue(tenant, draft.id, SYSTEM_ACTOR);
+      const [row] = await owner<{ gap: number }[]>`
+        SELECT (due_on - issued_on)::int AS gap FROM crm.invoice WHERE id = ${draft.id}
+      `;
+      expect(row?.gap).toBe(15);
+      expect(issuedOne.dueOn).not.toBeNull();
+    } finally {
+      await owner`UPDATE tenancy.tenant SET invoice_due_days = NULL WHERE id = ${tenant}`;
+    }
+  });
+});

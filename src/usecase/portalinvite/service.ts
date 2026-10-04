@@ -45,6 +45,7 @@ import type {
   PortalContactIdentity,
   PortalContactMemberships,
   PortalFirmDirectory,
+  PortalFirmTimeZone,
 } from "./ports";
 
 /** The audience a portal invitation is for, spelled once. A typo in the one
@@ -57,6 +58,8 @@ interface Deps {
   readonly memberships: PortalContactMemberships;
   readonly access: PortalContactAccess;
   readonly firms: PortalFirmDirectory;
+  /** Optional: without it the letter says UTC, as before (CA#50). */
+  readonly timeZones?: PortalFirmTimeZone;
   /** `invite` records nothing of its own — the three writes under it each emit
    *  their own event. `resend` writes nothing, so without this it would be the
    *  only act in the product that mails a credential outside the firm and
@@ -165,6 +168,7 @@ export class PortalInviteService {
     const expiresAt = await this.deps.identity.invitePortalContact(
       membership.userId,
       names.get(input.tenantId) ?? null,
+      await this.firmZone(input.tenantId),
     );
 
     return {
@@ -229,6 +233,7 @@ export class PortalInviteService {
     const sent = await this.deps.identity.resendPortalInvite(
       membership.userId,
       names.get(input.tenantId) ?? null,
+      await this.firmZone(input.tenantId),
     );
 
     await this.deps.events.recordEvent({
@@ -248,5 +253,10 @@ export class PortalInviteService {
       userId: membership.userId,
       expiresAt: sent.expiresAt,
     };
+  }
+
+  /** The firm's zone for the letter's expiry, or null for UTC (CA#50). */
+  private async firmZone(tenantId: string): Promise<string | null> {
+    return this.deps.timeZones === undefined ? null : this.deps.timeZones.timeZoneFor(tenantId);
   }
 }

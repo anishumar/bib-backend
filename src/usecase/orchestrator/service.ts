@@ -77,6 +77,7 @@ import type {
   CheckerDirectory,
   PendingCheck,
   StepApprovalRepository,
+  StepSentBack,
   VerificationPolicySource,
 } from "../verification/ports";
 import type {
@@ -155,6 +156,11 @@ export interface Deps {
   readonly ids: IdGen;
   readonly clock: Clock;
   readonly events: EventSink;
+  /** Billing, told when a job is done (0320): a one-time service's final bill
+   *  falls due then. Optional; the daily billing sweep catches up regardless. */
+  readonly jobDone?: {
+    jobDone(input: { readonly tenantId: string; readonly jobId: string }, actor: Actor): Promise<unknown>;
+  } | null;
 }
 
 /**
@@ -248,16 +254,40 @@ export interface WalkReport {
    *  them. NOT an error — see `NoTemplatePublished`. Counted so the worker's
    *  log says how much work is waiting on a partner rather than on the engine. */
   readonly awaitingTemplate: number;
+  /** Jobs this tick could not move for a reason nobody expected. */
+  readonly failed?: number;
+  /** Why: the firm could not be visited at all, or the first job that failed
+   *  and its id. Set only when something failed; the worker logs it. */
+  readonly failure?: string;
 }
 
 export class OrchestratorService {
   constructor(private readonly deps: Deps) {}
 
-  /** Every firm, one after another. The outer loop of the worker's third sweep. */
+  /**
+   * Every firm, one after another. The outer loop of the worker's third sweep.
+   *
+   * ONE FIRM'S FAILURE NEVER STOPS THE OTHERS (audit 2026-10-03, B11). This
+   * loop had no catch, so an error in firm #3 left firms #4..N with no step
+   * moved on every tick until somebody fixed #3. It is caught per firm and
+   * REPORTED, never swallowed: the worker logs `failure` at error.
+   */
   async sweep(actor: Actor = SYSTEM_ACTOR): Promise<readonly WalkReport[]> {
     const reports: WalkReport[] = [];
     for (const tenantId of await this.deps.tenants.activeTenantIds()) {
-      reports.push(await this.walkForTenant(tenantId, actor));
+      try {
+        reports.push(await this.walkForTenant(tenantId, actor));
+      } catch (err) {
+        reports.push({
+          tenantId,
+          started: 0,
+          advanced: 0,
+          awaitingPeople: 0,
+          completed: 0,
+          awaitingTemplate: 0,
+          failure: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
     return reports;
   }
@@ -272,12 +302,16 @@ export class OrchestratorService {
     let awaitingPeople = 0;
     let completed = 0;
     let awaitingTemplate = 0;
+    let failed = 0;
+    let failure: string | undefined;
 
     for (const job of jobs) {
       // One firm's broken job must not stop the rest of that firm's work, let
       // alone every other firm's. The two expected refusals are counted and
-      // carried on from; anything else is re-thrown, because a bug that gets
-      // swallowed in a worker is a bug nobody ever hears about.
+      // carried on from. Anything else is counted and REPORTED (the first one,
+      // with its job's id) rather than re-thrown: re-throwing stopped every
+      // later job of the firm on every tick (B11), and a bug swallowed in a
+      // worker is one nobody hears about, so the report carries it to the log.
       let outcome;
       try {
         outcome = await this.advance(tenantId, job, actor);
@@ -286,7 +320,9 @@ export class OrchestratorService {
           awaitingTemplate += 1;
           continue;
         }
-        throw err;
+        failed += 1;
+        failure ??= `job ${job.id}: ${err instanceof Error ? err.message : String(err)}`;
+        continue;
       }
       started += outcome.started ? 1 : 0;
       advanced += outcome.advanced;
@@ -294,7 +330,15 @@ export class OrchestratorService {
       completed += outcome.completed ? 1 : 0;
     }
 
-    return { tenantId, started, advanced, awaitingPeople, completed, awaitingTemplate };
+    return {
+      tenantId,
+      started,
+      advanced,
+      awaitingPeople,
+      completed,
+      awaitingTemplate,
+      ...(failure === undefined ? {} : { failed, failure }),
+    };
   }
 
   /**
@@ -1111,6 +1155,15 @@ export class OrchestratorService {
   /** Every open step on one person's desk, across the firm's jobs. */
   async myOpenSteps(tenantId: string, userId: string): Promise<readonly JobStep[]> {
     return this.deps.steps.listOpenForUser(tenantId, userId);
+  }
+
+  /**
+   * Of these steps, the ones a checker sent back and nobody has done again
+   * (audit 2026-10-03, CA#29), with the note: what My day says as "Sent back
+   * to you". One read for the whole desk.
+   */
+  async sentBackSteps(tenantId: string, stepIds: readonly string[]): Promise<readonly StepSentBack[]> {
+    return this.deps.checks.sentBackFor(tenantId, stepIds);
   }
 
   /** Who may do a step: active staff inside its band, for a hand-over picker. */
@@ -2259,6 +2312,16 @@ export class OrchestratorService {
         skipped: steps.filter((s) => s.status === "skipped").length,
       },
     });
+    // The final bill of a one-time service is due now (0320). After the job is
+    // done and never undoing it: a failure here is caught up by the sweep.
+    const billing = this.deps.jobDone ?? null;
+    if (billing !== null) {
+      try {
+        await billing.jobDone({ tenantId, jobId: job.id }, actor);
+      } catch {
+        // Deliberately swallowed: see above.
+      }
+    }
     return true;
   }
 }

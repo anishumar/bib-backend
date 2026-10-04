@@ -8,7 +8,7 @@
 // proven in tests/deletion/deletion.integration.test.ts.
 import { describe, expect, it } from "vitest";
 import { EngagementService } from "../../src/usecase/engagement/service";
-import { makeEngagementFakes } from "../../src/testfakes/engagement";
+import { makeEngagementFakes, writeOpening } from "../../src/testfakes/engagement";
 import type { QuotedProposal } from "../../src/usecase/engagement/ports";
 import {
   LetterDeleted,
@@ -71,6 +71,7 @@ async function completeTerms(s: ReturnType<typeof setup>, id: string): Promise<v
     discountPercent: "0",
   });
   await s.service.addClause(TENANT, id, SCOPE_CLAUSE);
+  await writeOpening(s.prose, TENANT, id);
 }
 
 function quote(over: Partial<QuotedProposal["proposal"]> = {}): QuotedProposal {

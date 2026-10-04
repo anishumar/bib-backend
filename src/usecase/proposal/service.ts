@@ -81,6 +81,7 @@ import {
   ProseEdited,
   UnpricedLineHasDiscount,
   UnpricedLineNeedsReason,
+  ServiceHasNoListPrice,
   NotADraft,
   NotAService,
   ProposalExpired,
@@ -463,8 +464,8 @@ export class ProposalService {
     let source = await this.deps.proposals.findById(tenantId, proposalId);
     if (source === null) throw new ProposalNotFound(proposalId);
     if (source.deletedAt !== null) throw new ProposalDeleted(source.ref);
-    const now = this.deps.clock.now().toISOString();
-    if (source.status === "sent" && isPastValidity(source.validUntil, now)) {
+    const today = await this.firmToday(tenantId);
+    if (source.status === "sent" && isPastValidity(source.validUntil, today)) {
       await this.expire(source, actor);
       source = { ...source, status: "expired" };
     }
@@ -493,7 +494,7 @@ export class ProposalService {
         currency: source.currency,
         fxRate: source.fxRate,
         fxRateDate: source.fxRateDate,
-        ...(source.validUntil !== null && !isPastValidity(source.validUntil, now)
+        ...(source.validUntil !== null && !isPastValidity(source.validUntil, today)
           ? { validUntil: source.validUntil }
           : {}),
         ...(source.background === null ? {} : { background: source.background }),
@@ -916,13 +917,7 @@ export class ProposalService {
     }
 
     checkQuantity(input.quantity);
-    const unitAmount = input.unitAmount ?? null;
     const pricingNote = blankToNull(input.pricingNote);
-    checkPricing(unitAmount, pricingNote, input.discountPercent);
-
-    const jurisdiction = this.lineJurisdiction(input.jurisdiction);
-    const billingFrequency = this.statedBillingFrequency(input.billingFrequency);
-    const oopEstimate = this.outOfPocket(input.oopEstimate);
 
     // Resolve the pin BEFORE writing, so a bad version id is a 400 naming the
     // id rather than a foreign-key violation surfacing as a 500.
@@ -933,6 +928,26 @@ export class ProposalService {
     if (pinned === null) throw new ServiceNotFound(input.serviceVersionId);
     if (pinned.kind !== "service") throw new NotAService(input.serviceVersionId, pinned.kind);
     if (pinned.status === "draft") throw new ServiceNotPublished(input.serviceVersionId);
+
+    // NEITHER A FEE NOR A REASON: quoted at the pinned version's list price in
+    // the proposal's currency (B09, audit 2026-10-03). A login that cannot see
+    // fees reads every list price as null, and the builder used to fill the
+    // fee in from it; the API does that now, so the drafter is never shown the
+    // price and the quote is the same. With no price to quote, the refusal says
+    // what to send.
+    let unitAmount = input.unitAmount ?? null;
+    if (unitAmount === null && pricingNote === null) {
+      const service = readServiceBody(pinned.body);
+      if (service.listPrice === null || service.listPrice.currency !== proposal.currency) {
+        throw new ServiceHasNoListPrice(service.name === "" ? input.description : service.name, proposal.currency);
+      }
+      unitAmount = service.listPrice.amount;
+    }
+    checkPricing(unitAmount, pricingNote, input.discountPercent);
+
+    const jurisdiction = this.lineJurisdiction(input.jurisdiction);
+    const billingFrequency = this.statedBillingFrequency(input.billingFrequency);
+    const oopEstimate = this.outOfPocket(input.oopEstimate);
 
     // A new line is a discount raised from nothing: past the limit after a
     // sign-off, the sign-off no longer covers the draft (T6.18).
@@ -1161,7 +1176,7 @@ export class ProposalService {
     // proposal past its date counting as the expired one it is about to become.
     const lapsed =
       proposal.status === "sent" &&
-      isPastValidity(proposal.validUntil, this.deps.clock.now().toISOString());
+      isPastValidity(proposal.validUntil, await this.firmToday(tenantId));
     const copyRefusal =
       proposal.deletedAt !== null
         ? new ProposalDeleted(proposal.ref)
@@ -1392,7 +1407,7 @@ export class ProposalService {
     const request = email === undefined ? null : this.checkEmail(email);
 
     const now = this.deps.clock.now().toISOString();
-    if (proposal.status === "sent" && isPastValidity(proposal.validUntil, now)) {
+    if (proposal.status === "sent" && isPastValidity(proposal.validUntil, await this.firmToday(tenantId))) {
       await this.expire(proposal, actor);
       throw new ProposalExpired(proposal.validUntil ?? now.slice(0, 10));
     }
@@ -1440,7 +1455,7 @@ export class ProposalService {
     if (shared === null) throw new ShareLinkUnknown();
 
     const now = this.deps.clock.now().toISOString();
-    if (shared.status === "sent" && isPastValidity(shared.validUntil, now)) {
+    if (shared.status === "sent" && isPastValidity(shared.validUntil, await this.firmToday(parsed.tenantId))) {
       // Lazy expiry, the same rule the staff path uses — the link is simply the
       // other place somebody first touches a lapsed proposal.
       const proposal = await this.deps.proposals.findById(parsed.tenantId, shared.id);
@@ -1497,7 +1512,7 @@ export class ProposalService {
       throw new AlreadyAnswered(proposal.status);
     }
     const now = this.deps.clock.now().toISOString();
-    if (proposal.status === "sent" && isPastValidity(proposal.validUntil, now)) {
+    if (proposal.status === "sent" && isPastValidity(proposal.validUntil, await this.firmToday(tenantId))) {
       await this.expire(proposal, actor);
       throw new ProposalExpired(proposal.validUntil ?? now.slice(0, 10));
     }
@@ -1577,7 +1592,7 @@ export class ProposalService {
   ): Promise<{ readonly filename: string; readonly bytes: Uint8Array }> {
     const { tenantId, proposal } = await this.openLink(token);
     const now = this.deps.clock.now().toISOString();
-    if (proposal.status === "sent" && isPastValidity(proposal.validUntil, now)) {
+    if (proposal.status === "sent" && isPastValidity(proposal.validUntil, await this.firmToday(tenantId))) {
       await this.expire(proposal, actor);
       throw new ProposalExpired(proposal.validUntil ?? now.slice(0, 10));
     }
@@ -1610,11 +1625,11 @@ export class ProposalService {
     const proposal = await this.findOrThrow(tenantId, proposalId);
     if (proposal.deletedAt !== null) throw new ProposalDeleted(proposal.ref);
 
-    const today = this.deps.clock.now().toISOString();
+    const today = await this.firmToday(tenantId);
     if (proposal.status === "sent" && isPastValidity(proposal.validUntil, today)) {
       await this.expire(proposal, actor);
       // validUntil is non-null whenever isPastValidity is true.
-      throw new ProposalExpired(proposal.validUntil ?? today.slice(0, 10));
+      throw new ProposalExpired(proposal.validUntil ?? today);
     }
 
     if (!canTransition(proposal.status, decision)) {
@@ -1668,7 +1683,7 @@ export class ProposalService {
     const proposal = await this.findOrThrow(tenantId, proposalId);
     if (proposal.deletedAt !== null) throw new ProposalDeleted(proposal.ref);
     const now = this.deps.clock.now().toISOString();
-    if (proposal.status === "sent" && isPastValidity(proposal.validUntil, now)) {
+    if (proposal.status === "sent" && isPastValidity(proposal.validUntil, await this.firmToday(tenantId))) {
       await this.expire(proposal, actor);
       throw new ProposalExpired(proposal.validUntil ?? now.slice(0, 10));
     }
@@ -1843,6 +1858,16 @@ export class ProposalService {
 
   /** A share token, resolved the way `viewShared` resolves one: malformed,
    *  unknown and withdrawn are one answer. */
+  /**
+   * The firm's calendar day (audit 2026-10-03, B24). A proposal's `validUntil`
+   * is a date the FIRM wrote, so it lapses when that day ends where the firm
+   * is: on the UTC day an Indian firm's quote stayed acceptable until 05:30
+   * the next morning, and a US firm's lapsed on the evening of its last day.
+   */
+  private async firmToday(tenantId: string): Promise<string> {
+    return dayInZone(this.deps.clock.now().toISOString(), await this.deps.timeZones.timeZoneFor(tenantId));
+  }
+
   private async openLink(
     token: string,
   ): Promise<{ readonly tenantId: string; readonly digest: string; readonly proposal: Proposal }> {
@@ -1916,6 +1941,8 @@ export class ProposalService {
         decidedAt: decided.decidedAt ?? this.deps.clock.now().toISOString(),
         declinedReason,
         proposalUrl: this.deps.links.staffUrl(decided.id),
+        timeZone: await this.deps.timeZones.timeZoneFor(decided.tenantId),
+        firmName: record.firmName,
       })
       .catch(() => undefined);
   }

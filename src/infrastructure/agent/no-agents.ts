@@ -52,7 +52,7 @@ export class NoAgentsBuiltYet implements AgentRuntime {
       done: false,
       note:
         `no agent is built for step ${JSON.stringify(input.stepKey)}. This step is a person's ` +
-        `until one exists — change nothing, or set the step's executor to "human" on the ` +
+        `until one exists: change nothing, or set the step's executor to "human" on the ` +
         `template to say so plainly.`,
     });
   }

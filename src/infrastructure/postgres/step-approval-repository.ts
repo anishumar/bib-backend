@@ -17,8 +17,10 @@ import type {
   NewStepApproval,
   PendingCheck,
   StepApprovalRepository,
+  StepSentBack,
 } from "../../usecase/verification/ports";
 import { lockStepWithSubStepsSettled, openReviewPoints, openSubSteps } from "./step-lines";
+import { isoInstant } from "./instant";
 
 interface ApprovalRow {
   id: string;
@@ -261,6 +263,42 @@ export class PostgresStepApprovalRepository implements StepApprovalRepository {
         ORDER BY a.submitted_at
       `;
       return rows.map(toCheck);
+    });
+  }
+
+  /**
+   * The steps sent back and not done again (CA#29), for a desk in one read:
+   * per step, the latest DECIDED check, kept only when it was a send-back and
+   * no check on the step is open.
+   */
+  async sentBackFor(tenantId: string, jobStepIds: readonly string[]): Promise<readonly StepSentBack[]> {
+    if (jobStepIds.length === 0) return [];
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<
+        { job_step_id: string; decision: string; notes: string | null; decided_at: string; decided_by_name: string | null }[]
+      >`
+        SELECT DISTINCT ON (a.job_step_id)
+               a.job_step_id, a.decision, a.notes,
+               ${db.unsafe(isoInstant("a.decided_at", "decided_at"))},
+               u.display_name AS decided_by_name
+        FROM delivery.step_approval a
+        LEFT JOIN tenancy.user_account u ON u.id = a.decided_by
+        WHERE a.job_step_id IN ${db(jobStepIds)}
+          AND a.decision <> 'pending'
+          AND NOT EXISTS (
+            SELECT 1 FROM delivery.step_approval o
+             WHERE o.job_step_id = a.job_step_id AND o.tenant_id = a.tenant_id
+               AND o.decision = 'pending')
+        ORDER BY a.job_step_id, a.decided_at DESC, a.submitted_at DESC
+      `;
+      return rows
+        .filter((r) => r.decision === "rejected")
+        .map((r) => ({
+          jobStepId: r.job_step_id,
+          notes: r.notes,
+          decidedAt: r.decided_at,
+          decidedByName: r.decided_by_name,
+        }));
     });
   }
 }

@@ -1638,7 +1638,7 @@ export function registerObligationRoutes(app: OpenAPIHono<AppEnv>, deps: Obligat
     // learnt this the hard way: a panel opened at 04:11 in Delhi read the
     // previous day's answer, and here that would understate how late a filing
     // is by one on every row, every morning.
-    const today = asOf ?? new Date().toISOString().slice(0, 10);
+    const today = await deps.service.decisionDay(s.tenantId, asOf);
     return c.json(
       {
         rows: rows.map((r) => ({

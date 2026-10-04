@@ -143,19 +143,21 @@ describe("payments", () => {
     ).rejects.toBeInstanceOf(InvalidPaymentMethod);
   });
 
-  it("record the bank's reference and not the free-text note", async () => {
-    // The reference is the counterparty's own machine identifier and is what a
-    // reconciliation dispute turns on. The note is prose a person wrote, and
-    // this log cannot be erased.
+  it("keep the free-text reference and note out of the ledger (B26, audit 2026-10-03)", async () => {
+    // A UPI reference is very often a phone number ("98…@ybl"), and this log
+    // cannot be erased. The reference stays on the payment row, where it can
+    // be; the event says only whether there was one.
     const s = setup();
     const id = await issuedInvoice(s);
-    await s.service.recordPayment(
-      { tenantId: TENANT, invoiceId: id, amount: "1000", receivedOn: "2026-07-10", method: "bank_transfer", reference: "UTR-99881", note: "Priya rang to confirm" },
+    const payment = await s.service.recordPayment(
+      { tenantId: TENANT, invoiceId: id, amount: "1000", receivedOn: "2026-07-10", method: "upi", reference: "9876543210@ybl", note: "Priya rang to confirm" },
       ACTOR,
     );
     const event = s.events.recorded.find((e) => e.verb === "payment.recorded");
-    expect(event?.payload).toMatchObject({ reference: "UTR-99881", method: "bank_transfer" });
+    expect(event?.payload).toMatchObject({ method: "upi", hasReference: true });
+    expect(JSON.stringify(event?.payload)).not.toContain("9876543210");
     expect(JSON.stringify(event?.payload)).not.toContain("Priya");
+    expect(payment.reference).toBe("9876543210@ybl");
   });
 });
 
@@ -172,12 +174,9 @@ describe("credit notes", () => {
     );
     expect(credit.number).toBe("CN/2026-27/0001");
     expect(credit.sequenceNumber).toBe(1);
-    // The invoice series is untouched — the next invoice is still 0002.
-    const next = await s.service.raise(
-      { tenantId: TENANT, partyId: CLIENT, entityPartyId: ENTITY, currency: "INR", fxRate: "1", fxRateDate: "2026-07-01" },
-      ACTOR,
-    );
-    expect(next.number).toBe("INV/2026-27/0002");
+    // The invoice series is untouched — the next invoice issued is still 0002.
+    const next = await s.invoices.find(TENANT, await issuedInvoice(s));
+    expect(next?.number).toBe("INV/2026-27/0002");
   });
 
   it("reduce what is outstanding", async () => {
@@ -282,5 +281,38 @@ describe("who owes the firm money", () => {
     // The JOIN the collections screen needs: whose debt, and which invoice.
     expect(receivables[0]?.party.displayName).not.toBe("");
     expect(receivables[0]?.number).toMatch(/^INV\//);
+  });
+});
+
+describe("an invoice with money on it is not cancelled (B05, audit 2026-10-03)", () => {
+  // Cancelling an issued invoice that had been paid orphaned the payment: the
+  // receivables and the list drop a cancelled invoice, the bill behind it
+  // re-opened, and the money received was attached to nothing.
+  it("refuses, in plain words, and says what to do instead", async () => {
+    const s = setup();
+    const id = await issuedInvoice(s);
+    await s.service.recordPayment(
+      { tenantId: TENANT, invoiceId: id, amount: "4000", receivedOn: "2026-07-10", method: "upi" },
+      ACTOR,
+    );
+    const refused = await s.service.cancel(TENANT, id, ACTOR).catch((e: unknown) => e);
+    expect(refused).toMatchObject({ code: "INVOICE_HAS_PAYMENTS" });
+    expect((refused as Error).message).toContain("credit note");
+    expect((refused as Error).message).toContain("4,000.00");
+    expect((await s.invoices.find(TENANT, id))?.status).toBe("issued");
+  });
+
+  it("allows it once the payment has been reversed to nothing", async () => {
+    const s = setup();
+    const id = await issuedInvoice(s);
+    await s.service.recordPayment(
+      { tenantId: TENANT, invoiceId: id, amount: "4000", receivedOn: "2026-07-10", method: "cheque" },
+      ACTOR,
+    );
+    await s.service.recordPayment(
+      { tenantId: TENANT, invoiceId: id, amount: "-4000", receivedOn: "2026-07-12", method: "cheque" },
+      ACTOR,
+    );
+    expect((await s.service.cancel(TENANT, id, ACTOR)).status).toBe("cancelled");
   });
 });

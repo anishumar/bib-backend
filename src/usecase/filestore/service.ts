@@ -20,6 +20,7 @@ import {
   hasCopyOfRecord,
   isSubjectKind,
   normaliseMediaType,
+  renderedFilename,
   safeFilename,
 } from "../../domain/filestore/model";
 import {
@@ -30,6 +31,7 @@ import {
   BytesMissing,
   ContentTooLarge,
   DocumentNotFound,
+  DraftNotShareable,
   EmptyContent,
   InvalidFilename,
   InvalidTitle,
@@ -406,6 +408,12 @@ export class FileStoreService {
     // screen offering the control at all has the answer, and a second error
     // code for a state the UI cannot reach is a code nobody handles.
     if (!record) throw new DocumentNotFound(input.documentId);
+    // B10: refused in the write itself, so nothing moved. Named by the title
+    // the firm sees on the row.
+    if (record === "draft") {
+      const doc = await this.get(input.tenantId, input.documentId);
+      throw new DraftNotShareable(doc.document.title);
+    }
 
     await this.deps.events.recordEvent({
       tenantId: input.tenantId,
@@ -569,13 +577,26 @@ export class FileStoreService {
       throw new NotRenderable(input.kind, ["engagement_letter", "invoice", "proposal"]);
     }
 
+    // A DRAFT IS DRAWN AS IT WILL GO OUT, on the firm's day (B42, audit
+    // 2026-10-03): dated today on the firm's calendar, as Send or Issue will
+    // date it, never the day it was first saved on Greenwich's. The same
+    // description the preview draws, so the draft copy on file and the pages
+    // on the screen agree. A record already out is described as it stands.
+    const asIfSentOn = dayInZone(
+      this.deps.clock.now().toISOString(),
+      await this.deps.timeZones.timeZoneFor(input.tenantId),
+    );
     const source = await this.deps.renderSource.describe({
       tenantId: input.tenantId,
       kind: input.kind,
       subjectRef: input.subjectRef,
+      asIfSentOn,
     });
     if (source === null) throw new SourceNotFound(input.kind, input.subjectRef);
     const described = source.document;
+    // A draft invoice has no number until it is issued (0322); its page prints
+    // "Draft" where the number goes, which is no name for a file.
+    const number = source.unnumbered === true ? null : described.reference;
 
     // WHAT THIS COPY IS (2026-09-29, `hasCopyOfRecord`). An invoice or a
     // letter still in draft is printed as the firm's own DRAFT copy, which its
@@ -583,8 +604,11 @@ export class FileStoreService {
     // record and there is never a second: refused BEFORE anything is drawn or
     // stored.
     let role: string = RENDERED_ROLE.rendered;
-    let title = `${described.documentTitle} ${described.reference}`;
-    let filename = `${described.reference}.pdf`;
+    let title = number === null ? described.documentTitle : `${described.documentTitle} ${number}`;
+    // CA#56: what it is, its number and whose, never "Draft-draft.pdf".
+    const named = (draft: boolean): string =>
+      renderedFilename({ kind: input.kind, reference: number, clientName: described.recipient.name, draft });
+    let filename = named(false);
     let isClientVisible = clientVisibleByDefault(input.kind);
     if (hasCopyOfRecord(input.kind)) {
       if (source.isOut) {
@@ -606,7 +630,7 @@ export class FileStoreService {
       } else {
         role = RENDERED_ROLE.draftCopy;
         title = `Draft ${title}`;
-        filename = `${described.reference}-draft.pdf`;
+        filename = named(true);
         isClientVisible = false;
       }
     }
@@ -718,13 +742,9 @@ export class FileStoreService {
       throw new PreviewNotCallersToday(input.asOf, firmDay);
     }
     // A proposal is dated by Send on the FIRM's day (`zoneDayOf(sent_at)`); a
-    // letter on the caller's (`callersDay`). An invoice is drawn as it stands.
-    const asIfSentOn =
-      input.kind === "proposal"
-        ? firmDay
-        : input.kind === "engagement_letter"
-          ? (input.asOf ?? firmDay)
-          : undefined;
+    // letter on the caller's (`callersDay`); an invoice by Issue on the firm's
+    // (B42: a draft invoice printed the UTC day it was first saved).
+    const asIfSentOn = input.kind === "engagement_letter" ? (input.asOf ?? firmDay) : firmDay;
 
     const source = await this.deps.renderSource.describe({
       tenantId: input.tenantId,

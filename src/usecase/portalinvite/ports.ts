@@ -18,7 +18,7 @@ export interface PortalContactIdentity {
    * a member of the firm, and a firm that can read its client's invite link can
    * sign in as that client. The link exists in the mail and nowhere else.
    */
-  invitePortalContact(userId: string, firmName: string | null): Promise<string>;
+  invitePortalContact(userId: string, firmName: string | null, timeZone?: string | null): Promise<string>;
 
   /**
    * Send that same letter AGAIN, to the address already on the account.
@@ -32,6 +32,7 @@ export interface PortalContactIdentity {
   resendPortalInvite(
     userId: string,
     firmName: string | null,
+    timeZone?: string | null,
   ): Promise<{ readonly expiresAt: string; readonly supersededLinks: number }>;
 }
 
@@ -84,6 +85,12 @@ export interface PortalContactAccess {
     },
     actor: Actor,
   ): Promise<{ readonly id: string }>;
+}
+
+/** The firm's zone, so the letter's expiry reads on its clock (CA#50).
+ *  Satisfied by `PostgresFirmTimeZone`. */
+export interface PortalFirmTimeZone {
+  timeZoneFor(tenantId: string): Promise<string>;
 }
 
 /** What the firm is CALLED, for the letter. Satisfied by `TenancyService`. */

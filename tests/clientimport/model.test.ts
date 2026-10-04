@@ -247,10 +247,34 @@ describe("a date in a sheet", () => {
 // ── Clients ──────────────────────────────────────────────────────────────────
 
 describe("a client row", () => {
+  it("refuses a retired or reserved country code in Country and in Where (F04)", () => {
+    const report = validateImport(
+      { clients: [client({ jurisdiction: "UK" })], people: [], engagements: [engagement({ where: "DD" })] },
+      snapshot(),
+    );
+    const blocking = blockingMessages(report);
+    expect(blocking.some((m) => m.includes(`"UK" is not the code for the United Kingdom. Use GB.`))).toBe(true);
+    expect(blocking.some((m) => m.includes(`"DD" is no longer a country code. For Germany, use DE.`))).toBe(true);
+  });
+
+  it("names the kind and the country in words, with the right article (CA#39)", () => {
+    const person = validateImport(
+      { clients: [client({ entityType: "individual" })], people: [], engagements: [] },
+      snapshot(),
+    );
+    expect(person.rows[0]?.detail).toBe("an individual in India");
+    const own = validateImport(
+      { clients: [client({ entityType: "Family office" })], people: [], engagements: [] },
+      snapshot(),
+    );
+    expect(own.rows[0]?.detail).toBe("a family office in India");
+  });
+
   it("loads with its registration, identifiers and account team", () => {
     const report = validateImport({ clients: [client()], people: [], engagements: [] }, snapshot());
     expect(report.blocking).toBe(0);
-    expect(report.rows[0]).toMatchObject({ sheet: "clients", action: "create", detail: "a private_limited in IN" });
+    // In words (CA#39): it read "a private_limited in IN", and "create a individual".
+    expect(report.rows[0]).toMatchObject({ sheet: "clients", action: "create", detail: "a private limited company in India" });
     expect(report.counts).toMatchObject({ clientsToCreate: 1, entitiesToRegister: 1, assignmentsToRecord: 2 });
   });
 

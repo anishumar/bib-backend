@@ -211,7 +211,16 @@ export function registerPortalInviteRoutes(
       },
       s.actor,
     );
-    return c.json(invitation, 201);
+    // Field by field (B48): the use case's object was forwarded whole.
+    return c.json(
+      {
+        membershipId: invitation.membershipId,
+        userId: invitation.userId,
+        grantId: invitation.grantId,
+        expiresAt: invitation.expiresAt,
+      },
+      201,
+    );
   });
 
   app.openapi(resendRoute, async (c) => {
@@ -221,7 +230,10 @@ export function registerPortalInviteRoutes(
       { tenantId: s.tenantId, membershipId: c.req.valid("param").membershipId },
       s.actor,
     );
-    return c.json(resent, 200);
+    return c.json(
+      { membershipId: resent.membershipId, userId: resent.userId, expiresAt: resent.expiresAt },
+      200,
+    );
   });
 
   app.openapi(acceptRoute, async (c) => {

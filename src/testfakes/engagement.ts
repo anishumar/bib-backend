@@ -209,6 +209,9 @@ export class FakeEngagementRepo implements EngagementRepository {
       effectiveFrom: l.effectiveFrom,
       jurisdiction: l.jurisdiction,
       billingFrequency: l.billingFrequency,
+      billingTiming: l.billingTiming,
+      billingOn: l.billingOn,
+      advanceAmount: l.advanceAmount ?? null,
       scopeOverride: l.scopeOverride,
       clientObligationsOverride: l.clientObligationsOverride,
       volumeLimitsOverride: l.volumeLimitsOverride,
@@ -234,8 +237,13 @@ export class FakeEngagementRepo implements EngagementRepository {
     const current = this.lines[index];
     if (current === undefined) throw new Error(`fake: no live line ${lineId}`);
     // The same one-statement write the adapter makes: group and price move
-    // together, so no reader sees a line that is both.
-    const updated = { ...current, ...pricing };
+    // together, so no reader sees a line that is both. Into a group, the line
+    // gives up its own advance too (0320).
+    const updated = {
+      ...current,
+      ...pricing,
+      advanceAmount: pricing.feeGroupId === null ? current.advanceAmount : null,
+    };
     this.lines[index] = updated;
     return Promise.resolve(strip(updated));
   }
@@ -252,6 +260,8 @@ export class FakeEngagementRepo implements EngagementRepository {
       position: live.reduce((max, x) => Math.max(max, x.position), 0) + 1,
       title: g.title,
       billingFrequency: g.billingFrequency,
+      billingTiming: g.billingTiming,
+      billingOn: g.billingOn,
       amount: g.amount,
       currency: g.currency,
       paymentTerms: g.paymentTerms,
@@ -506,6 +516,9 @@ export class FakeEngagementRepo implements EngagementRepository {
         endedAt: null,
         pausedAt: null,
         resumedOn: null,
+        pausedOn: null,
+        billingFrom: null,
+        firstInvoiceOn: null,
       };
       this.engagements.push(row);
       return row;
@@ -513,26 +526,16 @@ export class FakeEngagementRepo implements EngagementRepository {
     return Promise.resolve({ letter, engagements: created });
   }
 
-  recordAdvance(
-    tenantId: string,
-    letterId: string,
-    recordedByUserId: string,
-    at: string,
-  ): Promise<{ letter: EngagementLetter; released: readonly Engagement[] }> {
-    const letter = this.replace(tenantId, letterId, (l) => ({
-      ...l,
-      advanceRecordedAt: at,
-      advanceRecordedBy: recordedByUserId,
-    }));
+  releaseEngagements(tenantId: string, engagementIds: readonly string[], at: string): Promise<readonly Engagement[]> {
     const released: Engagement[] = [];
     this.engagements.forEach((e, i) => {
-      if (e.engagementLetterId === letterId && e.status === "pending_advance") {
+      if (e.tenantId === tenantId && engagementIds.includes(e.id) && e.status === "pending_advance") {
         const updated: Engagement = { ...e, status: "active", activatedAt: at };
         this.engagements[i] = updated;
         released.push(updated);
       }
     });
-    return Promise.resolve({ letter, released });
+    return Promise.resolve(released);
   }
 
   listEngagements(tenantId: string, letterId: string): Promise<readonly Engagement[]> {
@@ -579,6 +582,8 @@ export class FakeEngagementRepo implements EngagementRepository {
           effectiveFrom: e.effectiveFrom,
           endsOn: e.endsOn,
           endReason: e.endReason,
+          billingFrom: e.billingFrom,
+          firstInvoiceOn: e.firstInvoiceOn,
           feeGroup:
             group === undefined
               ? null
@@ -1400,12 +1405,13 @@ export class FakeEngagementLifecycle implements EngagementLifecycle {
     );
   }
 
-  pause(tenantId: string, input: { readonly engagementId: string }): Promise<Engagement | null> {
+  pause(tenantId: string, input: { readonly engagementId: string; readonly pausedOn: string }): Promise<Engagement | null> {
     return Promise.resolve(
       this.swap(tenantId, input.engagementId, "active", (e) => ({
         ...e,
         status: "paused",
         pausedAt: "2026-09-29T09:00:00.000Z",
+        pausedOn: input.pausedOn,
       })),
     );
   }
@@ -1420,4 +1426,21 @@ export class FakeEngagementLifecycle implements EngagementLifecycle {
       })),
     );
   }
+}
+
+/**
+ * What a drafter writes under Cover letter, for the tests that send a letter.
+ * A letter goes out only with something on its cover page (CA#2, audit
+ * 2026-10-03), and the firm's standard set starts empty (see
+ * `FakeStandardBlockRepo`), so a test that sends writes the opening itself,
+ * on the letter, as a person at a new firm does.
+ */
+export async function writeOpening(prose: DocumentService, tenantId: string, letterId: string): Promise<void> {
+  await prose.addBlock({
+    tenantId,
+    owner: { kind: "engagement_letter", id: letterId },
+    kind: "cover",
+    body: "This letter confirms the services you have engaged us for.",
+    sortOrder: 1,
+  });
 }

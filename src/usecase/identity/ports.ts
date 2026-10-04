@@ -183,6 +183,9 @@ export interface Mailer {
     url: string,
     expiresAt: string,
     firmName: string | null,
+    /** The firm's zone, so the expiry reads on the firm's clock (CA#50).
+     *  Absent or null: UTC, named. */
+    timeZone?: string | null,
   ): Promise<void>;
 
   /**
@@ -202,6 +205,8 @@ export interface Mailer {
     url: string,
     expiresAt: string,
     firmName: string | null,
+    timeZone?: string | null,
+    extra?: StaffWelcomeExtras,
   ): Promise<void>;
 
   /**
@@ -226,6 +231,7 @@ export interface Mailer {
     url: string,
     expiresAt: string,
     firmName: string | null,
+    timeZone?: string | null,
   ): Promise<void>;
 
   /**
@@ -252,4 +258,14 @@ export interface Mailer {
    * password they are resetting.
    */
   sendPasswordReset(to: string, url: string, expiresAt: string): Promise<void>;
+}
+
+/** What else the staff welcome says (audit 2026-10-03). */
+export interface StaffWelcomeExtras {
+  /** The name of the colleague who added them, so the letter can say who
+   *  rather than "somebody there" (CA#50). Null when they have no name yet. */
+  readonly addedBy?: string | null | undefined;
+  /** The account has no password, and the link opens the page that chooses
+   *  the first one (CA#38). False: the link only signs them in. */
+  readonly choosePassword?: boolean | undefined;
 }

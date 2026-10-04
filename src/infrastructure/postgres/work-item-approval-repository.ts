@@ -23,6 +23,7 @@ interface ApprovalRow {
   submitted_at: string;
   policy_version_id: string | null;
   policy_key: string | null;
+  request_note: string | null;
   decision: string;
   notes: string | null;
   decided_by: string | null;
@@ -33,6 +34,8 @@ interface CheckRow extends ApprovalRow {
   work_item_title: string;
   client_name: string;
   client_party_id: string;
+  entity_party_id: string | null;
+  entity_name: string | null;
   due_on: string | null;
   submitted_by_name: string | null;
   policy_label: string | null;
@@ -47,6 +50,7 @@ function toApproval(r: ApprovalRow): WorkItemApproval {
     submittedAt: r.submitted_at,
     policyVersionId: r.policy_version_id,
     policyKey: r.policy_key,
+    requestNote: r.request_note,
     // The CHECK constraint guarantees this, so the cast states a fact the
     // database already enforces rather than hoping for one.
     decision: r.decision as ApprovalDecision,
@@ -63,6 +67,8 @@ function toCheck(r: CheckRow): WorkItemCheck {
     workItemTitle: r.work_item_title,
     clientName: r.client_name,
     clientPartyId: r.client_party_id,
+    entityPartyId: r.entity_party_id,
+    entityName: r.entity_name,
     dueOn: r.due_on,
     submittedByName: r.submitted_by_name,
     policyLabel: r.policy_label,
@@ -71,7 +77,7 @@ function toCheck(r: CheckRow): WorkItemCheck {
 
 const COLUMNS =
   "id, tenant_id, work_item_id, submitted_by, submitted_at, policy_version_id, " +
-  "policy_key, decision, notes, decided_by, decided_at";
+  "policy_key, request_note, decision, notes, decided_by, decided_at";
 
 /**
  * The queue's row, resolved.
@@ -83,11 +89,13 @@ const COLUMNS =
  */
 const CHECK_SELECT = `
   SELECT a.id, a.tenant_id, a.work_item_id, a.submitted_by, a.submitted_at,
-         a.policy_version_id, a.policy_key, a.decision, a.notes, a.decided_by,
+         a.policy_version_id, a.policy_key, a.request_note, a.decision, a.notes, a.decided_by,
          a.decided_at,
          w.title AS work_item_title,
          cp.display_name AS client_name,
          w.client_party_id,
+         -- The company the work is for, when it names one (F32).
+         w.entity_party_id, ep.display_name AS entity_name,
          -- A DAY, read as text: no Date is built, so no zone can move it.
          w.due_on::text AS due_on,
          mk.display_name AS submitted_by_name,
@@ -95,6 +103,7 @@ const CHECK_SELECT = `
   FROM delivery.work_item_approval a
   JOIN delivery.work_item w ON w.id = a.work_item_id AND w.tenant_id = a.tenant_id
   JOIN core.party cp ON cp.id = w.client_party_id AND cp.tenant_id = w.tenant_id
+  LEFT JOIN core.party ep ON ep.id = w.entity_party_id AND ep.tenant_id = w.tenant_id
   -- By id alone: tenancy.user_account is GLOBAL and has no tenant_id to join on.
   LEFT JOIN tenancy.user_account mk ON mk.id = a.submitted_by
   LEFT JOIN config.version v ON v.id = a.policy_version_id AND v.tenant_id = a.tenant_id
@@ -120,9 +129,9 @@ export class PostgresWorkItemApprovalRepository implements WorkItemApprovalRepos
     return withTenant(this.app, approval.tenantId, async (db) => {
       const rows = await db<ApprovalRow[]>`
         INSERT INTO delivery.work_item_approval
-          (id, tenant_id, work_item_id, policy_version_id, policy_key)
+          (id, tenant_id, work_item_id, policy_version_id, policy_key, request_note)
         VALUES (${approval.id}, ${approval.tenantId}, ${approval.workItemId},
-                ${approval.policyVersionId}, ${approval.policyKey})
+                ${approval.policyVersionId}, ${approval.policyKey}, ${approval.requestNote})
         ON CONFLICT (work_item_id) WHERE decision = 'pending' DO NOTHING
         RETURNING ${db.unsafe(COLUMNS)}
       `;

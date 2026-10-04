@@ -61,6 +61,7 @@ export class FakeDunningRepo implements DunningRepository {
             outstanding: facts?.outstanding ?? "0",
             currency: facts?.currency ?? "INR",
             dueOn: facts?.dueOn ?? null,
+            invoiceStatus: facts?.status ?? "issued",
           };
         }),
     );
@@ -75,6 +76,7 @@ export class FakeDunningRepo implements DunningRepository {
       outstanding: string;
       currency: string;
       dueOn: string | null;
+      status?: "draft" | "issued" | "cancelled";
     }
   >();
 

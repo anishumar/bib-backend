@@ -33,6 +33,8 @@ export type Permission =
   | "portal:respond"
   | "portal:request"
   | "acceptance:record"
+  | "billing:skip"
+  | "invoice:issue"
   | "tenant:admin";
 
 export const PERMISSIONS: readonly Permission[] = [
@@ -47,6 +49,8 @@ export const PERMISSIONS: readonly Permission[] = [
   "portal:respond",
   "portal:request",
   "acceptance:record",
+  "billing:skip",
+  "invoice:issue",
   "tenant:admin",
 ];
 
@@ -95,9 +99,42 @@ export const PERMISSION_DESCRIPTIONS: Readonly<Record<Permission, string>> = {
     "on a call or in a meeting, when they never pressed Accept or signed in DocuSign. A " +
     "letter recorded this way is signed and its work starts, so the client's email must be " +
     "filed with it.",
+  "billing:skip":
+    "Skip a bill on Invoices, To raise: say, with a reason, that a period of work or a " +
+    "service's final bill will not be invoiced. It gives up revenue, so it is kept apart from " +
+    "raising one. The reason stays on the bill for whoever asks later.",
+  "invoice:issue":
+    "Issue and cancel invoices, and issue credit notes, including a refund of an advance. " +
+    "An issued invoice takes the next number in the company's series and goes to the client, " +
+    "so it is kept apart from raising a draft. Give it to the person who does the firm's " +
+    "accounts without making them an administrator.",
   "tenant:admin":
     "Administer the firm: who works here, what their roles are, and every setting, " +
     "including this one.",
+};
+
+/**
+ * What each permission LETS SOMEBODY DO, as the end of the sentence "Your role
+ * does not let you ..." (F21, audit 2026-10-03). The refusal said `Role
+ * "associate" does not carry "ledger:read"`, which a CA firm's staff cannot
+ * read. Exhaustive, so a permission added later is worded here or the build
+ * fails.
+ */
+export const PERMISSION_ACTS: Readonly<Record<Permission, string>> = {
+  "party:read": "see the firm's clients and leads",
+  "party:write": "add or change clients, contacts and leads",
+  "ledger:read": "read the firm's audit trail",
+  "config:read": "see the service catalogue and how roles are set up",
+  "proposal:approve": "approve a discount above the firm's limit",
+  "work:write": "mark work as done",
+  "obligation:resolve": "decide what happens to a missed deadline",
+  "portal:grant": "give a client's people access to their portal",
+  "portal:respond": "answer the firm on this portal",
+  "portal:request": "ask the firm for something on this portal",
+  "acceptance:record": "record a client's acceptance given outside the app",
+  "billing:skip": "skip a bill",
+  "invoice:issue": "issue or cancel an invoice, or issue a credit note",
+  "tenant:admin": "manage the firm's people, roles and settings",
 };
 
 /**
@@ -198,12 +235,15 @@ export const DEFAULT_ROLES: Readonly<Record<string, RoleDefinition>> = {
       "obligation:resolve",
       "portal:grant",
       "acceptance:record",
+      "billing:skip",
+      "invoice:issue",
     ],
   },
   // Runs delivery for a book of clients; sees the audit trail for their work.
+  // Decides which of its bills will not be invoiced (0321).
   manager: {
     label: "Manager",
-    permissions: ["party:read", "party:write", "ledger:read", "config:read", "work:write"],
+    permissions: ["party:read", "party:write", "ledger:read", "config:read", "work:write", "billing:skip"],
   },
   // Does the work, and quotes from the catalogue. No audit-trail sweep of the
   // whole firm.

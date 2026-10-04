@@ -46,6 +46,13 @@ A="authorization: Bearer $KEY"
 #   CRED_KEY=$(gcloud secrets versions access latest --secret=bib-internal-keys \
 #     | python3 -c 'import json,sys;print([c["key"] for c in json.load(sys.stdin) if "credential.set" in c["capabilities"]][0])')
 CRED_KEY=${CRED_KEY:-$KEY}
+# THE FRONTEND'S ORIGIN, which must be on the API's BIB_CORS_ORIGINS for the
+# CORS check (section 18). Overridable like API; by default the first origin the
+# backend beside this script is configured with, else :3000. It was always
+# :3000, so a server on another port (a worktree, :8127 with its web on :3127)
+# failed the check while CORS worked (audit 2026-10-03).
+ORIGIN=${ORIGIN:-$(grep -E '^BIB_CORS_ORIGINS=' "$(dirname "$0")/../.env" 2>/dev/null | head -1 | cut -d= -f2- | cut -d, -f1 | tr -d '\r" ')}
+ORIGIN=${ORIGIN:-http://localhost:3000}
 AC="authorization: Bearer $CRED_KEY"
 # The scratch directory for this run's cookie jars and captured responses.
 #
@@ -343,16 +350,24 @@ print(json.load(sys.stdin)["lines"][0]["service"]["ref"])')"
 # quoted as zero — which says something completely different to a client. The
 # total is now a FLOOR when anything is unpriced, and the count is what stops a
 # partner reading a wholly-unpriced document's zero as free work.
-chk "an unpriced line must say why"         400 \
-  "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$SLAPR/lines -H "$H" -d '{"serviceVersionId":"'$BKV1'","description":"Clean-up, scope TBD","quantity":"1"}')"
-chk "…and with a reason it is allowed"      201 \
+#
+# A line with NEITHER a fee NOR a reason is quoted at the catalogue's list
+# price for the version it pins (audit 2026-10-03, B09): a login that cannot see
+# fees sends neither, and its lines used to come out "as mutually agreed". So
+# "unpriced" is now something a person SAYS, with the reason, and only then.
+chk "a line with no fee and no reason takes the list price" 201 \
+  "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$SLAPR/lines -H "$H" -d '{"serviceVersionId":"'$BKV1'","description":"Clean-up, at list","quantity":"1"}')"
+chk "…and one with a reason is left unpriced" 201 \
   "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$SLAPR/lines -H "$H" -d '{"serviceVersionId":"'$BKV1'","description":"Clean-up, scope TBD","quantity":"1","pricingNote":"As mutually agreed once the ledger is seen."}')"
 UNPRICED=$(curl -s -b $J/partner.txt $API/api/v1/proposals/$SLAPR | python3 -c '
 import sys, json
 d = json.load(sys.stdin)
-line = next(l for l in d["lines"] if l["description"].startswith("Clean-up"))
-print("%s/%s/%s/%s" % (d["totals"]["unpricedLineCount"], d["totals"]["net"], line["priced"], line["net"]))')
-chk "…the total says how much it does NOT cover" "1/216000.0000/False/None" "$UNPRICED"
+listed = next(l for l in d["lines"] if l["description"] == "Clean-up, at list")
+line = next(l for l in d["lines"] if l["description"] == "Clean-up, scope TBD")
+print("%s/%s/%s/%s/%s" % (d["totals"]["unpricedLineCount"], d["totals"]["net"], listed["net"], line["priced"], line["net"]))')
+# 216000 before these two, plus bookkeeping v1's list price (18000) for the one
+# that said nothing; the one with a reason adds nothing and is counted.
+chk "…the total says how much it does NOT cover" "1/234000.0000/18000.0000/False/None" "$UNPRICED"
 
 # G1.6's overrides are what make an issued document reproducible: the letter
 # carries its own wording, so a later catalogue revision cannot change what a
@@ -722,11 +737,17 @@ PID=$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["lead"]["partyId
 
 # Per-country quoting: the client is billed in AED, the firm's books are in INR
 # (the reporting currency it was created with), and the rate is struck once.
+# A POST THAT SAYS JSON SENDS JSON. Send takes an optional body, and a
+# body-less POST declaring `content-type: application/json` is a malformed
+# request the API refuses ("Malformed JSON in request body", 400) before any
+# rule runs. That is what turned the whole proposal chain below red (audit
+# 2026-10-03). So every Send here sends an empty object.
+NOBODY='{}'
 DRAFT='{"partyId":"'$PID'","title":"Lakeview - FY26 compliance","currency":"AED","fxRate":"23.4500","fxRateDate":"2026-06-01","validUntil":"2027-01-31"}'
 PROP=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/proposals -H "$H" -d "$DRAFT")
 PRID=$(echo "$PROP" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
 chk "partner drafts a proposal in AED"     AED "$(echo "$PROP" | python3 -c 'import sys,json;print(json.load(sys.stdin)["currency"])')"
-chk "an empty proposal cannot be sent"     409 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/send -H "$H")"
+chk "an empty proposal cannot be sent"     409 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/send -H "$H" -d "$NOBODY")"
 
 NOSUCH='{"serviceVersionId":"00000000-0000-0000-0000-0000000000ff","description":"x","unitAmount":"1"}'
 FLOATY='{"serviceVersionId":"'$SVCV1'","description":"x","unitAmount":1499.5}'
@@ -740,15 +761,15 @@ chk "quote a line, 40% off"                201 "$(code -b $J/partner.txt -XPOST 
 
 # The firm has published no discount policy, so silence is not permission: any
 # discount at all needs sign-off until somebody sets a limit.
-chk "no policy means any discount blocks"  409 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/send -H "$H")"
+chk "no policy means any discount blocks"  409 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/send -H "$H" -d "$NOBODY")"
 POLICY='{"key":"discount","body":{"maxDiscountPercent":"15"}}'
 curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/config/policy -H "$H" -d "$POLICY"
 chk "the firm publishes a discount limit"  200 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/policy/discount/versions/1/publish -H "$H")"
-chk "40% is still past the 15% limit"      409 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/send -H "$H")"
+chk "40% is still past the 15% limit"      409 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/send -H "$H" -d "$NOBODY")"
 chk "the associate may not sign it off"    403 "$(code -b $J/associate.txt -XPOST $API/api/v1/proposals/$PRID/discount-approval -H "$H")"
 chk "the partner may"                      200 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/discount-approval -H "$H")"
 chk "…nothing to approve a second time"  409 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/discount-approval -H "$H")"
-SENT=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/send -H "$H")
+SENT=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/send -H "$H" -d "$NOBODY")
 chk "now it sends"                         sent "$(echo "$SENT" | python3 -c 'import sys,json;print(json.load(sys.stdin)["proposal"]["status"])')"
 # The link, returned ONCE — only its digest is stored, so this response is the
 # only place it can ever be read.
@@ -855,6 +876,12 @@ chk "…and one for the sister company"      201 "$(code -b $J/partner.txt -XPOS
 chk "a letter with no terms cannot go out"   409 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/send -H "$H" -d "$SIGNER")"
 chk "a UAE clause on an Indian letter"       400 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/clauses -H "$H" -d '{"clauseVersionId":"'$AEV'"}')"
 chk "the right clause goes on"               204 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/clauses -H "$H" -d '{"clauseVersionId":"'$SCOPEV'"}')"
+# CA#2 (audit 2026-10-03): a letter whose cover page says nothing ("Dear X, /
+# Yours sincerely,") cannot go out. This firm has no standard opening, so the
+# drafter writes one on the letter, as a person at a new firm does.
+chk "a letter with no opening cannot go out" 409 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/send -H "$H" -d "$SIGNER")"
+OPENING='{"kind":"cover","body":"This letter confirms the services you have engaged us for.","sortOrder":1'
+chk "write the letter's opening"             201 "$(code -b $J/partner.txt -XPOST $API/api/v1/document-blocks -H "$H" -d "$OPENING"',"engagementLetterId":"'$EL'"}')"
 chk "now it can be sent"                     200 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/send -H "$H" -d "$SIGNER")"
 
 SIGNED=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/signature -H "$H" -d '{"signedByName":"A Director","reference":"paper-001"}')
@@ -870,22 +897,32 @@ chk "…and all billed to the client"        "$PID" "$(echo "$SIGNED" | python3 
 import sys, json
 ids = {e["partyId"] for e in json.load(sys.stdin)["engagements"]}
 print(ids.pop() if len(ids) == 1 else "MIXED")')"
-chk "…held back by the advance"            pending_advance "$(echo "$SIGNED" | python3 -c 'import sys,json;print(json.load(sys.stdin)["engagements"][0]["status"])')"
+# 0322 (Ashish): the advance holds no work. Signing starts every engagement.
+chk "…and starts, advance or not (0322)"  active "$(echo "$SIGNED" | python3 -c 'import sys,json;print(json.load(sys.stdin)["engagements"][0]["status"])')"
 chk "a signed letter cannot be edited"       409 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/lines -H "$H" -d "$ELLINE")"
 chk "…nor withdrawn"                       409 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/withdraw -H "$H")"
 
-# Nothing may spawn while the advance is outstanding — the gate is real.
-BEFORE=$(curl -s -b $J/partner.txt "$API/api/v1/objects/engagement_letter/$EL/events" | python3 -c '
+# 0320: the advance is a TAX INVOICE, not a tick. 0322: signing drafts it at the
+# company's default tax rate; this firm has none, so no draft is made (never a
+# guessed 0%) and the advance says why. It is raised like any bill (here at 0%
+# so the total is the advance) and issued.
+NODRAFT=$(curl -s -b $J/partner.txt "$API/api/v1/billing/advances" | python3 -c '
 import sys, json
-print(sum(1 for r in json.load(sys.stdin)["events"] if r["event"]["verb"] == "contract.activated"))')
-chk "no spawn trigger before the advance"    0 "$BEFORE"
-chk "record the advance"                     200 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/advance -H "$H")"
-chk "…and it cannot be recorded twice"     409 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/advance -H "$H")"
+a = [x for x in json.load(sys.stdin)["advances"] if x["letter"]["id"] == "'$EL'"]
+print("%s/%s" % (a[0]["stage"], a[0]["draftBlocked"]) if len(a) == 1 else "count=%d" % len(a))')
+chk "no tax rate: no automatic draft, and it says so" "not_raised/no_tax_rate" "$NODRAFT"
+ADVDUE=$(curl -s -b $J/partner.txt "$API/api/v1/billing/dues?partyId=$PID" | python3 -c '
+import sys, json
+ds = [d for d in json.load(sys.stdin)["dues"] if d["kind"] == "advance"]
+print(ds[0]["id"] if len(ds) == 1 else "count=%d" % len(ds))')
+ADVINV=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/billing/raise -H "$H" -d '{"dueIds":["'$ADVDUE'"],"lines":[{"dueId":"'$ADVDUE'","taxPercent":"0"}]}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["invoiceId"])')
+chk "signing wrote the advance bill; it is raised and issued" 200 "$(code -b $J/partner.txt -XPOST $API/api/v1/invoices/$ADVINV/issue -H "$H")"
+chk "…and the client pays it"              201 "$(code -b $J/partner.txt -XPOST $API/api/v1/invoices/$ADVINV/payments -H "$H" -d '{"amount":"10000","receivedOn":"2026-08-29","method":"bank_transfer"}')"
 ACTIVE=$(curl -s -b $J/partner.txt $API/api/v1/engagement-letters/$EL | python3 -c '
 import sys, json
 d = json.load(sys.stdin)
 print("%s/%s/%s" % (d["engagements"][0]["status"], len(d["clauses"]), d["clauses"][0]["text"][:8]))')
-chk "the engagement is released, terms pinned" "active/1/The firm" "$ACTIVE"
+chk "the engagement is active, terms pinned" "active/1/The firm" "$ACTIVE"
 # A read model carries NAMES, not ids: this is exactly where a group client's
 # companies have to be told apart, so a column of uuids is what it must not be.
 NAMED=$(curl -s -b $J/partner.txt $API/api/v1/engagement-letters/$EL | python3 -c '
@@ -1049,17 +1086,19 @@ print(len(json.load(sys.stdin)["jobs"]))')
 # engagement PER COMPANY — the firm's own "Per Company" rule (G0.1) — and the
 # engine turns each into its own job. One job for "the client" would be the bug.
 #
-# And since T6.13 each is a PERIOD job: the service is monthly, so what the
-# sweep owes is this month's checklist, carrying its period and opening the day
-# after the month ends — which is why it is in the list as UPCOMING rather than
-# runnable, and why a second month will bring a second job without a second
-# activation.
+# ONCE, NOT PER MONTH, and that is the catalogue speaking. A PERIOD job (T6.13)
+# is for a service whose body says monthly, quarterly or annually, and
+# `gst-filing` here says none (section 6 publishes it with no recurrence; the
+# product never defaults one). So each engagement owes ONE job, with no period.
+# This check expected a period job from T6.13 on and was red since: the service
+# is called "GST monthly filing", but a name is not a recurrence (audit
+# 2026-10-03). The period job is proven below, on bookkeeping, which is monthly.
 chk "one job per engagement, not per letter" 2 "$AFTER"
 SHAPE=$(curl -s -b $J/partner.txt $API/api/v1/jobs | python3 -c '
 import sys, json
 j = json.load(sys.stdin)["jobs"][0]
 print("%s/%s/%s/%s" % (j["sourceKind"], j["status"], j["templateVersionId"] is None, j["periodLabel"] is not None))')
-chk "…owed for THIS month, pending, no graph yet" "engagement_period/pending/True/True" "$SHAPE"
+chk "…owed once (no recurrence), pending, no graph yet" "engagement/pending/True/False" "$SHAPE"
 
 # THE property the whole engine rests on. Every trigger is at-least-once, and a
 # second job is a second set of tasks and eventually a second invoice.
@@ -1138,29 +1177,35 @@ BOOKV=$BKV1
 EL2=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/engagement-letters -H "$H" -d '{"partyId":"'$PID'","jurisdiction":"IN","title":"Lakeview - bookkeeping","currency":"INR","fxRate":"1","fxRateDate":"2026-08-28"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
 curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL2/lines -H "$H" -d '{"entityPartyId":"'$ENT1'","serviceVersionId":"'$BOOKV'","description":"Monthly bookkeeping","quantity":"12","unitAmount":"18000","discountPercent":"0"}'
 curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL2/clauses -H "$H" -d '{"clauseVersionId":"'$SCOPEV'"}'
+curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/document-blocks -H "$H" -d "$OPENING"',"engagementLetterId":"'$EL2'"}'
 curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL2/send -H "$H" -d "$SIGNER"
 curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL2/signature -H "$H" -d '{"signedByName":"A Director","reference":"paper-002"}'
 (cd "$(dirname "$0")/.." && npm run --silent worker:once > /dev/null 2>&1)
 
+# Bookkeeping is MONTHLY, so since T6.13 what arrives is this MONTH's task,
+# from a period job, named for its month ("Monthly bookkeeping · Oct 2026").
+# This looked for the bare service name and found nothing from T6.13 on (audit
+# 2026-10-03); the fourth field is the period job the section above defers to.
 ROUTED=$(curl -s -b $J/partner.txt $WI | python3 -c '
 import sys, json
 items = json.load(sys.stdin)["items"]
-b = [i for i in items if i["title"] == "Monthly bookkeeping"]
+b = [i for i in items if i["title"].startswith("Monthly bookkeeping")]
 if not b:
     print("no bookkeeping work item"); raise SystemExit
 i = b[0]
-print("%s/%s/%s" % (
+print("%s/%s/%s/%s" % (
     i["assignee"] is not None,
     i["slaDaysSnapshot"],
-    i["deptName"]))')
-chk "A FILING ARRIVES PRE-ASSIGNED TO ITS DEPT SPOC" "True/30/Financial Reporting and Compliance" "$ROUTED"
+    i["deptName"],
+    i["title"] != "Monthly bookkeeping"))')
+chk "A FILING ARRIVES PRE-ASSIGNED TO ITS DEPT SPOC" "True/30/Financial Reporting and Compliance/True" "$ROUTED"
 # Said twice on purpose. The 30 above came from the version the client signed
 # and the FRC came from the one in force now, and getting either from the other
 # would be a different product: a firm could not re-file a service without
 # re-dating every task, or could re-date finished work by editing a catalogue.
 DUE=$(curl -s -b $J/partner.txt $WI | python3 -c '
 import sys, json
-i = next(i for i in json.load(sys.stdin)["items"] if i["title"] == "Monthly bookkeeping")
+i = next(i for i in json.load(sys.stdin)["items"] if i["title"].startswith("Monthly bookkeeping"))
 print(i["dueOn"] is not None and len(i["dueOn"]) == 10)')
 chk "…dated from the day the work begins, plus the SLA" "True" "$DUE"
 
@@ -1299,13 +1344,14 @@ echo; echo "── 16d. Invoicing — the one number that may not gap ───�
 # T3.4. A proposal reference may gap: PR-2026-0007 missing means somebody
 # abandoned a quote. A TAX INVOICE NUMBER MAY NOT — an auditor is entitled to
 # read a missing one as a suppressed sale — so the counter is a row taken under
-# SELECT ... FOR UPDATE inside the same transaction as the insert, and a
-# rollback releases the number. That property is proven against real Postgres in
-# tests/invoice/numbering.integration.test.ts, including six simultaneous
-# invoices; what this section walks is the surface and the freeze.
+# SELECT ... FOR UPDATE inside the same transaction as the ISSUE (0322: a draft
+# has no number), and a rollback releases the number. That property is proven
+# against real Postgres in tests/invoice/numbering.integration.test.ts,
+# including six simultaneous issues; what this section walks is the surface and
+# the freeze.
 INVC=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/parties/organizations -H "$H" -d '{"legalName":"Cobalt Foods Private Limited"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["partyId"])')
 INV1=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/invoices -H "$H" -d '{"partyId":"'$INVC'","entityPartyId":"'$FIRMENT'","currency":"INR","fxRate":"1","fxRateDate":"2026-08-29","seriesDate":"2026-08-29"}')
-chk "an invoice is numbered on creation"  "INV/2026-27/0001" "$(python3 -c 'import sys,json;print(json.load(sys.stdin)["number"])' <<< "$INV1")"
+chk "a draft has no number yet (0322)"    "None" "$(python3 -c 'import sys,json;print(json.load(sys.stdin)["number"])' <<< "$INV1")"
 INV1ID=$(python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])' <<< "$INV1")
 chk "an empty invoice cannot be issued"   409 "$(code -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV1ID/issue -H "$H")"
 chk "a line goes on"                      204 "$(code -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV1ID/lines -H "$H" -d '{"description":"GST filing, 12 months","quantity":"12","unitAmount":"2000","discountPercent":"10","taxPercent":"18"}')"
@@ -1316,20 +1362,20 @@ t = json.load(sys.stdin)["totals"]
 print("%s/%s/%s" % (t["net"], t["tax"], t["total"]))')
 chk "…and the totals come from the schema" "21600.0000/3888.0000/25488.0000" "$TOT"
 chk "…an associate cannot issue it"       403 "$(code -b $J/associate.txt -XPOST $API/api/v1/invoices/$INV1ID/issue -H "$H")"
-chk "…the partner can"                    200 "$(code -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV1ID/issue -H "$H")"
+# 0002: the firm's series already holds the advance invoice raised in 14.
+chk "…the partner can, and it is numbered then" "INV/2026-27/0002" "$(curl -s -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV1ID/issue -H "$H" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("number"))')"
 chk "…and then its lines are fixed"       409 "$(code -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV1ID/lines -H "$H" -d '{"description":"One more thing","quantity":"1","unitAmount":"500"}')"
 
-# Cancelling does NOT release the number: the row stays in the sequence saying
-# it was cancelled, which is what an auditor needs to see where a number went.
+# Cancelling an ISSUED invoice does not release its number (the row stays in
+# the sequence saying so). A DRAFT cancelled before issue never drew one
+# (0322), so it leaves no hole at all.
 INV2ID=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/invoices -H "$H" -d '{"partyId":"'$INVC'","entityPartyId":"'$FIRMENT'","currency":"INR","fxRate":"1","fxRateDate":"2026-08-29","seriesDate":"2026-08-29"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
-chk "a second invoice takes the next"     200 "$(code -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV2ID/cancel -H "$H")"
-INV3=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/invoices -H "$H" -d '{"partyId":"'$INVC'","entityPartyId":"'$FIRMENT'","currency":"INR","fxRate":"1","fxRateDate":"2026-08-29","seriesDate":"2026-08-29"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["number"])')
-chk "…and a cancelled one leaves no hole" "INV/2026-27/0003" "$INV3"
+chk "a draft cancelled before issue spends no number" "cancelled/None" "$(curl -s -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV2ID/cancel -H "$H" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("%s/%s" % (d.get("status"), d.get("number")))')"
 SEQ=$(curl -s -b $J/partner.txt "$API/api/v1/invoices" | python3 -c '
 import sys, json
 inv = [r["invoice"] for r in json.load(sys.stdin)["invoices"]]
-print(sorted(i["sequenceNumber"] for i in inv))')
-chk "…the series is 1..N with nothing missing" "[1, 2, 3]" "$SEQ"
+print(sorted(i["sequenceNumber"] for i in inv if i["sequenceNumber"] is not None))')
+chk "…the series is 1..N with nothing missing" "[1, 2]" "$SEQ"
 
 # THE FEE AXIS, on the module where it matters most. An invoice is money end to
 # end, so a delivery colleague seeing the work but not what it was worth is the
@@ -1377,7 +1423,7 @@ import sys, json
 rs = {r["balance"]["invoiceId"]: r for r in json.load(sys.stdin)["receivables"]}
 r = rs.get("'$INV1ID'")
 print("absent" if r is None else "%s/%s/%s" % (r["balance"]["outstanding"], r["number"], r["party"]["displayName"]))')
-chk "…the receivable names whose it is" "20000.0000/INV/2026-27/0001/Cobalt Foods Private Limited" "$OWED"
+chk "…the receivable names whose it is" "20000.0000/INV/2026-27/0002/Cobalt Foods Private Limited" "$OWED"
 
 echo; echo "── 16f. The compliance calendar — generated, never typed ────────────"
 # T3.2. What this section can prove that a unit test cannot: the firm got its
@@ -1462,8 +1508,8 @@ for i in $(seq 1 12); do last=$(code -XPOST $API/api/v1/auth/login -H "$H" -d '{
 chk "brute force is throttled"  429 "$last"
 
 echo; echo "── 18. CORS — the frontend is a separate origin ────────────────────"
-ACAO=$(curl -s -D - -o /dev/null -X OPTIONS $API/api/v1/auth/login -H 'Origin: http://localhost:3000' -H 'Access-Control-Request-Method: POST' | grep -i '^access-control-allow-origin' | tr -d '\r' | awk '{print $2}')
-chk "allowed origin gets a preflight" "http://localhost:3000" "$ACAO"
+ACAO=$(curl -s -D - -o /dev/null -X OPTIONS $API/api/v1/auth/login -H "Origin: $ORIGIN" -H 'Access-Control-Request-Method: POST' | grep -i '^access-control-allow-origin' | tr -d '\r' | awk '{print $2}')
+chk "allowed origin gets a preflight" "$ORIGIN" "$ACAO"
 EVIL=$(curl -s -D - -o /dev/null -X OPTIONS $API/api/v1/auth/login -H 'Origin: https://evil.example' -H 'Access-Control-Request-Method: POST' | grep -ci '^access-control-allow-origin' | tr -d '\r')
 chk "unlisted origin gets none"        0 "$EVIL"
 

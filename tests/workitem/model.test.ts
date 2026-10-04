@@ -10,12 +10,15 @@ import type {
 } from "../../src/domain/workitem/model";
 import {
   boardOrder,
+  completedState,
   defaultPriorityFor,
   dueOnFrom,
   initialState,
+  openChecklistLines,
   priorityOrder,
   resolveAssignee,
   resolveOwner,
+  reworkState,
   catchUpMove,
   TAKEN_OFF_BY_HAND_NOTE,
   stateOrder,
@@ -70,6 +73,64 @@ describe("the starting state", () => {
     // query happened to return first, silently. The service turns this null
     // into a sentence naming the screen that fixes it.
     expect(initialState([state({ id: "a" }), state({ id: "b" })])).toBeNull();
+  });
+});
+
+describe("where a review's decision moves the task (audit 2026-10-03, CA#28)", () => {
+  const firm = [
+    state({ id: "not_started", isInitial: true, sortOrder: 10 }),
+    state({ id: "in_progress", sortOrder: 20 }),
+    state({ id: "waiting_client", sortOrder: 30 }),
+    state({ id: "under_review", isUnderReview: true, sortOrder: 50 }),
+    state({ id: "blocked", isBlocked: true, sortOrder: 60 }),
+    state({ id: "completed", isTerminal: true, isSuccess: true, sortOrder: 70 }),
+    state({ id: "cancelled", isTerminal: true, sortOrder: 80 }),
+  ];
+
+  it("approved goes to the firm's FINISHED-AND-DONE state, by its flags", () => {
+    // Read off `isTerminal && isSuccess`, never a name: Cancelled is terminal
+    // too, and approving work is not abandoning it.
+    expect(completedState(firm)?.id).toBe("completed");
+  });
+
+  it("takes the first by the firm's own order when it has two, and never a retired one", () => {
+    const two = [
+      ...firm,
+      state({ id: "filed", isTerminal: true, isSuccess: true, sortOrder: 65 }),
+      state({ id: "old_done", isTerminal: true, isSuccess: true, sortOrder: 1, isActive: false }),
+    ];
+    expect(completedState(two)?.id).toBe("filed");
+  });
+
+  it("is null for a firm with no successful finished state, and the caller leaves the task where it is", () => {
+    expect(completedState(firm.filter((s) => !s.isSuccess))).toBeNull();
+  });
+
+  it("sent back goes to the first working state: not the start, not stuck, not finished, not with a checker", () => {
+    expect(reworkState(firm)?.id).toBe("in_progress");
+  });
+
+  it("sent back has nowhere to go when the firm has no such state", () => {
+    expect(
+      reworkState(firm.filter((s) => s.id === "not_started" || s.id === "under_review" || s.isTerminal)),
+    ).toBeNull();
+  });
+});
+
+describe("the checklist's open lines (CA#30)", () => {
+  it("lists what is not ticked, in the list's own order", () => {
+    const line = (label: string, sortOrder: number, done: boolean) => ({
+      id: label,
+      tenantId: FIRM,
+      workItemId: "w",
+      label,
+      sortOrder,
+      doneAt: done ? "2026-10-03T05:00:00.000Z" : null,
+      doneByUserId: done ? "u" : null,
+    });
+    expect(
+      openChecklistLines([line("File", 30, false), line("Get data", 10, true), line("Reconcile", 20, false)]),
+    ).toEqual(["Reconcile", "File"]);
   });
 });
 
@@ -307,6 +368,7 @@ describe("the order a board reads in", () => {
       checklistTotal: 0,
       hasOpenReview: false,
       blockedByOpen: [],
+      sentBack: null,
     };
   }
 

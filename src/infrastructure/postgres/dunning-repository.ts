@@ -20,6 +20,7 @@ import { withTenant } from "../../db/tenant";
 import { toDayOrNull } from "./day";
 import type { DunningBody } from "../../domain/config/model";
 import { readDunningBody } from "../../domain/config/model";
+import { isInvoiceStatus } from "../../domain/invoice/model";
 import type {
   DunningActionRecord,
   DunningLadderSource,
@@ -107,11 +108,12 @@ export class PostgresDunningRepository implements DunningRepository {
           outstanding: string;
           currency: string;
           due_on: Date | null;
+          invoice_status: string;
         })[]
       >`
         SELECT ${db.unsafe(COLUMNS.split(", ").map((c) => `d.${c}`).join(", "))},
                i.number, b.party_id, p.display_name AS party_name,
-               b.outstanding, b.currency, b.due_on
+               b.outstanding, b.currency, b.due_on, i.status AS invoice_status
         FROM crm.dunning_action d
         -- THE DECISION IS "put THIS CLIENT on credit hold", so the client, the
         -- number and what is actually still owed come back with the rung. A
@@ -131,6 +133,7 @@ export class PostgresDunningRepository implements DunningRepository {
         // Read NOW, not when the rung fired: a debt settled since is exactly
         // the case a partner rejects, and a stale figure would hide it.
         outstanding: r.outstanding,
+        invoiceStatus: isInvoiceStatus(r.invoice_status) ? r.invoice_status : "issued",
         currency: r.currency,
         // The shared helper rather than an inline slice — same result, but the
         // reasoning lives in one place now. This is the date the ladder chases

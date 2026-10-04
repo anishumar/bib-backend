@@ -4474,13 +4474,25 @@ somebody to find.
   app.
 - **The ledger keeps all of it**, including the reverted rule edits, and that is correct: they
   happened.
+- **Audit of 2026-10-03, the UI sweep (10x Global).** The sweep wrote these records and they were
+  reverted through the app the same day:
+  - lead `f8b0e288` deleted;
+  - draft proposal PR-2026-0004 `6063c951` deleted;
+  - party "QA-SWEEP Lead Co 2026-10-03" `c75b2428` archived;
+  - two client requests `a5460b33` and `32727c09` closed.
+
+  The roleplay built its own firm, "Sharma Mehta & Co (QA roleplay)" `a717067f`, and that firm is
+  kept on purpose. The fix agents worked only in their own databases (`bib_audit_*`). One billing
+  walk script that hard-codes the shared `bib` ran two `UPDATE`s scoped to another firm's id;
+  both changed 0 rows. Reports: `bib/qa/audit-2026-10-03/`.
 
 ---
 
 ## Known-open security work
 
 - [x] **Rate limiting** — done. Two limiters that defend different things: the edge keys on
-  client address (10/min on the sign-in routes, 300/min elsewhere), the identity use case
+  client address (10/min on the sign-in routes) and, since 2026-10-03, on the SESSION for a
+  signed-in request (300/min; see "One office, one rate-limit bucket" below), the identity use case
   keys on the ACCOUNT (10 password attempts/hour, 3 sign-in emails/hour), because a botnet
   spreads across addresses but cannot spread which account it is attacking. Plus a
   concurrency cap of 6 on scrypt, bounding hash memory to ~192 MB however the requests
@@ -4566,14 +4578,19 @@ somebody to find.
   > the lost day through `Intl`, so it fails on a UTC runner as well; a behavioural test alone
   > passes on every machine this is developed on.
 
-- [ ] **One office, one rate-limit bucket.** The edge limiter keys on client ADDRESS at
-  300/min, which is comfortable for a handful of browsers and is not obviously comfortable for
-  a firm of forty behind a single office NAT gateway — they share one bucket. Found by the
-  smoke walk hitting the same ceiling from the other direction (it now spends 288 of 300, and
-  the next section added to it will not fit). Two questions, and both are product decisions
-  rather than a number to quietly raise: should the authenticated surface key on the SESSION
-  rather than the address, and is 300 the right figure for the anonymous one. Raising the
-  default to make a test green is the one answer that is definitely wrong.
+- [x] **One office, one rate-limit bucket** — done (audit 2026-10-03, F15 / B28 / CA#14,
+  Shrestha decided). The edge limiter keyed on client ADDRESS at 300/min, so a firm of forty
+  behind a single office NAT gateway shared one bucket, and a 429 on `/auth/me` signed people
+  out. **The signed-in surface now keys on the SESSION** (a SHA-256 of the session id,
+  `sessionRateLimit` after the session guard). The sign-in routes stay on the address at
+  10/min; a request whose credential is missing or does not resolve is charged to the address
+  after the lookup fails, and a spent address is refused before the next lookup, so a forged
+  cookie per request buys nothing. **The numbers did not move**: 300 and 10 stand. The
+  frontend now treats only a 401 as signed out; a 429 or 5xx on `/auth/me` shows "busy,
+  retrying" and backs off. Still true and still fine at one pod: the store is per process.
+  Not bounded by this: one person holding N sessions holds N buckets (a per-user key is the
+  next step if it ever matters). The smoke walk's ~296-of-300 squeeze is now counted per
+  session rather than per address: no looser for the part of it that runs on one login.
 
 - [ ] **Response shapes are documented but not VERIFIED.** zod-openapi describes a response
   without validating it, so a handler can send a field its schema never mentions — which is

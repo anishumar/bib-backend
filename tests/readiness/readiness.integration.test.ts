@@ -213,7 +213,47 @@ describe("the QA firm on 27 Sep 2026, read back", () => {
     expect(at("request_routing")?.done).toBe(true);
     expect(at("processes")?.done).toBe(true);
     expect(at("portal_contacts")?.done).toBe(true);
-    expect(lines.filter((l) => l.done)).toHaveLength(3);
+    // And three of the lines added on 2026-10-03: this fixture's firm is on
+    // India's calendar, has three people and one service.
+    expect(at("time_zone")?.done).toBe(true);
+    expect(at("staff")?.done).toBe(true);
+    expect(at("services")?.done).toBe(true);
+    expect(lines.filter((l) => l.done)).toHaveLength(6);
+  });
+
+  it("reads the firm's companies, zone, people and terms (audit 2026-10-03)", async () => {
+    const at = async (k: string) => (await read()).find((l) => l.key === k);
+    // No company of the firm's own exists in this fixture yet.
+    expect((await at("company_details"))?.gaps.map((g) => g.missing)).toEqual([["company"]]);
+    expect((await at("standard_terms"))?.state).toBe("to_do");
+
+    // The firm itself, registered in India with no address yet.
+    await owner`
+      INSERT INTO core.organization (party_id, tenant_id, legal_name, is_firm_self)
+      VALUES (${issuer}, ${tenant}, '10x Global', true)
+    `;
+    await owner`
+      INSERT INTO core.legal_entity (party_id, tenant_id, jurisdiction, entity_type)
+      VALUES (${issuer}, ${tenant}, 'IN', 'llp')
+    `;
+    expect((await at("company_details"))?.gaps).toEqual([
+      { id: issuer, ref: null, name: "10x Global", missing: ["address"] },
+    ]);
+    await owner`
+      UPDATE core.legal_entity SET registered_address = ${owner.json({ lines: ["1 MG Road", "New Delhi"] })}
+       WHERE party_id = ${issuer}
+    `;
+    expect((await at("company_details"))?.state).toBe("done");
+
+    // Back on the zone nobody chose: to do, and India's offered.
+    await owner`UPDATE tenancy.tenant SET time_zone = 'UTC' WHERE id = ${tenant}`;
+    expect((await at("time_zone"))?.gaps).toEqual([{ id: null, ref: "Asia/Kolkata", name: "", missing: ["time_zone"] }]);
+    await owner`UPDATE tenancy.tenant SET time_zone = 'Asia/Kolkata' WHERE id = ${tenant}`;
+    expect((await at("time_zone"))?.state).toBe("done");
+
+    // One term in force.
+    await publish("clause", "confidentiality", { title: "Confidentiality", text: "We keep it private." });
+    expect((await at("standard_terms"))?.state).toBe("done");
   });
 
   it("turns a line done on the next read once its gap is fixed", async () => {

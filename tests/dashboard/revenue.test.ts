@@ -9,6 +9,7 @@ import { DashboardService } from "../../src/usecase/dashboard/service";
 import { FakeDashboardRepo } from "../../src/testfakes/dashboard";
 import { FakeClock } from "../../src/testfakes/clock";
 import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
+import { FakeFiscalYearSource } from "../../src/testfakes/billing";
 import { dashboardRoutes } from "../../src/api/handler/dashboard";
 
 describe("the billing window", () => {
@@ -47,6 +48,7 @@ function service(zone: string, instant: string) {
   const svc = new DashboardService({
     dashboards: repo,
     timeZones: new FakeFirmTimeZone(zone),
+    fiscalYears: new FakeFiscalYearSource(),
     clock: new FakeClock(new Date(instant)),
   });
   return { repo, svc };

@@ -42,7 +42,7 @@ export class InvalidAssignmentRole extends ClientAssignmentError {
     super(
       "INVALID_ASSIGNMENT_ROLE",
       `${JSON.stringify(role)} is not a way of owning a client. Valid: ` +
-        `${valid.map((r) => JSON.stringify(r)).join(", ")} — "key_manager" owns the ` +
+        `${valid.map((r) => JSON.stringify(r)).join(", ")}: "key_manager" owns the ` +
         `relationship (pricing, renewals, escalation) and there is one at a time; "spoc" is ` +
         `the day-to-day contact for one Dept or delivery team, and a client commonly has ` +
         `several.`,
@@ -56,7 +56,7 @@ export class InvalidAssignmentDates extends ClientAssignmentError {
       "INVALID_ASSIGNMENT_DATES",
       `${JSON.stringify(validFrom)} → ${validTo === null ? "open" : JSON.stringify(validTo)} ` +
         `is not a valid period. Both dates are ISO YYYY-MM-DD, and the end is the FIRST DAY ` +
-        `NOT IN FORCE — so it must be strictly after the start. Ending on the day it began ` +
+        `NOT IN FORCE, so it must be strictly after the start. Ending on the day it began ` +
         `would be an assignment that was in force on no day at all.`,
     );
   }
@@ -67,7 +67,7 @@ export class AxisRequiredForSpoc extends ClientAssignmentError {
     super(
       "AXIS_REQUIRED_FOR_SPOC",
       `A SPOC is the contact for a particular part of the work, so it must name one of the ` +
-        `firm's Depts or delivery teams. A contact for everything is the Key Manager — ` +
+        `firm's Depts or delivery teams. A contact for everything is the Key Manager: ` +
         `assign that role instead. Without this rule a SPOC with no axis would quietly ` +
         `become a second key manager under another name.`,
     );
@@ -132,7 +132,7 @@ export class AssignmentClientArchived extends ClientAssignmentError {
     super(
       "ASSIGNMENT_CLIENT_ARCHIVED",
       `${JSON.stringify(displayName)} is archived, so nobody new can be put in charge of ` +
-        `it. Assignments it already has are kept and still read — unarchive the client ` +
+        `it. Assignments it already has are kept and still read: unarchive the client ` +
         `first if the firm is working with them again.`,
     );
   }
@@ -168,7 +168,7 @@ export class AssignmentAlreadyEnded extends ClientAssignmentError {
     super(
       "ASSIGNMENT_ALREADY_ENDED",
       `This assignment already ended on ${longDay(validTo)} and is history now. History is not ` +
-        `corrected by writing over it — if the end date is wrong, that is a correction ` +
+        `corrected by writing over it: if the end date is wrong, that is a correction ` +
         `somebody has to make deliberately, and if the person is back, assign them again ` +
         `from the day they returned.`,
     );
@@ -199,7 +199,7 @@ export class AssignmentPredatesIncumbent extends ClientAssignmentError {
     super(
       "ASSIGNMENT_PREDATES_INCUMBENT",
       `This client's current Key Manager took over on ${longDay(from)}, so a new one cannot start ` +
-        `on or before that date — the handover would have to close a period that never ` +
+        `on or before that date: the handover would have to close a period that never ` +
         `opened. Record the change from ${longDay(from)} or later, or correct the earlier ` +
         `assignment first.`,
     );

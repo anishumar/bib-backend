@@ -48,7 +48,7 @@ export class PortalContactNotAClientLogin extends PortalInviteError {
     super(
       "PORTAL_CONTACT_NOT_A_CLIENT_LOGIN",
       `Membership ${JSON.stringify(membershipId)} is a ${audience} login, and this route ` +
-        `re-sends the CLIENT PORTAL invitation — the letter on which a password is chosen. A ` +
+        `re-sends the CLIENT PORTAL invitation: the letter on which a password is chosen. A ` +
         `colleague is sent a different letter, and does not need one: the sign-in page issues ` +
         `them a fresh link on request.`,
     );
@@ -60,7 +60,7 @@ export class PortalContactInactive extends PortalInviteError {
     super(
       "PORTAL_CONTACT_INACTIVE",
       `Membership ${JSON.stringify(membershipId)} has been revoked, so there is nobody to ` +
-        `write to. Restore it on the client's contacts list first — re-inviting a revoked ` +
+        `write to. Restore it on the client's contacts list first: re-inviting a revoked ` +
         `login would mail somebody the firm has shut out a link that cannot open anything.`,
     );
   }

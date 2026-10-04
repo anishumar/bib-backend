@@ -776,16 +776,35 @@ describe("review — and the rule no firm may configure away", () => {
     expect(after.record.item.stateId).toBe(reviewStateId);
   });
 
-  it("leaves the state ALONE when the firm has named none — the shipped answer", async () => {
+  it("leaves a STARTED task's state alone when the firm has named none — the shipped answer", async () => {
     // Null is supported, not a gap. There is deliberately no fallback to a
     // state NAMED "Under Review": the firm owns the words, and a product that
     // reads a name breaks the morning somebody renames it.
     const { h, item } = await readyForReview();
+    const working = await stateNamed(h, "in_progress");
+    await h.service.moveToState({ tenantId: FIRM, workItemId: item.id, stateId: working.id }, ACTOR);
     const before = (await h.service.detail(FIRM, item.id)).record.item.stateId;
 
     await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
 
     expect((await h.service.detail(FIRM, item.id)).record.item.stateId).toBe(before);
+  });
+
+  it("takes a task still NOT STARTED to the working state when the firm names no 'with a checker' state (F28)", async () => {
+    // The work board read "In review" beside State "Not Started": sending work
+    // to be checked says it was done, so it was at least started. The working
+    // state is read by its flags (`reworkState`), never its name.
+    const { h, item } = await readyForReview();
+    const working = await stateNamed(h, "in_progress");
+
+    await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+
+    const after = (await h.service.detail(FIRM, item.id)).record.item;
+    expect(after.stateId).toBe(working.id);
+    expect(after.startedAt).toBe(NOW);
+    expect(h.recorded().find((e) => e.verb === "work_item.review_requested")?.payload).toMatchObject({
+      movedToStateId: working.id,
+    });
   });
 
   it("records the move, and says it was the REVIEW that moved it", async () => {
@@ -806,6 +825,8 @@ describe("review — and the rule no firm may configure away", () => {
 
   it("says on the event when NOTHING moved, because that is a firm's decision", async () => {
     const { h, item } = await readyForReview();
+    const working = await stateNamed(h, "in_progress");
+    await h.service.moveToState({ tenantId: FIRM, workItemId: item.id, stateId: working.id }, ACTOR);
     const before = h.recorded().length;
 
     await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
@@ -1017,13 +1038,86 @@ describe("review — and the rule no firm may configure away", () => {
     expect(await h.service.pendingChecks(FIRM, ANAND)).toEqual([]);
   });
 
+  // ── THE FIRM'S RULE APPLIES TO A TASK TOO (audit 2026-10-03, CA#27) ──────
+  //
+  // The roleplay firm published "Manager review" and its ad-hoc tasks went on
+  // being checked under "Anyone but the maker", so one Analyst approved
+  // another's GSTR-3B. A task names no rule (there is no template step to name
+  // one), so the firm's published rule is applied when the sender names none.
+
+  function publish(h: Awaited<ReturnType<typeof harness>>, key: string, label: string, minGradeRank: number) {
+    h.policies.published.set(key, {
+      versionId: `00000000-0000-4000-8000-0000000000${key === "manager_review" ? "p1" : "p2"}`,
+      key,
+      policy: { label, rule: "rank_threshold", minGradeRank, minGradeCode: key },
+    });
+  }
+
+  it("applies the firm's ONLY published rule when the sender names none", async () => {
+    const { h, item } = await readyForReview();
+    publish(h, "manager_review", "Manager review", 7);
+    // Another Associate, who under "anyone but the maker" could approve.
+    const SNEHA = "00000000-0000-4000-8000-0000000000d4";
+    h.reviewers.rows.push({
+      userId: SNEHA,
+      displayName: "Sneha",
+      role: "associate",
+      gradeRank: 2,
+      gradeName: "Analyst",
+      reportsToUserId: ANAND,
+    });
+
+    const approval = await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+
+    expect(approval.policyKey).toBe("manager_review");
+    await expect(
+      h.service.decideReview(
+        { tenantId: FIRM, approvalId: approval.id, decision: "approved", decidedBy: SNEHA },
+        ACTOR,
+      ),
+    ).rejects.toMatchObject({ code: "REVIEWER_NOT_ELIGIBLE" });
+    expect(h.recorded().find((e) => e.verb === "work_item.review_requested")?.payload).toMatchObject({
+      policyKey: "manager_review",
+      policyVersionId: "00000000-0000-4000-8000-0000000000p1",
+    });
+  });
+
+  it("asks WHICH rule when the firm has published several, naming them, and opens nothing", async () => {
+    const { h, item } = await readyForReview();
+    publish(h, "manager_review", "Manager review", 7);
+    publish(h, "eqcr", "Quality review by a partner", 10);
+
+    const refused = h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+    await expect(refused).rejects.toMatchObject({ code: "REVIEW_RULE_NEEDED" });
+    await expect(refused).rejects.toThrow(/Manager review.*Quality review by a partner|Quality review by a partner.*Manager review/);
+    expect(await h.service.pendingChecks(FIRM, ANAND)).toEqual([]);
+
+    const chosen = await h.service.requestReview(
+      { tenantId: FIRM, workItemId: item.id, policyKey: "eqcr" },
+      ACTOR,
+    );
+    expect(chosen.policyKey).toBe("eqcr");
+  });
+
+  it("opens under maker != checker alone when the firm has published no rule", async () => {
+    const { h, item } = await readyForReview();
+    const approval = await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+    expect(approval.policyKey).toBeNull();
+  });
+
+  it("lists the firm's published rules for the screen that sends work to be checked", async () => {
+    const { h } = await readyForReview();
+    publish(h, "manager_review", "Manager review", 7);
+    expect(await h.service.reviewRules(FIRM)).toEqual([{ key: "manager_review", label: "Manager review" }]);
+  });
+
   it("refuses a policy key the firm has not published, rather than falling through", async () => {
     // The caller asked for a particular bar; quietly opening the check without
     // it would be this product lowering it.
     const { h, item } = await readyForReview();
     await expect(
       h.service.requestReview({ tenantId: FIRM, workItemId: item.id, policyKey: "eqcr" }, ACTOR),
-    ).rejects.toThrow(/published no verification policy/i);
+    ).rejects.toThrow(/no rule in force called "eqcr"/i);
   });
 
   it("allows only ONE open review at a time", async () => {
@@ -1104,6 +1198,192 @@ describe("review — and the rule no firm may configure away", () => {
     ).rejects.toThrow(/already/i);
   });
 
+  // ── the decision closes the loop (audit 2026-10-03, CA#28) ────────────────
+  //
+  // The roleplay's manager pressed Approve and the task stayed "In Progress"
+  // with Send for review offered again: nobody ever marked it Completed, so
+  // finished work read as open on every board and report.
+
+  it("COMPLETES the task when the review is approved", async () => {
+    const { h, item } = await readyForReview();
+    const approval = await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+
+    await h.service.decideReview(
+      { tenantId: FIRM, approvalId: approval.id, decision: "approved", decidedBy: ANAND },
+      ACTOR,
+    );
+
+    const after = (await h.service.detail(FIRM, item.id)).record;
+    expect(after.state.isTerminal && after.state.isSuccess).toBe(true);
+    expect(after.item.completedAt).toBe(NOW);
+    // The same facts a hand move to Completed records: the calendar is told,
+    // and "what did we finish" counts it.
+    expect(h.verbs()).toContain("work_item.completed");
+    expect(h.filings.calls.at(-1)).toMatchObject({ workItemId: item.id, discharged: true });
+    const moved = h.recorded().filter((e) => e.verb === "work_item.state_changed").at(-1);
+    expect(moved?.payload).toMatchObject({ toStateId: after.state.id, byReviewDecision: "approved" });
+  });
+
+  it("completes it from the firm's 'with a checker' state too", async () => {
+    const { h, item } = await readyForReview();
+    await nameAReviewState(h);
+    const approval = await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+
+    await h.service.decideReview(
+      { tenantId: FIRM, approvalId: approval.id, decision: "approved", decidedBy: ANAND },
+      ACTOR,
+    );
+
+    const after = (await h.service.detail(FIRM, item.id)).record;
+    expect(after.state.isTerminal && after.state.isSuccess).toBe(true);
+  });
+
+  it("leaves the task where it is when the firm has no successful finished state", async () => {
+    const { h, item } = await readyForReview();
+    const states = await h.vocab.listStates(FIRM);
+    const done = states.find((st) => st.isTerminal && st.isSuccess);
+    if (!done) throw new Error("the seed no longer ships a successful terminal state");
+    await h.vocab.updateState({ tenantId: FIRM, stateId: done.id, isSuccess: false }, ACTOR);
+    const approval = await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+    const before = (await h.service.detail(FIRM, item.id)).record.item.stateId;
+
+    const decided = await h.service.decideReview(
+      { tenantId: FIRM, approvalId: approval.id, decision: "approved", decidedBy: ANAND },
+      ACTOR,
+    );
+
+    expect(decided.decision).toBe("approved");
+    expect((await h.service.detail(FIRM, item.id)).record.item.stateId).toBe(before);
+  });
+
+  it("puts sent-back work back to the firm's working state, out of 'with a checker'", async () => {
+    const { h, item } = await readyForReview();
+    const reviewStateId = await nameAReviewState(h);
+    const approval = await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+    expect((await h.service.detail(FIRM, item.id)).record.item.stateId).toBe(reviewStateId);
+
+    await h.service.decideReview(
+      {
+        tenantId: FIRM,
+        approvalId: approval.id,
+        decision: "rejected",
+        notes: "Two invoices missing from the ITC working",
+        decidedBy: ANAND,
+      },
+      ACTOR,
+    );
+
+    const after = (await h.service.detail(FIRM, item.id)).record;
+    expect(after.state.code).toBe("in_progress");
+    expect(after.item.completedAt).toBeNull();
+    const moved = h.recorded().filter((e) => e.verb === "work_item.state_changed").at(-1);
+    expect(moved?.payload).toMatchObject({ toStateId: after.state.id, byReviewDecision: "rejected" });
+  });
+
+  it("leaves sent-back work alone when it never moved into a 'with a checker' state", async () => {
+    const { h, item } = await readyForReview();
+    const approval = await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+    const before = (await h.service.detail(FIRM, item.id)).record.item.stateId;
+
+    await h.service.decideReview(
+      { tenantId: FIRM, approvalId: approval.id, decision: "rejected", notes: "redo", decidedBy: ANAND },
+      ACTOR,
+    );
+
+    expect((await h.service.detail(FIRM, item.id)).record.item.stateId).toBe(before);
+  });
+
+  // ── sent back shows on the maker's desk (CA#29) ───────────────────────────
+
+  it("marks a sent-back task on the maker's own board with the checker's note, until it goes again", async () => {
+    // The roleplay's article was sent back with a note and My day said
+    // "Nothing due. You are up to date." The board row now carries it.
+    const { h, item } = await readyForReview();
+    const first = await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+    expect((await h.service.board(FIRM, { assigneeUserId: PRIYA }))[0]?.sentBack).toBeNull();
+
+    h.clock.set(new Date("2026-09-10T06:30:00.000Z"));
+    await h.service.decideReview(
+      { tenantId: FIRM, approvalId: first.id, decision: "rejected", notes: "ITC for two bills is missing", decidedBy: ANAND },
+      ACTOR,
+    );
+
+    const row = (await h.service.board(FIRM, { assigneeUserId: PRIYA }))[0];
+    expect(row?.sentBack).toEqual({
+      notes: "ITC for two bills is missing",
+      decidedAt: "2026-09-10T06:30:00.000Z",
+      decidedByName: "Anand",
+    });
+
+    // Sent again: it is the checker's turn, not hers.
+    await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+    expect((await h.service.board(FIRM, { assigneeUserId: PRIYA }))[0]?.sentBack).toBeNull();
+  });
+
+  it("does not call approved work sent back", async () => {
+    const { h, item } = await readyForReview();
+    const approval = await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+    await h.service.decideReview(
+      { tenantId: FIRM, approvalId: approval.id, decision: "approved", decidedBy: ANAND },
+      ACTOR,
+    );
+    const row = (await h.service.board(FIRM, { assigneeUserId: PRIYA, openOnly: false }))[0];
+    expect(row?.sentBack).toBeNull();
+  });
+
+  // ── the checklist is a gate, the way a step's sub-steps are (CA#30) ───────
+
+  it("refuses Send for review while a checklist line is open, and names it", async () => {
+    // Sent with 2 of 3 ticked in the roleplay. A process step will not take
+    // Done with a sub-step open (T6.15); a task's checklist now says the same.
+    const { h, item } = await readyForReview();
+    const a = await h.service.addChecklistItem(FIRM, item.id, "Get sales and purchase data");
+    const b = await h.service.addChecklistItem(FIRM, item.id, "Reconcile ITC with GSTR-2B");
+    await h.service.addChecklistItem(FIRM, item.id, "Compute liability and share challan");
+    await h.service.setChecklistDone(FIRM, a.id, true, PRIYA);
+    await h.service.setChecklistDone(FIRM, b.id, true, PRIYA);
+
+    const refused = h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+    await expect(refused).rejects.toMatchObject({ code: "CHECKLIST_OPEN" });
+    await expect(refused).rejects.toThrow(/Compute liability and share challan/);
+    expect(await h.service.pendingChecks(FIRM, ANAND)).toEqual([]);
+  });
+
+  it("refuses moving to the finished-and-done state by hand while a line is open, and still lets it be cancelled", async () => {
+    const { h, item } = await readyForReview();
+    await h.service.addChecklistItem(FIRM, item.id, "File the return");
+    const states = await h.vocab.listStates(FIRM);
+    const done = states.find((st) => st.isTerminal && st.isSuccess);
+    const cancelled = states.find((st) => st.isTerminal && !st.isSuccess);
+    if (!done || !cancelled) throw new Error("the seed no longer ships both terminal states");
+
+    await expect(
+      h.service.moveToState({ tenantId: FIRM, workItemId: item.id, stateId: done.id }, ACTOR),
+    ).rejects.toMatchObject({ code: "CHECKLIST_OPEN" });
+    // Cancelling is not saying the work was done.
+    await h.service.moveToState({ tenantId: FIRM, workItemId: item.id, stateId: cancelled.id }, ACTOR);
+  });
+
+  it("refuses Approve when a line was unticked after it was sent, and still lets the checker send it back", async () => {
+    const { h, item } = await readyForReview();
+    const a = await h.service.addChecklistItem(FIRM, item.id, "File the return");
+    await h.service.setChecklistDone(FIRM, a.id, true, PRIYA);
+    const approval = await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+    await h.service.setChecklistDone(FIRM, a.id, false, PRIYA);
+
+    await expect(
+      h.service.decideReview(
+        { tenantId: FIRM, approvalId: approval.id, decision: "approved", decidedBy: ANAND },
+        ACTOR,
+      ),
+    ).rejects.toMatchObject({ code: "CHECKLIST_OPEN" });
+    const back = await h.service.decideReview(
+      { tenantId: FIRM, approvalId: approval.id, decision: "rejected", notes: "tick it", decidedBy: ANAND },
+      ACTOR,
+    );
+    expect(back.decision).toBe("rejected");
+  });
+
   it("still opens a review on UNASSIGNED work, with no maker to compare against", async () => {
     // A real state, not an error: somebody did the work off the record. Maker
     // != checker is then vacuous rather than blocking, and the screen says so.
@@ -1125,6 +1405,136 @@ describe("review — and the rule no firm may configure away", () => {
       ACTOR,
     );
     expect(decided.decision).toBe("approved");
+  });
+});
+
+describe("the filing a task raised by hand files (audit 2026-10-03, CA#36)", () => {
+  const FILING = "00000000-0000-4000-8000-00000000f111";
+
+  it("hands the calendar the task's company and whether it is done", async () => {
+    const h = await harness();
+    const item = await h.service.create(
+      { tenantId: FIRM, clientPartyId: CLIENT, entityPartyId: ENTITY, title: "File GSTR-3B for September" },
+      ACTOR,
+    );
+
+    await h.service.linkFiling(FIRM, item.id, FILING, ACTOR);
+    expect(h.filings.links.at(-1)).toEqual({
+      obligationId: FILING,
+      task: { id: item.id, entityPartyId: ENTITY, discharged: false },
+    });
+
+    const done = await stateNamed(h, "completed");
+    await h.service.moveToState({ tenantId: FIRM, workItemId: item.id, stateId: done.id }, ACTOR);
+    await h.service.linkFiling(FIRM, item.id, FILING, ACTOR);
+    expect(h.filings.links.at(-1)?.task.discharged).toBe(true);
+  });
+
+  it("reads the CLIENT as the company when the task names no entity", async () => {
+    const h = await harness();
+    const item = await h.service.create({ tenantId: FIRM, clientPartyId: ENTITY, title: "x" }, ACTOR);
+    await h.service.linkFiling(FIRM, item.id, FILING, ACTOR);
+    expect(h.filings.links.at(-1)?.task.entityPartyId).toBe(ENTITY);
+  });
+
+  it("refuses a task the firm does not have", async () => {
+    const h = await harness();
+    await expect(
+      h.service.linkFiling(FIRM, "00000000-0000-4000-8000-00000000dead", FILING, ACTOR),
+    ).rejects.toMatchObject({ code: "WORK_ITEM_NOT_FOUND" });
+  });
+});
+
+describe("notes on a task (audit 2026-10-03, CA#30)", () => {
+  // The roleplay's article had nowhere to write "challan shared on WhatsApp",
+  // and nothing to say when she sent the work to be checked.
+
+  it("keeps a note with who wrote it and when, and records only THAT one was written", async () => {
+    const h = await harness();
+    const item = await h.service.create(
+      { tenantId: FIRM, clientPartyId: CLIENT, title: "GSTR-3B Sep", assigneeUserId: PRIYA },
+      ACTOR,
+    );
+
+    const note = await h.service.addNote(
+      { tenantId: FIRM, workItemId: item.id, body: "  Challan shared with Ravi on WhatsApp  ", authorUserId: PRIYA },
+      ACTOR,
+    );
+
+    expect(note).toMatchObject({
+      workItemId: item.id,
+      authorUserId: PRIYA,
+      authorName: "Priya",
+      body: "Challan shared with Ravi on WhatsApp",
+      createdAt: NOW,
+    });
+    expect(h.recorded().at(-1)).toMatchObject({
+      verb: "work_item.note_added",
+      objectId: item.id,
+      payload: { noteId: note.id },
+    });
+    // Prose about a client and a colleague, in a log that cannot be erased.
+    expect(JSON.stringify(h.recorded())).not.toContain("WhatsApp");
+  });
+
+  it("shows the notes on the task's own page, oldest first", async () => {
+    const h = await harness();
+    const item = await h.service.create({ tenantId: FIRM, clientPartyId: CLIENT, title: "x" }, ACTOR);
+    await h.service.addNote({ tenantId: FIRM, workItemId: item.id, body: "first", authorUserId: PRIYA }, ACTOR);
+    h.clock.set(new Date("2026-09-10T05:00:00.000Z"));
+    await h.service.addNote({ tenantId: FIRM, workItemId: item.id, body: "second", authorUserId: ANAND }, ACTOR);
+
+    const detail = await h.service.detail(FIRM, item.id);
+    expect(detail.notes.map((n) => [n.body, n.authorName])).toEqual([
+      ["first", "Priya"],
+      ["second", "Anand"],
+    ]);
+  });
+
+  it("refuses an empty note, an over-long one, and one on a task the firm does not have", async () => {
+    const h = await harness();
+    const item = await h.service.create({ tenantId: FIRM, clientPartyId: CLIENT, title: "x" }, ACTOR);
+    await expect(
+      h.service.addNote({ tenantId: FIRM, workItemId: item.id, body: " \n\t", authorUserId: PRIYA }, ACTOR),
+    ).rejects.toMatchObject({ code: "NOTE_REQUIRED" });
+    await expect(
+      h.service.addNote({ tenantId: FIRM, workItemId: item.id, body: "x".repeat(2001), authorUserId: PRIYA }, ACTOR),
+    ).rejects.toMatchObject({ code: "NOTE_TOO_LONG" });
+    await expect(
+      h.service.addNote(
+        { tenantId: FIRM, workItemId: "00000000-0000-4000-8000-00000000dead", body: "x", authorUserId: PRIYA },
+        ACTOR,
+      ),
+    ).rejects.toMatchObject({ code: "WORK_ITEM_NOT_FOUND" });
+  });
+
+  it("keeps the maker's note on the review when the work is sent to be checked, never in the log", async () => {
+    const h = await harness();
+    const item = await h.service.create(
+      { tenantId: FIRM, clientPartyId: CLIENT, title: "x", assigneeUserId: PRIYA },
+      ACTOR,
+    );
+
+    const approval = await h.service.requestReview(
+      { tenantId: FIRM, workItemId: item.id, note: "  Two purchase bills added late, see sheet 2  " },
+      ACTOR,
+    );
+
+    expect(approval.requestNote).toBe("Two purchase bills added late, see sheet 2");
+    expect((await h.service.detail(FIRM, item.id)).reviews[0]?.approval.requestNote).toBe(
+      "Two purchase bills added late, see sheet 2",
+    );
+    expect(JSON.stringify(h.recorded())).not.toContain("purchase bills");
+  });
+
+  it("treats a blank note on Send for review as no note, and refuses an over-long one", async () => {
+    const h = await harness();
+    const item = await h.service.create({ tenantId: FIRM, clientPartyId: CLIENT, title: "x" }, ACTOR);
+    await expect(
+      h.service.requestReview({ tenantId: FIRM, workItemId: item.id, note: "y".repeat(2001) }, ACTOR),
+    ).rejects.toMatchObject({ code: "NOTE_TOO_LONG" });
+    const approval = await h.service.requestReview({ tenantId: FIRM, workItemId: item.id, note: "   " }, ACTOR);
+    expect(approval.requestNote).toBeNull();
   });
 });
 
@@ -1218,6 +1628,31 @@ describe("a period job's umbrella task is one month's task", () => {
       assigneeUserId: PRIYA,
       isStatutoryDue: false,
     });
+  });
+
+  it("is never due after the legal date of a filing its work is for (audit 2026-10-03, CA#11)", async () => {
+    // GST returns · Sep 2026 read due 20 Oct, period end plus the turnaround,
+    // while its GSTR-1 was legally due 11 Oct.
+    const h = await harness();
+    h.spocs.add(CLIENT, FRC, { userId: PRIYA, displayName: "Priya", email: "priya@10x.test" });
+    h.engagements.rows.push(engagementWork({ serviceName: "GST returns" }));
+    h.obligations.filingDue.set(ENGAGEMENT, "2026-10-11");
+
+    await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR, { ...SEPTEMBER, start: "2026-09-01" });
+
+    expect(h.items.rows[0]).toMatchObject({ dueOn: "2026-10-11", isStatutoryDue: true });
+    expect(h.obligations.filingDueAsked).toEqual([{ engagementId: ENGAGEMENT, start: "2026-09-01", end: "2026-09-30" }]);
+  });
+
+  it("keeps the turnaround when it is the earlier date", async () => {
+    const h = await harness();
+    h.spocs.add(CLIENT, FRC, { userId: PRIYA, displayName: "Priya", email: "priya@10x.test" });
+    h.engagements.rows.push(engagementWork({ serviceName: "Monthly bookkeeping" }));
+    h.obligations.filingDue.set(ENGAGEMENT, "2026-11-30");
+
+    await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR, { ...SEPTEMBER, start: "2026-09-01" });
+
+    expect(h.items.rows[0]).toMatchObject({ dueOn: "2026-10-30", isStatutoryDue: false });
   });
 
   it("an entity that files GST through one engagement still owes its bookkeeping task on the other", async () => {

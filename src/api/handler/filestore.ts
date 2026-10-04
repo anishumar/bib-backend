@@ -33,13 +33,26 @@ import {
   contentDispositionFor,
   isBrandAssetKind,
   isDocumentKind,
+  showsFees,
 } from "../../domain/filestore/model";
 import { InvalidTitle, UnsupportedMediaType } from "../../domain/filestore/errors";
 import { scopeOf } from "../scope";
+import type { AuthzService } from "../../usecase/authz/service";
+import type { Principal } from "../../platform/callctx";
 
 export interface FileStoreDeps {
   readonly service: FileStoreService;
+  /**
+   * The FEE AXIS only (audit 2026-10-03, B01). A proposal, a letter, an invoice
+   * and a credit note print the firm's fees, so their bytes open, and they are
+   * drawn, only for a login that sees fees. Gate 3 is middleware.
+   */
+  readonly authz: AuthzService;
 }
+
+/** What the refusal says was refused. */
+const OPEN_FEE_DOCUMENT = "open a document that shows fees";
+const DRAW_FEE_DOCUMENT = "make a copy of a document that shows fees";
 
 // ── Response schemas ────────────────────────────────────────────────────────
 
@@ -107,6 +120,12 @@ const DocumentSchema = z
         "Who uploaded it. NULL means the system generated it, or the person's account has " +
         "been erased. The email is what distinguishes those from a person whose display name " +
         "is simply unset — the same arrangement the audit trail's actor uses.",
+    }),
+    showsFees: z.boolean().openapi({
+      description:
+        "Whether this document prints the firm's fees: a proposal, an engagement letter, an " +
+        "invoice or a credit note (audit 2026-10-03). Its bytes open only for a login that sees " +
+        "fees (FEES_NOT_VISIBLE, 403), so a screen offers Download only where it will work.",
     }),
     versionCount: z.number().int(),
     latestVersion: VersionSchema,
@@ -205,7 +224,11 @@ function toWire(r: DocumentRecord): z.infer<typeof DocumentSchema> {
     partyId: r.document.partyId,
     partyName: r.partyName,
     isClientVisible: r.document.isClientVisible,
-    createdBy: r.createdBy,
+    createdBy:
+      r.createdBy === null
+        ? null
+        : { userId: r.createdBy.userId, displayName: r.createdBy.displayName, email: r.createdBy.email },
+    showsFees: showsFees(r.document.kind),
     versionCount: r.versionCount,
     latestVersion: versionToWire(r.latestVersion),
     createdAt: r.document.createdAt,
@@ -454,7 +477,10 @@ const contentRoute = createRoute({
   responses: {
     200: binaryResponse,
     401: errorResponse("No authenticated session"),
-    403: errorResponse("The session has not selected an org, or the role may not read"),
+    403: errorResponse(
+      "No org selected, the role may not read, or the document shows fees and this login does " +
+        "not see them (FEES_NOT_VISIBLE)",
+    ),
     404: errorResponse("No such document at this firm"),
     502: errorResponse("The storage backend has lost the bytes this version names"),
   },
@@ -469,7 +495,10 @@ const versionContentRoute = createRoute({
   responses: {
     200: binaryResponse,
     401: errorResponse("No authenticated session"),
-    403: errorResponse("The session has not selected an org, or the role may not read"),
+    403: errorResponse(
+      "No org selected, the role may not read, or the document shows fees and this login does " +
+        "not see them (FEES_NOT_VISIBLE)",
+    ),
     404: errorResponse("No such document, or no such version of it"),
     502: errorResponse("The storage backend has lost the bytes this version names"),
   },
@@ -489,7 +518,10 @@ const clientVisibilityRoute = createRoute({
     "party to; a working paper is your own thinking. This is how you disagree with that in " +
     "either direction. " +
     "A document with no `partyId` is the firm's own and belongs to no client, so there is " +
-    "nobody to share it with — it answers 404.",
+    "nobody to share it with — it answers 404. " +
+    "A DRAFT is never shared (B10): a draft copy, or a copy drawn while its proposal, letter or " +
+    "invoice was still a draft, answers 409 `DRAFT_NOT_SHAREABLE`. Taking any document off the " +
+    "portal always works.",
   request: {
     params: DocumentParam,
     body: {
@@ -508,6 +540,7 @@ const clientVisibilityRoute = createRoute({
     401: errorResponse("No authenticated session"),
     403: errorResponse("No org chosen, or the role may not write documents"),
     404: errorResponse("No such document at this firm, or it belongs to no client"),
+    409: errorResponse("It is a draft, and a draft is never shared with the client (DRAFT_NOT_SHAREABLE)"),
   },
 });
 
@@ -568,7 +601,10 @@ const renderRoute = createRoute({
     201: { description: "Rendered and stored", content: { "application/json": { schema: DocumentSchema } } },
     400: errorResponse("The document contains a character the renderer cannot draw"),
     401: errorResponse("No authenticated session"),
-    403: errorResponse("The session has not selected an org, or the role may not write"),
+    403: errorResponse(
+      "No org selected, the role may not write, or this login does not see fees: all three " +
+        "kinds print them (FEES_NOT_VISIBLE)",
+    ),
     404: errorResponse("No such record at this firm"),
     409: errorResponse("The issued invoice or sent letter already has its copy of record"),
     501: errorResponse("Nothing knows how to render that kind of document yet"),
@@ -592,7 +628,10 @@ const previewRoute = createRoute({
     200: { description: "Drawn", content: { "application/json": { schema: DocumentPreviewSchema } } },
     400: errorResponse("A character the renderer cannot draw, or an asOf that cannot be today"),
     401: errorResponse("No authenticated session"),
-    403: errorResponse("The session has not selected an org, or the role may not write"),
+    403: errorResponse(
+      "No org selected, the role may not write, or this login does not see fees: all three " +
+        "kinds print them (FEES_NOT_VISIBLE)",
+    ),
     404: errorResponse("No such record at this firm"),
     501: errorResponse("Nothing knows how to render that kind of document yet"),
   },
@@ -774,6 +813,19 @@ function bytesResponse(bytes: Uint8Array, version: DocumentVersion): Response {
 }
 
 export function registerFileStoreRoutes(app: OpenAPIHono<AppEnv>, deps: FileStoreDeps): void {
+  /**
+   * Refuse the bytes of a document that prints fees to a login that does not
+   * see them, BEFORE they are read from storage. A login that sees fees costs
+   * nothing more; one that does not costs one row read to learn the kind.
+   */
+  const requireFeesFor = async (principal: Principal | null, tenantId: string, documentId: string) => {
+    if (principal !== null && deps.authz.seesFees(principal)) return;
+    const record = await deps.service.get(tenantId, documentId);
+    if (showsFees(record.document.kind) && principal !== null) {
+      deps.authz.requireFees(principal, OPEN_FEE_DOCUMENT);
+    }
+  };
+
   app.openapi(uploadRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
@@ -832,6 +884,7 @@ export function registerFileStoreRoutes(app: OpenAPIHono<AppEnv>, deps: FileStor
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const { documentId } = c.req.valid("param");
+    await requireFeesFor(c.get("principal"), s.tenantId, documentId);
     const { bytes, version } = await deps.service.fetchBytes({ tenantId: s.tenantId, documentId });
     return bytesResponse(bytes, version);
   });
@@ -840,6 +893,7 @@ export function registerFileStoreRoutes(app: OpenAPIHono<AppEnv>, deps: FileStor
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const { documentId, versionId } = c.req.valid("param");
+    await requireFeesFor(c.get("principal"), s.tenantId, documentId);
     const { bytes, version } = await deps.service.fetchBytes({
       tenantId: s.tenantId,
       documentId,
@@ -887,9 +941,14 @@ export function registerFileStoreRoutes(app: OpenAPIHono<AppEnv>, deps: FileStor
   });
 
   app.openapi(renderRoute, async (c) => {
-    const s = scopeOf(c.get("principal"));
+    const principal = c.get("principal");
+    const s = scopeOf(principal);
     if (!s.ok) return c.json(s.deny, s.status);
     const body = c.req.valid("json");
+    // Before anything is described or filed: every kind `render` takes prints fees.
+    if (principal !== null && isDocumentKind(body.kind) && showsFees(body.kind)) {
+      deps.authz.requireFees(principal, DRAW_FEE_DOCUMENT);
+    }
     const record = await deps.service.render({
       tenantId: s.tenantId,
       kind: body.kind,
@@ -904,9 +963,13 @@ export function registerFileStoreRoutes(app: OpenAPIHono<AppEnv>, deps: FileStor
   });
 
   app.openapi(previewRoute, async (c) => {
-    const s = scopeOf(c.get("principal"));
+    const principal = c.get("principal");
+    const s = scopeOf(principal);
     if (!s.ok) return c.json(s.deny, s.status);
     const body = c.req.valid("json");
+    if (principal !== null && isDocumentKind(body.kind) && showsFees(body.kind)) {
+      deps.authz.requireFees(principal, OPEN_FEE_DOCUMENT);
+    }
     const preview = await deps.service.preview({
       tenantId: s.tenantId,
       kind: body.kind,

@@ -29,7 +29,15 @@ import {
   NotAFirmEntity,
   NothingToChangeOnEntity,
 } from "../../domain/document/errors";
-import type { FirmEntityChange, FirmEntityRecord, FirmEntityRepository } from "./ports";
+import type {
+  FirmEntityChange,
+  FirmEntityNumberWrite,
+  FirmEntityNumbersWritten,
+  FirmEntityRecord,
+  FirmEntityRepository,
+} from "./ports";
+import { isValidIdentifier, normalizeIdentifier } from "../../domain/party/model";
+import type { IdentifierType } from "../../domain/party/model";
 
 export interface FirmEntityDeps {
   readonly firmEntities: FirmEntityRepository;
@@ -48,16 +56,60 @@ export interface CreateFirmEntityInput {
   readonly name: string;
   readonly jurisdiction: string;
   readonly entityType: string;
-  readonly registeredAddress?: { readonly lines: readonly string[] } | undefined;
+  readonly registeredAddress?: AddressInput | undefined;
+  /** Its tax registration (a GSTIN in India), PAN (India), phone and email:
+   *  what prints under its name (audit 2026-10-03). Null or blank clears. */
+  readonly taxRegistration?: string | null | undefined;
+  readonly pan?: string | null | undefined;
+  readonly phone?: string | null | undefined;
+  readonly email?: string | null | undefined;
 }
 
-export interface EditFirmEntityInput {
+/** A registered address as typed: the printed lines, the state, the PIN. */
+export interface AddressInput {
+  readonly lines: readonly string[];
+  readonly region?: string | null | undefined;
+  readonly postalCode?: string | null | undefined;
+}
+
+/** The numbers a company's form may set (audit 2026-10-03). */
+interface NumbersInput {
+  readonly taxRegistration?: string | null | undefined;
+  readonly pan?: string | null | undefined;
+  readonly phone?: string | null | undefined;
+  readonly email?: string | null | undefined;
+}
+
+/** Every kind a company's tax registration may be. */
+const TAX_KINDS: readonly IdentifierType[] = ["gstin", "trn", "vat", "ein"];
+/** The kind a company's tax registration is in its own country: India's
+ *  GSTIN, the UAE's TRN, the US's EIN, a VAT number anywhere else. */
+const TAX_KIND_FOR: Readonly<Record<string, IdentifierType>> = { IN: "gstin", AE: "trn", US: "ein" };
+/** What a refusal says a good one looks like. */
+const NUMBER_WORDS: Readonly<Record<string, string>> = {
+  gstin: "a GSTIN has 15 characters: two digits for the state, the PAN, then three more, like 27ABCDE1234F1Z5",
+  pan: "a PAN has 10 characters, five letters, four digits and a letter, like ABCDE1234F",
+  phone: "that phone number is not complete; write it with its country code, like +91 98200 12345",
+  email: "that is not an email address",
+};
+/** What each kind is called in a sentence. */
+const NUMBER_NAMES: Readonly<Record<string, string>> = {
+  gstin: "GSTIN",
+  trn: "TRN",
+  ein: "EIN",
+  vat: "tax registration number",
+  pan: "PAN",
+  phone: "phone number",
+  email: "email address",
+};
+
+export interface EditFirmEntityInput extends NumbersInput {
   readonly tenantId: string;
   readonly partyId: string;
   readonly name?: string | undefined;
   readonly entityType?: string | undefined;
   /** Null clears it. */
-  readonly registeredAddress?: { readonly lines: readonly string[] } | null | undefined;
+  readonly registeredAddress?: AddressInput | null | undefined;
   /** Only for a company with no country recorded yet — the seeded one. */
   readonly jurisdiction?: string | undefined;
 }
@@ -97,6 +149,7 @@ export class FirmEntityService {
     const entityType = this.typeOrThrow(input.entityType);
     const jurisdiction = this.countryOrThrow(input.jurisdiction);
     const registeredAddress = this.addressOrThrow(input.registeredAddress ?? null);
+    const numbers = this.numbersOrThrow(input, jurisdiction, name);
 
     const serving = await this.deps.firmEntities.issuerForCountry(input.tenantId, jurisdiction);
     if (serving !== null) throw new CountryAlreadyServed(jurisdiction, serving.name);
@@ -111,8 +164,10 @@ export class FirmEntityService {
       entityType,
       registeredAddress,
       preferenceId,
+      numbers,
     });
-    if (!created) {
+    if ("taken" in created) throw this.taken(created.taken);
+    if (!created.created) {
       // Another company took the country between the check and the write; the
       // transaction wrote nothing.
       const now = await this.deps.firmEntities.issuerForCountry(input.tenantId, jurisdiction);
@@ -142,6 +197,7 @@ export class FirmEntityService {
       actor,
       payload: { clientJurisdiction: jurisdiction, firmEntityPartyId: partyId, isFallback: false },
     });
+    await this.recordNumbers(input.tenantId, partyId, created.numbers, actor);
     return this.findOrThrow(input.tenantId, partyId);
   }
 
@@ -206,10 +262,16 @@ export class FirmEntityService {
         input.registeredAddress === null ? null : this.addressOrThrow(input.registeredAddress);
       fields.push("registeredAddress");
     }
-    if (Object.keys(change).length === 0) throw new NothingToChangeOnEntity();
+    // ITS NUMBERS (audit 2026-10-03): held as the party's identifiers, as a
+    // client's are, so one reading (`crm.print_identity`) prints both halves.
+    const country = change.register?.jurisdiction ?? current.jurisdiction;
+    const numbers = this.numbersOrThrow(input, country, current.name);
+    if (Object.keys(change).length === 0 && numbers.length === 0) throw new NothingToChangeOnEntity();
 
-    const revised: FirmEntityChange = change;
-    await this.deps.firmEntities.edit(input.tenantId, input.partyId, revised);
+    const revised: FirmEntityChange = { ...change, ...(numbers.length === 0 ? {} : { numbers }) };
+    const written = await this.deps.firmEntities.edit(input.tenantId, input.partyId, revised);
+    if ("taken" in written) throw this.taken(written.taken);
+    await this.recordNumbers(input.tenantId, input.partyId, written.numbers, actor);
 
     if (change.register !== undefined) {
       await this.deps.events.recordEvent({
@@ -230,6 +292,79 @@ export class FirmEntityService {
       });
     }
     return this.findOrThrow(input.tenantId, input.partyId);
+  }
+
+  /**
+   * The numbers a form sent, checked and normalised, as writes: each one sent
+   * replaces whatever of its kind is in force, and null or blank clears it.
+   * Nothing sent, nothing written.
+   */
+  private numbersOrThrow(input: NumbersInput, country: string | null, name: string): FirmEntityNumberWrite[] {
+    const writes: FirmEntityNumberWrite[] = [];
+    const one = (
+      raw: string | null | undefined,
+      types: readonly IdentifierType[],
+      type: IdentifierType,
+    ): void => {
+      if (raw === undefined) return;
+      const typed = raw === null ? "" : raw.trim();
+      if (typed === "") {
+        writes.push({ types, set: null });
+        return;
+      }
+      const value = normalizeIdentifier(type, typed, country);
+      if (!isValidIdentifier(type, value)) {
+        throw new InvalidFirmEntity(NUMBER_WORDS[type] ?? `that ${NUMBER_NAMES[type] ?? type} is not one`);
+      }
+      writes.push({ types, set: { id: this.deps.ids.newId(), type, value } });
+    };
+    const anyNumber = [input.taxRegistration, input.pan, input.phone].some((v) => v !== undefined && v !== null && v.trim() !== "");
+    if (anyNumber && country === null) {
+      throw new InvalidFirmEntity(
+        `record where ${name} is registered first: its numbers and phone follow from the country`,
+      );
+    }
+    one(input.taxRegistration, TAX_KINDS, TAX_KIND_FOR[country ?? ""] ?? "vat");
+    if (input.pan !== undefined && input.pan !== null && input.pan.trim() !== "" && country !== "IN") {
+      throw new InvalidFirmEntity("a PAN is an Indian tax number, and this company is not registered in India");
+    }
+    one(input.pan, ["pan"], "pan");
+    one(input.phone, ["phone"], "phone");
+    one(input.email, ["email"], "email");
+    return writes;
+  }
+
+  private taken(type: string): InvalidFirmEntity {
+    return new InvalidFirmEntity(
+      `that ${NUMBER_NAMES[type] ?? type} is already recorded for another client or company at this firm`,
+    );
+  }
+
+  /** One event per number added or voided: its kind, never its value. */
+  private async recordNumbers(
+    tenantId: string,
+    partyId: string,
+    written: FirmEntityNumbersWritten,
+    actor: Actor,
+  ): Promise<void> {
+    for (const v of written.voided) {
+      await this.deps.events.recordEvent({
+        tenantId,
+        verb: "party_identifier.voided",
+        objectId: v.id,
+        actor,
+        payload: { partyId, identifierType: v.type },
+      });
+    }
+    for (const a of written.added) {
+      await this.deps.events.recordEvent({
+        tenantId,
+        verb: "party_identifier.added",
+        objectId: a.id,
+        actor,
+        payload: { partyId, identifierType: a.type },
+      });
+    }
   }
 
   private async findOrThrow(tenantId: string, partyId: string): Promise<FirmEntityView> {
@@ -275,14 +410,19 @@ export class FirmEntityService {
     return code;
   }
 
-  /** Lines trimmed and blank ones dropped; nothing left is no address. */
-  private addressOrThrow(
-    raw: { readonly lines: readonly string[] } | null,
-  ): RegisteredAddress | null {
+  /** Lines trimmed and blank ones dropped; nothing left is no address. The
+   *  state and postal code are kept when typed (audit 2026-10-03). */
+  private addressOrThrow(raw: AddressInput | null): RegisteredAddress | null {
     if (raw === null) return null;
     const lines = raw.lines.map((l) => l.trim()).filter((l) => l !== "");
-    if (lines.length === 0) return null;
-    const address = { lines };
+    const region = raw.region?.trim() ?? "";
+    const postalCode = raw.postalCode?.trim() ?? "";
+    if (lines.length === 0 && region === "" && postalCode === "") return null;
+    const address: RegisteredAddress = {
+      lines,
+      ...(region === "" ? {} : { region }),
+      ...(postalCode === "" ? {} : { postalCode }),
+    };
     const problem = registeredAddressProblem(address);
     if (problem !== null) throw new InvalidFirmEntity(problem);
     return address;

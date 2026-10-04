@@ -35,7 +35,7 @@
 // regardless, and an administrator is watching a screen that can be told.
 import type { Actor } from "../../domain/ledger/model";
 import type { Audience, Membership } from "../../domain/tenancy/model";
-import type { StaffFirmDirectory, StaffMemberships, StaffWelcomeIdentity } from "./ports";
+import type { StaffFirmDirectory, StaffFirmTimeZone, StaffMemberships, StaffWelcomeIdentity } from "./ports";
 
 /**
  * The firm's own people, as the domain spells it.
@@ -51,6 +51,8 @@ interface Deps {
   readonly identity: StaffWelcomeIdentity;
   readonly memberships: StaffMemberships;
   readonly firms: StaffFirmDirectory;
+  /** Optional: without it the letter says UTC, as before (CA#50). */
+  readonly timeZones?: StaffFirmTimeZone;
 }
 
 export interface AddMemberInput {
@@ -104,9 +106,13 @@ export class StaffInviteService {
     // the mailer degrades the wording rather than refusing to send: a colleague
     // left unwritten-to is the failure this whole change is about.
     const names = await this.deps.firms.tenantNames([input.tenantId]);
+    const timeZone = this.deps.timeZones === undefined ? null : await this.deps.timeZones.timeZoneFor(input.tenantId);
     const welcome = await this.deps.identity.welcomeStaff(
       membership.userId,
       names.get(input.tenantId) ?? null,
+      timeZone,
+      // The colleague doing the adding, so the letter names them (CA#50).
+      actor.type === "human" ? actor.id : null,
     );
 
     return {

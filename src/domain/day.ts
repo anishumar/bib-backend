@@ -61,3 +61,23 @@ export function longDay(iso: string): string {
   // is a second date format, which is the thing this is fixing.
   return `${day} ${name} ${year}`;
 }
+
+/**
+ * `YYYY-MM-DD` naming a day that exists (audit 2026-10-03, B43).
+ *
+ * The shape alone lets 2026-13-45 through, and `Date.parse` lets 2026-02-31
+ * through (V8 rolls it into March); either way Postgres refuses the cast with
+ * SQLSTATE 22008 and the caller got a 500 for a typo. Arithmetic on the split
+ * string, so no `Date` and no zone are involved, for this file's reason.
+ */
+export function isCalendarDay(v: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
+  if (!m) return false;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  if (mo < 1 || mo > 12 || d < 1) return false;
+  const leap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+  const lengths = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return d <= (lengths[mo - 1] ?? 0);
+}

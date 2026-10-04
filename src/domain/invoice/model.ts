@@ -50,10 +50,14 @@ export interface Invoice {
   /** WHO IS CHARGING — one of the firm's own entities, and the owner of the
    *  series this number came from. */
   readonly entityPartyId: string;
-  /** `INV/2026-27/0001`. Frozen by a trigger the moment the row exists. */
-  readonly number: string;
+  /** `INV/2026-27/0001`. Drawn from the series when the invoice is ISSUED
+   *  (0322) and frozen by a trigger from then; null on a draft (and on a draft
+   *  cancelled before issue). Drafts made before 0322 keep the number they drew. */
+  readonly number: string | null;
+  /** Which year's series the number is (or will be) drawn from: chosen at the
+   *  draft ("which year's books"), and it does not move. */
   readonly financialYear: number;
-  readonly sequenceNumber: number;
+  readonly sequenceNumber: number | null;
   readonly status: InvoiceStatus;
   readonly currency: string;
   readonly fxRate: string;
@@ -65,6 +69,9 @@ export interface Invoice {
   readonly irn: string | null;
   readonly irnRegisteredAt: string | null;
   readonly notes: string | null;
+  /** Whose revenue this is (0318): set when raised from bill dues, frozen
+   *  once issued. Null when nobody was named. */
+  readonly managerUserId: string | null;
 }
 
 export interface InvoiceLine {
@@ -116,27 +123,36 @@ export interface InvoiceTotals {
  * states — and a UTC `Date` moves 1 April by a day for anyone east or west of
  * Greenwich, which is exactly the boundary this function exists to find.
  *
- * 1 APRIL IS HARDCODED and that is a real limit: right for India, wrong for the
- * UK (6 April), the US (varies) and the UAE (calendar). It is not read from
- * `core.legal_entity.financial_year_end` because doing so makes a series' year
- * depend on a mutable column — change the entity's year end and every FUTURE
- * number changes its prefix while issued ones keep theirs. That is a decision
- * about a legal document series, and it needs a firm to take it.
+ * 1 APRIL IS THE DEFAULT, NOT THE ONLY ANSWER (audit 2026-10-03, B03). An
+ * invoice's year is decided when it is ISSUED, from its issue date, in the
+ * firm's own financial year when the firm has said when that starts (its
+ * compliance policy's `fiscalYearStartMonth`), else 1 April as before. It is
+ * read at issue, so changing the setting moves only numbers not yet drawn,
+ * never an issued one. The SQL copy keeps 1 April: nothing constrains on it.
  */
-export function financialYearOf(isoDate: string): number {
+export function financialYearOf(isoDate: string, startMonth: number = INDIAN_FY_START_MONTH): number {
   const match = /^(\d{4})-(\d{2})-\d{2}$/.exec(isoDate);
   if (match === null) {
     throw new RangeError(`expected an ISO date (YYYY-MM-DD), got ${JSON.stringify(isoDate)}`);
   }
+  if (!Number.isInteger(startMonth) || startMonth < 1 || startMonth > 12) {
+    throw new RangeError(`a financial year starts in a month from 1 to 12, got ${String(startMonth)}`);
+  }
   const year = Number(match[1]);
   const month = Number(match[2]);
-  return month >= 4 ? year : year - 1;
+  return month >= startMonth ? year : year - 1;
 }
+
+/** 1 April: India's financial year, and the year every series used before a
+ *  firm could say otherwise. */
+export const INDIAN_FY_START_MONTH = 4;
 
 /** `2026-27` — how a financial year is written on the document itself. Both
  *  halves, because "FY 2026" is ambiguous in exactly the countries this product
- *  serves. */
-export function financialYearLabel(startYear: number): string {
+ *  serves. A year that starts in January is one calendar year and is written
+ *  as one: `2026`. */
+export function financialYearLabel(startYear: number, startMonth: number = INDIAN_FY_START_MONTH): string {
+  if (startMonth === 1) return String(startYear);
   return `${String(startYear)}-${String((startYear + 1) % 100).padStart(2, "0")}`;
 }
 
@@ -156,6 +172,8 @@ export function formatInvoiceNumber(input: {
   readonly prefix: string;
   readonly financialYear: number;
   readonly sequence: number;
+  /** The month the year starts in; 1 April when absent. */
+  readonly startMonth?: number | undefined;
 }): string {
   if (!Number.isInteger(input.sequence) || input.sequence < 1) {
     throw new RangeError(
@@ -164,7 +182,7 @@ export function formatInvoiceNumber(input: {
   }
   return [
     input.prefix,
-    financialYearLabel(input.financialYear),
+    financialYearLabel(input.financialYear, input.startMonth),
     String(input.sequence).padStart(4, "0"),
   ].join("/");
 }
@@ -178,6 +196,58 @@ export function isSeriesPrefix(v: string): boolean {
 }
 
 export const DEFAULT_SERIES_PREFIX = "INV";
+
+// ── A number drawn before 0322 (audit 2026-10-03, B51) ─────────────────────
+
+/**
+ * Whether a draft that ALREADY HOLDS A NUMBER may still be issued with it.
+ *
+ * Before 0322 the number was drawn when the draft was made, and those drafts
+ * keep it: NEVER RENUMBERED (the user, 2026-10-03), because taking a drawn
+ * number away leaves the gap the series exists to prevent. But issuing one
+ * late can put the series out of order, and that is refused instead.
+ *
+ * A SERIES is one company's invoices for one financial year, counted 1, 2, 3
+ * in the order they are issued (`crm.invoice_series`, keyed on the entity and
+ * the year). A drawn number is OUT OF ORDER when either:
+ *
+ *  1. A LATER NUMBER OF ITS SERIES HAS ALREADY BEEN ISSUED: an invoice of the
+ *     same company and year with a higher sequence number carries an issue
+ *     date. Issued and cancelled since counts (it went out with that number);
+ *     a later draft cancelled before it was issued does not (it never went out).
+ *     Issuing 7 after 9 would date 7 later than 9.
+ *  2. ITS SERIES IS NOT THE YEAR OF THE ISSUE DATE: an invoice dated in one
+ *     financial year with a number from another year's series. B03 (0326) made
+ *     the issue date decide the year; a drawn number cannot follow it.
+ *
+ * Otherwise it is IN ORDER and issues as it is. The adapter asks this under the
+ * series' row lock, so a later number cannot be issued between the check and
+ * the write.
+ */
+export type PreDrawnNumberOrder =
+  | { readonly inOrder: true }
+  | { readonly inOrder: false; readonly why: "later_number_issued"; readonly laterNumber: string }
+  | { readonly inOrder: false; readonly why: "another_year"; readonly issueFinancialYear: number };
+
+export type NumberOutOfOrder = Exclude<PreDrawnNumberOrder, { readonly inOrder: true }>;
+
+export function preDrawnNumberOrder(input: {
+  /** The draft's series year and its place in that series. */
+  readonly draft: { readonly financialYear: number; readonly sequenceNumber: number };
+  /** The financial year of the day it would be issued on. */
+  readonly issueFinancialYear: number;
+  /** The highest-numbered invoice of the draft's series that carries an issue
+   *  date, other than the draft itself. Null when none has. */
+  readonly latestIssued: { readonly number: string; readonly sequenceNumber: number } | null;
+}): PreDrawnNumberOrder {
+  if (input.latestIssued !== null && input.latestIssued.sequenceNumber > input.draft.sequenceNumber) {
+    return { inOrder: false, why: "later_number_issued", laterNumber: input.latestIssued.number };
+  }
+  if (input.issueFinancialYear !== input.draft.financialYear) {
+    return { inOrder: false, why: "another_year", issueFinancialYear: input.issueFinancialYear };
+  }
+  return { inOrder: true };
+}
 
 // ── Money against an invoice (T3.5) ────────────────────────────────────────
 
@@ -240,7 +310,10 @@ export type CreditReason =
   | "goodwill"
   | "scope_change"
   | "duplicate_invoice"
-  | "bad_debt";
+  | "bad_debt"
+  /** An advance left over once the work it covered is finished, or a client
+   *  who left early, given back (0320). */
+  | "advance_refund";
 
 export const CREDIT_REASONS: readonly CreditReason[] = [
   "service_failure",
@@ -249,6 +322,7 @@ export const CREDIT_REASONS: readonly CreditReason[] = [
   "scope_change",
   "duplicate_invoice",
   "bad_debt",
+  "advance_refund",
 ];
 
 export function isCreditReason(v: string): v is CreditReason {

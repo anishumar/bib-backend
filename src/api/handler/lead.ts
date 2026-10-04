@@ -16,6 +16,7 @@ import { z, errorResponse } from "../openapi";
 import { scopeOf } from "../scope";
 import { IdentifierTypeSchema } from "./party";
 import type { Lead, LeadSource, LeadStage } from "../../domain/lead/model";
+import { CONTACT_ROLES } from "../../domain/party/model";
 import type { LeadService } from "../../usecase/lead/service";
 import type { LeadRecord, LeadView } from "../../usecase/lead/ports";
 import type { AuthzService } from "../../usecase/authz/service";
@@ -96,7 +97,8 @@ const LeadSchema = z
         description:
           "What the opportunity could be worth: an ESTIMATE written at capture or later, not a " +
           "quote (the quote is the proposal). In the firm's reporting currency, so every lead " +
-          "in a firm compares with every other. Null when nobody has said.",
+          "in a firm compares with every other. Null when nobody has said, and null for a login " +
+          "that does not see fees (B33), which the session's `commercialVisibility` tells apart.",
       }),
     capturedAt: z.string(),
     closedAt: z.string().nullable(),
@@ -254,6 +256,19 @@ const CaptureLeadBody = z
         "who must be active staff at this firm.",
     }),
     notes: z.string().optional(),
+    contact: z
+      .object({
+        name: z.string().min(1).max(300),
+        role: z.enum(CONTACT_ROLES),
+      })
+      .optional()
+      .openapi({
+        description:
+          "The person the firm deals with at a COMPANY prospect, and their role there (CA#20). " +
+          "With one named, the email and phone in `identifiers` are the contact's: they go on a " +
+          "person linked to the company in that role, and the company keeps the PAN and GSTIN. " +
+          "Refused for a person prospect (INVALID_LEAD_CONTACT).",
+      }),
     jurisdiction: z.string().length(2).optional().openapi({
       description:
         "Where the PROSPECT is, ISO 3166-1 alpha-2 in UPPER CASE. Optional — often nobody " +
@@ -264,7 +279,8 @@ const CaptureLeadBody = z
       description:
         "What the opportunity could be worth, as a decimal string with no commas or currency " +
         "sign, in the firm's reporting currency. Optional. Like `notes`, a capture that MERGES " +
-        "onto a live opportunity does not apply it.",
+        "onto a live opportunity does not apply it. Refused to a login that does not see fees " +
+        "(FEES_NOT_VISIBLE, 403): leave it out.",
     }),
   })
   .openapi("CaptureLeadRequest");
@@ -295,17 +311,20 @@ const AssignOwnerBody = z
 
 const SetDetailsBody = z
   .object({
-    // Both REQUIRED and both nullable: this is the whole of the two facts, and
-    // null is an instruction ("we no longer know"), not an omission.
+    // The country is REQUIRED and nullable: null is an instruction ("we no
+    // longer know"), not an omission. The value is OPTIONAL since B33 (audit
+    // 2026-10-03): absent keeps it, so a login that cannot see fees saves the
+    // country without wiping a figure it never saw.
     jurisdiction: z.string().length(2).nullable().openapi({
       description:
         "Where the prospect is, ISO 3166-1 alpha-2 in UPPER CASE, or null for not known. " +
         "Changing it does NOT reassign the lead: territory decides a desk at capture only.",
     }),
-    estimatedValue: EstimateAmountSchema.nullable().openapi({
+    estimatedValue: EstimateAmountSchema.nullable().optional().openapi({
       description:
         "What the opportunity could be worth, as a decimal string in the firm's reporting " +
-        "currency, or null for not known.",
+        "currency, or null for not known. Leave it out to keep what is there. Sending it, null " +
+        "included, is refused to a login that does not see fees (FEES_NOT_VISIBLE, 403).",
     }),
   })
   .openapi("SetLeadDetailsRequest");
@@ -511,17 +530,20 @@ const deleteRoute = createRoute({
  * the wire undocumented that way and `tests/api/openapi.test.ts` — the general
  * assertion — caught it before it merged. The fields are now listed.
  */
-function toRecordBody(record: LeadRecord): z.infer<typeof LeadRecordSchema> {
+function toRecordBody(record: LeadRecord, fees: boolean): z.infer<typeof LeadRecordSchema> {
   return {
-    lead: toLeadBody(record.lead),
-    party: { ...record.party },
-    owner: record.owner === null ? null : { ...record.owner },
+    lead: toLeadBody(record.lead, fees),
+    party: { id: record.party.id, kind: record.party.kind, displayName: record.party.displayName },
+    owner:
+      record.owner === null
+        ? null
+        : { userId: record.owner.userId, displayName: record.owner.displayName, email: record.owner.email },
   };
 }
 
-function toViewBody(view: LeadView): z.infer<typeof LeadViewSchema> {
+function toViewBody(view: LeadView, fees: boolean): z.infer<typeof LeadViewSchema> {
   return {
-    ...toRecordBody(view),
+    ...toRecordBody(view, fees),
     deletedBy: view.deletedBy === null ? null : { ...view.deletedBy },
     deleteRefusal:
       view.deleteRefusal === null
@@ -530,7 +552,8 @@ function toViewBody(view: LeadView): z.infer<typeof LeadViewSchema> {
   };
 }
 
-function toLeadBody(lead: Lead): z.infer<typeof LeadSchema> {
+/** `fees` is the fee axis (B33): the value is the one money field on a lead. */
+function toLeadBody(lead: Lead, fees: boolean): z.infer<typeof LeadSchema> {
   return {
     id: lead.id,
     tenantId: lead.tenantId,
@@ -543,7 +566,7 @@ function toLeadBody(lead: Lead): z.infer<typeof LeadSchema> {
     lostReason: lead.lostReason,
     jurisdiction: lead.jurisdiction,
     estimatedValue:
-      lead.estimatedValue === null
+      lead.estimatedValue === null || !fees
         ? null
         : { amount: lead.estimatedValue.amount, currency: lead.estimatedValue.currency },
     capturedAt: lead.capturedAt,
@@ -629,19 +652,36 @@ export function registerLeadRoutes(app: OpenAPIHono<AppEnv>, deps: LeadDeps): vo
   // session, which `scopeOf` has refused before this is ever asked.
   const administers = async (principal: Principal | null): Promise<boolean> =>
     principal !== null && (await deps.authz.can(principal, "tenant:admin"));
+  /** The fee axis (B33): redacts the value on every answer. */
+  const seesFees = (principal: Principal | null): boolean =>
+    principal !== null && deps.authz.seesFees(principal);
+  /** What the refusal says, when a login that cannot see fees sends a value. */
+  const SET_VALUE = "say what a lead could be worth";
 
   app.openapi(captureRoute, async (c) => {
-    const s = scopeOf(c.get("principal"));
+    const principal = c.get("principal");
+    const s = scopeOf(principal);
     if (!s.ok) return c.json(s.deny, s.status);
     const body = c.req.valid("json");
+    if (body.estimatedValue !== undefined && principal !== null) {
+      deps.authz.requireFees(principal, SET_VALUE);
+    }
     const result = await deps.service.capture(
       { tenantId: s.tenantId, ...body, asOf: c.req.valid("query").asOf },
       s.actor,
     );
+    // Field by field (B48): the result was forwarded whole, which ships
+    // whatever the use case's object happens to hold.
+    const wire = {
+      lead: toLeadBody(result.lead, seesFees(principal)),
+      merged: result.merged,
+      matchedExistingParty: result.matchedExistingParty,
+      discardedTitle: result.discardedTitle,
+    };
     // Two literal calls rather than a computed status: 200 and 201 mean
     // different things here and the route documents both.
-    if (result.merged) return c.json(result, 200);
-    return c.json(result, 201);
+    if (result.merged) return c.json(wire, 200);
+    return c.json(wire, 201);
   });
 
   app.openapi(listRoute, async (c) => {
@@ -649,7 +689,8 @@ export function registerLeadRoutes(app: OpenAPIHono<AppEnv>, deps: LeadDeps): vo
     if (!s.ok) return c.json(s.deny, s.status);
     const { stage } = c.req.valid("query");
     const leads = await deps.service.list(s.tenantId, stage);
-    return c.json({ leads: leads.map(toRecordBody) }, 200);
+    const fees = seesFees(c.get("principal"));
+    return c.json({ leads: leads.map((l) => toRecordBody(l, fees)) }, 200);
   });
 
   app.openapi(getRoute, async (c) => {
@@ -658,7 +699,7 @@ export function registerLeadRoutes(app: OpenAPIHono<AppEnv>, deps: LeadDeps): vo
     if (!s.ok) return c.json(s.deny, s.status);
     const { leadId } = c.req.valid("param");
     const view = await deps.service.get(s.tenantId, leadId, await administers(principal));
-    return c.json(toViewBody(view), 200);
+    return c.json(toViewBody(view, seesFees(principal)), 200);
   });
 
   // Field by field, like every other lead on the wire: these two forwarded the
@@ -672,7 +713,7 @@ export function registerLeadRoutes(app: OpenAPIHono<AppEnv>, deps: LeadDeps): vo
       { tenantId: s.tenantId, leadId, stage, lostReason },
       s.actor,
     );
-    return c.json(toLeadBody(moved), 200);
+    return c.json(toLeadBody(moved, seesFees(c.get("principal"))), 200);
   });
 
   app.openapi(assignOwnerRoute, async (c) => {
@@ -684,7 +725,7 @@ export function registerLeadRoutes(app: OpenAPIHono<AppEnv>, deps: LeadDeps): vo
       { tenantId: s.tenantId, leadId, ownerUserId },
       s.actor,
     );
-    return c.json(toLeadBody(assigned), 200);
+    return c.json(toLeadBody(assigned, seesFees(c.get("principal"))), 200);
   });
 
   app.openapi(deleteRoute, async (c) => {
@@ -700,19 +741,24 @@ export function registerLeadRoutes(app: OpenAPIHono<AppEnv>, deps: LeadDeps): vo
       },
       s.actor,
     );
-    return c.json(toLeadBody(deleted), 200);
+    return c.json(toLeadBody(deleted, seesFees(principal)), 200);
   });
 
   app.openapi(setDetailsRoute, async (c) => {
-    const s = scopeOf(c.get("principal"));
+    const principal = c.get("principal");
+    const s = scopeOf(principal);
     if (!s.ok) return c.json(s.deny, s.status);
     const { leadId } = c.req.valid("param");
     const { jurisdiction, estimatedValue } = c.req.valid("json");
+    // Null is a value too: it would wipe a figure this login never saw.
+    if (estimatedValue !== undefined && principal !== null) {
+      deps.authz.requireFees(principal, SET_VALUE);
+    }
     const saved = await deps.service.setDetails(
       { tenantId: s.tenantId, leadId, jurisdiction, estimatedValue },
       s.actor,
     );
-    return c.json(toLeadBody(saved), 200);
+    return c.json(toLeadBody(saved, seesFees(principal)), 200);
   });
   app.openapi(listTerritoryRoute, async (c) => {
     const s = scopeOf(c.get("principal"));

@@ -25,7 +25,9 @@ import {
   DunningActionNotFound,
   DunningAlreadyDecided,
   DunningNotAwaitingApproval,
+  DunningNothingOwed,
 } from "../../domain/invoice/errors";
+import { compareAmounts } from "../../domain/money/model";
 import type {
   DunningActionRecord,
   DunningLadderSource,
@@ -66,6 +68,8 @@ export interface DunningSweepReport {
   /** Terminal rungs reached and left for a partner. Counted separately because
    *  it is the number somebody has to act on. */
   readonly awaitingApproval: number;
+  /** Set when this firm could not be visited at all; the worker logs it. */
+  readonly failure?: string;
 }
 
 export class DunningService {
@@ -78,11 +82,24 @@ export class DunningService {
    * every read below it is tenant-scoped by RLS — so it asks the global
    * registry and then does each firm's work under that firm's context. Never a
    * bypass; always a scope chosen deliberately.
+   *
+   * ONE FIRM'S FAILURE NEVER STOPS THE OTHERS (audit 2026-10-03, B13): caught
+   * per firm and reported in `failure`, which the worker logs at error.
    */
   async sweep(): Promise<readonly DunningSweepReport[]> {
     const reports: DunningSweepReport[] = [];
     for (const tenantId of await this.deps.tenants.activeTenantIds()) {
-      reports.push(await this.sweepTenant(tenantId));
+      try {
+        reports.push(await this.sweepTenant(tenantId));
+      } catch (err) {
+        reports.push({
+          tenantId,
+          escalated: 0,
+          alreadyTaken: 0,
+          awaitingApproval: 0,
+          failure: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
     return reports;
   }
@@ -210,6 +227,19 @@ export class DunningService {
     // `dunning_action_decided_chk` refuses, and it should never get that far.
     if (actor.type !== "human" || actor.id === null) {
       throw new DunningNotAwaitingApproval(input.actionId, existing.action);
+    }
+
+    // ONLY OVER MONEY STILL OWED (B22). A hold approved over a cancelled or
+    // settled invoice is a hold over nothing; rejecting stays open.
+    if (input.approve) {
+      const invoice = await this.deps.invoices.find(input.tenantId, existing.invoiceId);
+      const balance = await this.deps.invoices.balanceOf(input.tenantId, existing.invoiceId);
+      if (invoice === null || invoice.status !== "issued") {
+        throw new DunningNothingOwed(invoice?.number ?? null, "cancelled");
+      }
+      if (balance !== null && compareAmounts(balance.outstanding, "0") <= 0) {
+        throw new DunningNothingOwed(invoice.number, "settled");
+      }
     }
 
     const decided = await this.deps.dunning.decide(

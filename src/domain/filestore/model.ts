@@ -220,6 +220,41 @@ export function hasCopyOfRecord(kind: DocumentKind): kind is CopyOfRecordKind {
 }
 
 /**
+ * THE KINDS THAT PRINT THE FIRM'S FEES (audit 2026-10-03, B01): a proposal, an
+ * engagement letter, an invoice and a credit note. Their bytes open, and they
+ * are drawn, only for a login that sees fees.
+ *
+ * The fee axis redacted the JSON of all four and handed the PDF to anybody: an
+ * associate read "Hidden" on an invoice and downloaded its issued copy. A
+ * redacted PDF was weighed and refused: a figure prints in a table cell, a
+ * total, a "Fees H3: INR 50,000 Yearly" lead, a fee group's sentence and a
+ * Summary of Fees, and a redaction that misses one cannot be taken back. So
+ * the document is refused whole, by its KIND.
+ *
+ * By kind and not by what the bytes say, which nothing here reads: a kind is
+ * what the firm filed it as. An invoice uploaded as `other` opens for anybody,
+ * as any `other` does; the four are what the product draws itself.
+ *
+ * Exhaustive, so a kind added later is decided here, not defaulted.
+ */
+export function showsFees(kind: DocumentKind): boolean {
+  switch (kind) {
+    case "proposal":
+    case "engagement_letter":
+    case "invoice":
+    case "credit_note":
+      return true;
+    case "identity_proof":
+    case "statutory_filing":
+    case "working_paper":
+    case "correspondence":
+    case "brand_asset":
+    case "other":
+      return false;
+  }
+}
+
+/**
  * How a rendered file hangs off the record it was drawn from: the `role` on
  * its `files.document_link` row. The column is free text (0037); these are
  * the values the renderer writes.
@@ -394,6 +429,49 @@ export function safeFilename(raw: string): string | null {
   if (cleaned.length === 0) return null;
   if (cleaned === "." || cleaned === "..") return null;
   return cleaned.slice(0, 255);
+}
+
+/** What a person calls each kind of document the product draws itself. */
+const RENDERED_KIND_WORDS: Partial<Record<DocumentKind, string>> = {
+  proposal: "Proposal",
+  engagement_letter: "Engagement letter",
+  invoice: "Invoice",
+  credit_note: "Credit note",
+};
+
+/** Longest file name a rendered PDF gets, extension included. */
+const RENDERED_FILENAME_MAX = 150;
+
+/**
+ * The name a PDF the product draws is SAVED under (CA#56, audit 2026-10-03):
+ * what it is, its number, "draft" when it is one, and whose it is, so a
+ * download folder of them can be read. "Invoice draft - Deccan Agro Foods
+ * Private Limited.pdf", "Invoice INV-2026-27-0001 - Deccan Agro Foods Private
+ * Limited.pdf". It was the reference alone, so a draft invoice (no number
+ * until it is issued, 0322) downloaded as "Draft-draft.pdf".
+ *
+ * A file name, not a path: the characters Windows refuses in one (`\ / : * ?
+ * " < > |`, and an invoice number has slashes) become dashes, and it is cut
+ * short before the extension.
+ */
+export function renderedFilename(input: {
+  readonly kind: DocumentKind;
+  /** The document's number, or null when it has none yet (a draft invoice). */
+  readonly reference: string | null;
+  readonly clientName: string;
+  readonly draft: boolean;
+}): string {
+  const clean = (s: string): string =>
+    // eslint-disable-next-line no-control-regex
+    s.replace(/[\u0000-\u001f\u007f]/g, "").replace(/[\\/:*?"<>|]+/g, "-").replace(/\s+/g, " ").trim();
+  const what = RENDERED_KIND_WORDS[input.kind] ?? "Document";
+  const head = [what, input.reference === null ? null : clean(input.reference), input.draft ? "draft" : null]
+    .filter((p): p is string => p !== null && p !== "")
+    .join(" ");
+  const client = clean(input.clientName);
+  const stem = client === "" ? head : `${head} - ${client}`;
+  const room = RENDERED_FILENAME_MAX - ".pdf".length;
+  return `${stem.length > room ? stem.slice(0, room).trimEnd() : stem}.pdf`;
 }
 
 /**

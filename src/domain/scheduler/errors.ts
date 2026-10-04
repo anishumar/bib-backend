@@ -39,7 +39,7 @@ export class InvalidRecurrence extends SchedulerError {
     super(
       "INVALID_RECURRENCE",
       `${JSON.stringify(value)} is not a recurrence this engine knows. Valid: ${valid.join(", ")}. ` +
-        `There is deliberately no cron expression — a formula in a data row is one nothing can ` +
+        `There is deliberately no cron expression: a formula in a data row is one nothing can ` +
         `query, and a genuinely new cadence should arrive as a named field.`,
     );
   }

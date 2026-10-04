@@ -135,7 +135,7 @@ import { makeLeadFakes } from "../../src/testfakes/lead";
 import { makeProposalFakes } from "../../src/testfakes/proposal";
 import { FakeEngagementLifecycle, makeEngagementFakes } from "../../src/testfakes/engagement";
 import { makeDocumentFakes, makeFirmEntityFakes } from "../../src/testfakes/document";
-import { makeInvoiceFakes } from "../../src/testfakes/invoice";
+import { FakeFirmEntities, makeInvoiceFakes } from "../../src/testfakes/invoice";
 import { FakeDunningLadder, FakeDunningRepo } from "../../src/testfakes/dunning";
 import {
   FakeCheckerDirectory,
@@ -145,6 +145,23 @@ import {
 } from "../../src/testfakes/verification";
 import { DunningService } from "../../src/usecase/dunning/service";
 import { InvoiceService } from "../../src/usecase/invoice/service";
+import { BillingDeskService } from "../../src/usecase/billing/desk";
+import { AdvanceDesk } from "../../src/usecase/billing/advance";
+import { FinalBiller } from "../../src/usecase/billing/final";
+import {
+  FakeAutoBillingSetting,
+  FakeBillingDueDesk,
+  FakeAutoBillingFirms,
+  FakeBillingDueWriter,
+  FakeBillingManagerFacts,
+  FakeFinalBillFacts,
+  FakeIssuerTaxDefaults,
+  FakeAdvancePolicy,
+  FakeAdvanceReminderFacts,
+  FakeBillingSchedules,
+  FakeFiscalYearSource,
+  FakeInvoiceDrafter,
+} from "../../src/testfakes/billing";
 import type { PermissionSource } from "../../src/usecase/authz/ports";
 import {
   FakeCredentialRepo,
@@ -417,6 +434,7 @@ function deps(): RouterDeps {
         timeZones: { timeZoneFor: () => Promise.resolve("UTC") },
         events: new RecordingEventSink(),
       }),
+      authz: new AuthzService({ permissions }),
     },
     portalAccess: {
       service: new PortalAccessService({
@@ -495,8 +513,8 @@ function deps(): RouterDeps {
       }),
     },
     party: { service: new PartyService(makePartyFakes()) },
-    ledger: { service: new LedgerService(makeLedgerFakes()) },
-    config: { service: new ConfigService(makeConfigFakes()) },
+    ledger: { service: new LedgerService(makeLedgerFakes()), authz: new AuthzService({ permissions }) },
+    config: { service: new ConfigService(makeConfigFakes()), authz: new AuthzService({ permissions }) },
     lead: {
       service: new LeadService(makeLeadFakes()),
       authz: new AuthzService({ permissions }),
@@ -530,6 +548,7 @@ function deps(): RouterDeps {
       service: new DashboardService({
         dashboards: new FakeDashboardRepo(),
         timeZones: new FakeFirmTimeZone(),
+        fiscalYears: new FakeFiscalYearSource(),
         clock: new FakeClock(),
       }),
       authz: new AuthzService({ permissions: permissions }),
@@ -546,6 +565,42 @@ function deps(): RouterDeps {
         renderSource: new FakeRenderSource(),
         timeZones: new FakeFirmTimeZone(),
         clock: new FakeClock(),
+      }),
+      authz: new AuthzService({ permissions }),
+    },
+    billing: {
+      authz: new AuthzService({ permissions }),
+      service: new BillingDeskService({
+        desk: new FakeBillingDueDesk(),
+        invoices: new FakeInvoiceDrafter(),
+        schedules: new FakeBillingSchedules(),
+        setting: new FakeAutoBillingSetting(),
+        fiscalYears: new FakeFiscalYearSource(),
+        timeZones: new FakeFirmTimeZone(),
+        clock: new FakeClock(),
+        events: new RecordingEventSink(),
+        taxDefaults: new FakeIssuerTaxDefaults(),
+        policy: new FakeAdvancePolicy(),
+        firmEntities: new FakeFirmEntities(),
+      }),
+      advances: new AdvanceDesk({
+        desk: new FakeBillingDueDesk(),
+        policy: new FakeAdvancePolicy(),
+        people: new FakeAdvanceReminderFacts(),
+        taxDefaults: new FakeIssuerTaxDefaults(),
+        timeZones: new FakeFirmTimeZone(),
+        clock: new FakeClock(),
+      }),
+      finals: new FinalBiller({
+        facts: new FakeFinalBillFacts(),
+        dues: new FakeBillingDueWriter(),
+        managers: new FakeBillingManagerFacts(),
+        setting: new FakeAutoBillingSetting(),
+        firms: new FakeAutoBillingFirms(),
+        timeZones: new FakeFirmTimeZone(),
+        clock: new FakeClock(),
+        ids: new FakeIds(),
+        events: new RecordingEventSink(),
       }),
     },
     invoice: {
@@ -749,9 +804,11 @@ describe("the spec and the wire agree", () => {
     // added to the aggregate and would have reached the wire undocumented, which
     // in a frontend generated from this spec means invisible.
     const spec = (await (await app().request("/openapi.json")).json()) as {
-      components: { schemas: { Tenant: { properties: Record<string, unknown> } } };
+      components: { schemas: { CreatedTenant: { properties: Record<string, unknown> } } };
     };
-    const documented = Object.keys(spec.components.schemas.Tenant.properties).sort();
+    // `CreatedTenant` since 2026-10-03: a firm as created also says which
+    // calendar it started on (F07), which the other tenant routes do not.
+    const documented = Object.keys(spec.components.schemas.CreatedTenant.properties).sort();
 
     const res = await app().request("/internal/v1/tenants", {
       method: "POST",

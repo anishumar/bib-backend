@@ -7,12 +7,12 @@
 // would prove nothing. See letter.integration.test.ts.
 import { describe, expect, it } from "vitest";
 import { EngagementService } from "../../src/usecase/engagement/service";
-import { makeEngagementFakes } from "../../src/testfakes/engagement";
+import { makeEngagementFakes, writeOpening } from "../../src/testfakes/engagement";
 import type { QuotedLine, QuotedProposal } from "../../src/usecase/engagement/ports";
 import {
-  AdvanceAlreadyRecorded,
   AdvanceAmountRequired,
-  AdvanceNotRequired,
+  InvalidLineAdvance,
+  OneKindOfAdvance,
   AlreadySuperseded,
   ClauseNotPublished,
   ClauseLawNotIssuers,
@@ -26,6 +26,7 @@ import {
   LetterNotFound,
   LetterNotSupersedable,
   NoClauses,
+  LetterHasNoBody,
   NotAClause,
   QuoteHasNoLines,
   QuoteJurisdictionUnclear,
@@ -34,9 +35,10 @@ import {
   QuoteNotFound,
   ServiceNotQuotable,
   InvalidLineBillingFrequency,
+  InvalidLetterBillingTiming,
   InvalidOutOfPocketEstimate,
   UnpricedLineHasDiscount,
-  UnpricedLineNeedsReason,
+  ServiceHasNoListPrice,
   LetterPartyArchived,
   LetterClientIsOwnCompany,
   LetterNotCallersToday,
@@ -63,7 +65,6 @@ import {
   engagementState,
   isDay,
   resolveEffectiveFrom,
-  utcDay,
 } from "../../src/domain/engagement/model";
 import { SEEDED_FIRM_ENTITY } from "../../src/testfakes/document";
 
@@ -203,6 +204,7 @@ async function completeTerms(
     ...(lineEffectiveFrom === undefined ? {} : { effectiveFrom: lineEffectiveFrom }),
   });
   await s.service.addClause(TENANT, id, SCOPE_CLAUSE);
+  await writeOpening(s.prose, TENANT, id);
 }
 
 /** Draft → terms → send → sign, which is the only path an engagement exists
@@ -271,7 +273,7 @@ describe("drafting", () => {
     expect(s.letters.letters).toHaveLength(0);
   });
 
-  it.each([["India"], ["ind"], [""], ["I1"]])("refuses %j as a jurisdiction", async (j) => {
+  it.each([["India"], ["ind"], [""], ["I1"], ["DD"], ["UK"]])("refuses %j as a jurisdiction", async (j) => {
     const s = setup();
     await expect(draft(s, { jurisdiction: j })).rejects.toBeInstanceOf(InvalidJurisdiction);
   });
@@ -424,10 +426,40 @@ describe("a line with no price, and the wording that goes with it", () => {
       quantity: "1",
       discountPercent: "0",
     };
-    await expect(s.service.addLine(line)).rejects.toBeInstanceOf(UnpricedLineNeedsReason);
+    // This service has no list price, so there is nothing to quote it at.
+    const err = await s.service.addLine(line).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ServiceHasNoListPrice);
+    expect((err as Error).message).toBe(
+      "GST monthly filing has no list price in INR in the catalogue. Enter the fee, or say why there is no fixed fee.",
+    );
     await expect(
       s.service.addLine({ ...line, pricingNote: "As mutually agreed", discountPercent: "10" }),
     ).rejects.toBeInstanceOf(UnpricedLineHasDiscount);
+  });
+
+  it("quotes a line with neither a fee nor a reason at the catalogue's list price (B09)", async () => {
+    // A login that cannot see fees reads every list price as null, so the API
+    // fills the fee in from the pinned version, as the builder used to.
+    const s = setup();
+    const PRICED = "00000000-0000-0000-0000-0000000000d9";
+    s.library.publishService(PRICED, "bookkeeping", {
+      name: "Bookkeeping",
+      billingBasis: "fixed",
+      listPrice: { amount: "25000.00", currency: "INR" },
+    });
+    const id = await draft(s);
+    const added = await s.service.addLine({
+      tenantId: TENANT,
+      letterId: id,
+      entityPartyId: ENTITY_A,
+      serviceVersionId: PRICED,
+      description: "Bookkeeping",
+      quantity: "12",
+      discountPercent: "0",
+    });
+    expect(added.unitAmount).toBe("25000.00");
+    // Priced, so it carries no reason.
+    expect(added.pricingNote).toBeNull();
   });
 
   it("carries this client's OWN wording, and says which blocks are theirs", async () => {
@@ -563,6 +595,65 @@ describe("sending", () => {
     await expect(s.service.send(TENANT, id, ACTOR)).rejects.toBeInstanceOf(NoClauses);
   });
 
+  it("refuses a letter whose cover page says nothing, and names where the words go (CA#2)", async () => {
+    // A new firm's first letter went out as "Dear Anil Deshpande, / Yours
+    // sincerely," with nothing between: the firm had no standard opening and
+    // nothing said so.
+    const s = setup();
+    const id = await draft(s);
+    await s.service.addLine({
+      tenantId: TENANT,
+      letterId: id,
+      entityPartyId: ENTITY_A,
+      serviceVersionId: GST,
+      description: "GST filing",
+      quantity: "1",
+      unitAmount: "2000",
+      discountPercent: "0",
+    });
+    await s.service.addClause(TENANT, id, SCOPE_CLAUSE);
+    const refused = s.service.send(TENANT, id, ACTOR);
+    await expect(refused).rejects.toBeInstanceOf(LetterHasNoBody);
+    await expect(refused).rejects.toThrow(/no opening text.*Cover letter.*Standard wording/s);
+    // A heading alone is not an opening either.
+    await s.prose.addBlock({
+      tenantId: TENANT,
+      owner: { kind: "engagement_letter", id },
+      kind: "cover",
+      body: "Engagement letter",
+      isHeading: true,
+      sortOrder: 1,
+    });
+    await expect(s.service.send(TENANT, id, ACTOR)).rejects.toBeInstanceOf(LetterHasNoBody);
+    expect(s.events.recorded.some((e) => e.verb === "engagement_letter.sent")).toBe(false);
+
+    await writeOpening(s.prose, TENANT, id);
+    const sent = await s.service.send(TENANT, id, ACTOR);
+    expect(sent.status).toBe("sent");
+  });
+
+  it("records a migrated paper letter with no opening text: nobody is sent its cover (CA#2 vs T6.12)", async () => {
+    // The book import records a letter the client signed on paper by sending
+    // it `migrated`. A new firm has no standard opening yet, so the CA#2 guard
+    // refused every row of its first import ("marking it sent: This letter has
+    // no opening text…") and left a draft behind each one.
+    const s = setup();
+    const id = await draft(s);
+    await s.service.addLine({
+      tenantId: TENANT,
+      letterId: id,
+      entityPartyId: ENTITY_A,
+      serviceVersionId: GST,
+      description: "GST filing",
+      quantity: "1",
+      unitAmount: "2000",
+      discountPercent: "0",
+    });
+    await s.service.addClause(TENANT, id, SCOPE_CLAUSE);
+    const sent = await s.service.send(TENANT, id, ACTOR, { migrated: true });
+    expect(sent.status).toBe("sent");
+  });
+
   it("refuses to change a letter once it has gone out", async () => {
     const s = setup();
     const id = await draft(s);
@@ -663,6 +754,7 @@ describe("signature and fan-out", () => {
       discountPercent: "0",
     });
     await s.service.addClause(TENANT, forB, SCOPE_CLAUSE);
+    await writeOpening(s.prose, TENANT, forB);
     await s.service.send(TENANT, forB, ACTOR);
     const signedB = await s.service.sign(
       { tenantId: TENANT, letterId: forB, signedByName: "Priya" },
@@ -731,6 +823,7 @@ describe("signature and fan-out", () => {
       discountPercent: "0",
     });
     await s.service.addClause(TENANT, b, SCOPE_CLAUSE);
+    await writeOpening(s.prose, TENANT, b);
     await s.service.send(TENANT, b, ACTOR);
     const signedB = await s.service.sign(
       { tenantId: TENANT, letterId: b, signedByName: "Priya" },
@@ -754,66 +847,40 @@ describe("signature and fan-out", () => {
   });
 });
 
-describe("the advance-fee gate", () => {
-  it("holds every engagement until the advance is recorded", async () => {
+describe("the advance no longer holds the work (0322)", () => {
+  it("starts every engagement at signature, even when the letter asks for an advance", async () => {
+    // Ashish (2026-10-02): "work can be started and parallelly the system should
+    // keep on notifying". The advance is drafted and chased, not waited for.
     const s = setup();
     const id = await draft(s, { advanceRequired: true, advanceAmount: "10000" });
     await completeTerms(s, id);
     await s.service.send(TENANT, id, ACTOR);
-
-    const { engagements } = await s.service.sign(
-      { tenantId: TENANT, letterId: id, signedByName: "Priya" },
-      ACTOR,
-    );
-    expect(engagements.every((e) => e.engagement.status === "pending_advance")).toBe(true);
-    // The gate is real, not advisory: no advance, no spawn trigger, no jobs.
-    expect(s.events.verbs()).not.toContain("contract.activated");
-
-    const { released } = await s.service.recordAdvance(TENANT, id, USER, ACTOR);
-    expect(released).toHaveLength(1);
-    expect(released[0]?.engagement.status).toBe("active");
-    expect(s.events.recorded.filter((e) => e.verb === "contract.activated")).toHaveLength(1);
+    const { engagements } = await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
+    expect(engagements.every((e) => e.engagement.status === "active")).toBe(true);
+    expect(engagements.every((e) => e.engagement.activatedAt !== null)).toBe(true);
+    expect(s.events.recorded.filter((e) => e.verb === "contract.activated")).toHaveLength(engagements.length);
   });
 
-  it("refuses an advance nobody asked for", async () => {
-    const s = setup();
-    const id = await draft(s);
-    await expect(s.service.recordAdvance(TENANT, id, USER, ACTOR)).rejects.toBeInstanceOf(
-      AdvanceNotRequired,
-    );
-  });
-
-  it("refuses to record the same advance twice", async () => {
-    // Two receipts in an uncorrectable log for one payment.
+  it("starts work signed before 0322 that still waits on its advance, once", async () => {
     const s = setup();
     const id = await draft(s, { advanceRequired: true, advanceAmount: "10000" });
     await completeTerms(s, id);
     await s.service.send(TENANT, id, ACTOR);
-    await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
-    await s.service.recordAdvance(TENANT, id, USER, ACTOR);
-    await expect(s.service.recordAdvance(TENANT, id, USER, ACTOR)).rejects.toBeInstanceOf(
-      AdvanceAlreadyRecorded,
-    );
-  });
-
-  it("names who recorded it, because it is an attestation and not a receipt", async () => {
-    // Until payments (T3.5) exist, a person asserts the money arrived. WHO said
-    // so is the whole value of the record.
-    const s = setup();
-    const id = await draft(s, { advanceRequired: true, advanceAmount: "10000" });
-    await completeTerms(s, id);
-    await s.service.send(TENANT, id, ACTOR);
-    await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
-    await s.service.recordAdvance(TENANT, id, USER, ACTOR);
-
-    const recorded = s.events.recorded.find(
-      (e) => e.verb === "engagement_letter.advance_recorded",
-    );
-    expect(recorded?.payload).toMatchObject({
-      recordedByUserId: USER,
-      amount: "10000",
-      currency: "INR",
-    });
+    const { engagements } = await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
+    // What the 0320 gate left behind: the engagement still pending_advance.
+    for (const e of engagements) {
+      const at = s.letters.engagements.findIndex((x) => x.id === e.engagement.id);
+      const row = s.letters.engagements[at];
+      if (row !== undefined) s.letters.engagements[at] = { ...row, status: "pending_advance", activatedAt: null };
+    }
+    const before = s.events.recorded.length;
+    expect(await s.service.startWaitingWork(TENANT, id, ACTOR)).toEqual({ started: engagements.length });
+    const after = s.events.recorded.slice(before).map((e) => e.verb);
+    expect(after[0]).toBe("engagement_letter.work_started_before_advance");
+    expect(after.filter((v) => v === "contract.activated")).toHaveLength(engagements.length);
+    expect(s.letters.engagements.every((e) => e.status === "active")).toBe(true);
+    // Twice is nothing: none waits any more.
+    expect(await s.service.startWaitingWork(TENANT, id, ACTOR)).toEqual({ started: 0 });
   });
 });
 
@@ -1244,10 +1311,8 @@ describe("when the work begins", () => {
   });
 
   it("keeps the fee gate ahead of the date gate", async () => {
-    // Money first. An engagement waiting on an advance is `pending_advance`
-    // whatever the calendar says — telling somebody their October work is
-    // "starting soon" when nobody has paid for it is the wrong reassurance —
-    // and it becomes `pending_start` only once the advance is in.
+    // Since 0322 the advance holds nothing: the work's state follows only the
+    // calendar, whatever the letter asks of the client.
     const s = setup();
     const id = await draft(s, { advanceRequired: true, advanceAmount: "10000" });
     await completeTerms(s, id);
@@ -1256,11 +1321,8 @@ describe("when the work begins", () => {
       { tenantId: TENANT, letterId: id, signedByName: "Priya" },
       ACTOR,
     );
-    expect(engagements[0]?.state).toBe("pending_advance");
-    expect(s.events.verbs()).not.toContain("contract.activated");
-
-    const { released } = await s.service.recordAdvance(TENANT, id, USER, ACTOR);
-    expect(released[0]?.state).toBe("active");
+    expect(engagements[0]?.engagement.status).toBe("active");
+    expect(s.events.verbs()).toContain("contract.activated");
   });
 
   it("the signature commits to the dates — they are terms", async () => {
@@ -1312,10 +1374,8 @@ describe("the effective-date rules themselves", () => {
     expect(isDay("2026-10-1")).toBe(false);
     expect(isDay("01/10/2026")).toBe(false);
     expect(isDay("2026-10-01T00:00:00Z")).toBe(false); // an instant is not a day
-    // UTC, not the machine's zone: two pods in two regions must not disagree
-    // about which day a contract started.
-    expect(utcDay(new Date("2026-10-01T23:30:00Z"))).toBe("2026-10-01");
-    expect(utcDay(new Date("2026-10-01T00:30:00Z"))).toBe("2026-10-01");
+    // A day that does not exist (B43): it used to pass, and reach Postgres.
+    expect(isDay("2026-02-31")).toBe(false);
   });
 });
 
@@ -1343,6 +1403,8 @@ describe("what the signature commits to", () => {
       oopEstimate: null as { min: string; max: string; currency: string } | null,
       pricingNote: null as string | null,
       feeGroupId: null as string | null,
+      billingTiming: null as "arrears" | "advance" | "on_date" | null,
+      billingOn: null as string | null,
     };
     const base = {
       letter: {
@@ -1374,6 +1436,8 @@ describe("what the signature commits to", () => {
         intro: string | null;
         deliverables: string | null;
         clientObligations: string | null;
+        billingTiming: "arrears" | "advance" | "on_date" | null;
+        billingOn: string | null;
       }[],
       clauses: [],
     };
@@ -1419,6 +1483,12 @@ describe("what the signature commits to", () => {
       lineUnpriced: {
         ...base,
         lines: [{ ...line, unitAmount: null, pricingNote: "As mutually agreed" }],
+      },
+      // When it is invoiced (0319) is a term: advance and a chosen date differ.
+      lineBilledInAdvance: { ...base, lines: [{ ...line, billingTiming: "advance" as const }] },
+      lineBilledOnADate: {
+        ...base,
+        lines: [{ ...line, billingTiming: "on_date" as const, billingOn: "2026-11-15" }],
       },
     };
 
@@ -1570,6 +1640,7 @@ describe("G1.8 — a letter cannot print another country's law", () => {
     const id = await draft(s, { jurisdiction: "US" });
     await completeTerms(s, id);
     await s.service.addClause(TENANT, id, LAW_US);
+    await writeOpening(s.prose, TENANT, id);
     await s.service.send(TENANT, id, ACTOR);
     await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya Menon" }, ACTOR);
 
@@ -2383,6 +2454,7 @@ describe("fee groups (0083)", () => {
       await s.service.editFeeGroup(TENANT, id, groupId, { amount });
       await s.service.addLine(groupedLine(id, groupId));
       await s.service.addClause(TENANT, id, SCOPE_CLAUSE);
+      await writeOpening(s.prose, TENANT, id);
       await s.service.send(TENANT, id, ACTOR);
       const signed = await s.service.sign(
         { tenantId: TENANT, letterId: id, signedByName: "Priya Menon" },
@@ -2430,12 +2502,16 @@ describe("what the signature commits to, for a fee group (0083)", () => {
     oopEstimate: null,
     pricingNote: null,
     feeGroupId,
+    billingTiming: null,
+    billingOn: null,
   });
   const group = (id: string, position: number, amount = "5000"): Parameters<typeof canonicalContent>[0]["feeGroups"][number] => ({
     id,
     position,
     title: "Ongoing recurring services",
     billingFrequency: "monthly",
+    billingTiming: null,
+    billingOn: null,
     amount,
     paymentTerms: null,
     feeDescription: null,
@@ -2468,5 +2544,287 @@ describe("what the signature commits to, for a fee group (0083)", () => {
     expect(canonicalContent(moved)).not.toBe(rendered);
     expect(canonicalContent(repriced)).not.toBe(rendered);
     expect(canonicalContent({ ...base })).toBe(rendered);
+  });
+});
+
+// ── Phase 1b (0319): billing starts when the work does ───────────────────────
+
+describe("asking the billing desk to schedule the work that went live", () => {
+  function withBilling(fail = false) {
+    const s = setup();
+    const asked: { engagementIds: readonly string[]; liveOn: string }[] = [];
+    const service = new EngagementService({
+      ...s,
+      goLiveBilling: {
+        scheduleActivated: (input) => {
+          asked.push({ engagementIds: input.engagementIds, liveOn: input.liveOn });
+          return fail ? Promise.reject(new Error("billing is down")) : Promise.resolve({ scheduled: [] });
+        },
+      },
+    });
+    return { ...s, service, asked };
+  }
+
+  it("on signature, for the engagements it made active, from the signature's day", async () => {
+    const s = withBilling();
+    const id = await draft(s);
+    await completeTerms(s, id);
+    await s.service.send(TENANT, id, ACTOR);
+    const { engagements } = await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
+    expect(s.asked).toEqual([
+      { engagementIds: engagements.map((e) => e.engagement.id), liveOn: engagements[0]?.engagement.effectiveFrom },
+    ]);
+  });
+
+  it("at signature even when the letter asks for an advance (0322)", async () => {
+    const s = withBilling();
+    const id = await draft(s, { advanceRequired: true, advanceAmount: "10000" });
+    await completeTerms(s, id);
+    await s.service.send(TENANT, id, ACTOR);
+    const { engagements } = await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
+    expect(s.asked.map((a) => a.engagementIds)).toEqual([engagements.map((e) => e.engagement.id)]);
+  });
+
+  it("never turns a signature into a failure when billing cannot be scheduled", async () => {
+    const s = withBilling(true);
+    const id = await draft(s);
+    await completeTerms(s, id);
+    await s.service.send(TENANT, id, ACTOR);
+    const { letter } = await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
+    expect(letter.status).toBe("signed");
+    expect(s.asked).toHaveLength(1);
+  });
+});
+
+describe("filling the compliance calendar when work goes live (audit 2026-10-03, CA#24)", () => {
+  function withCalendar(fail = false) {
+    const s = setup();
+    const filled: string[] = [];
+    const service = new EngagementService({
+      ...s,
+      calendar: {
+        fillCalendar: (tenantId) => {
+          filled.push(tenantId);
+          return fail ? Promise.reject(new Error("calendar is down")) : Promise.resolve(3);
+        },
+      },
+    });
+    return { ...s, service, filled };
+  }
+
+  it("asks for the firm's calendar to be filled on signature, once", async () => {
+    const s = withCalendar();
+    const id = await draft(s);
+    await completeTerms(s, id);
+    await s.service.send(TENANT, id, ACTOR);
+    await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
+    expect(s.filled).toEqual([TENANT]);
+  });
+
+  it("never turns a signature into a failure when the calendar cannot be filled", async () => {
+    // Tonight's sweep fills it either way; the client has already signed.
+    const s = withCalendar(true);
+    const id = await draft(s);
+    await completeTerms(s, id);
+    await s.service.send(TENANT, id, ACTOR);
+    const { letter } = await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
+    expect(letter.status).toBe("signed");
+    expect(s.filled).toEqual([TENANT]);
+  });
+});
+
+describe("when a recurring fee is invoiced, as the letter says it (0319)", () => {
+  const line = (s: ReturnType<typeof setup>, id: string, over: Record<string, string>) =>
+    s.service.addLine({
+      tenantId: TENANT,
+      letterId: id,
+      entityPartyId: ENTITY_A,
+      serviceVersionId: GST,
+      description: "GST filing",
+      quantity: "1",
+      unitAmount: "2000",
+      discountPercent: "0",
+      ...over,
+    });
+
+  it("keeps the timing a monthly fee was written with, and a date with on_date", async () => {
+    const s = setup();
+    const id = await draft(s);
+    const advance = await line(s, id, { billingFrequency: "monthly", billingTiming: "advance" });
+    expect(advance).toMatchObject({ billingTiming: "advance", billingOn: null });
+    const dated = await line(s, id, { billingFrequency: "annually", billingTiming: "on_date", billingOn: "2026-11-15" });
+    expect(dated).toMatchObject({ billingTiming: "on_date", billingOn: "2026-11-15" });
+    expect((await line(s, id, { billingFrequency: "monthly" })).billingTiming).toBeNull();
+  });
+
+  it("refuses a date without on_date, on_date without a date, and a timing on a one-off fee", async () => {
+    const s = setup();
+    const id = await draft(s);
+    for (const over of [
+      { billingFrequency: "monthly", billingTiming: "on_date" },
+      { billingFrequency: "monthly", billingTiming: "advance", billingOn: "2026-11-15" },
+      { billingFrequency: "monthly", billingOn: "2026-11-15" },
+      { billingFrequency: "one_time", billingTiming: "advance" },
+      { billingFrequency: "monthly", billingTiming: "weekly" },
+    ]) {
+      await expect(line(s, id, over), JSON.stringify(over)).rejects.toBeInstanceOf(InvalidLetterBillingTiming);
+    }
+  });
+
+  it("clears a timing nobody touched when the fee stops being billed per period", async () => {
+    const s = setup();
+    const id = await draft(s);
+    const l = await line(s, id, { billingFrequency: "monthly", billingTiming: "advance" });
+    const oneOff = await s.service.updateLine({ tenantId: TENANT, letterId: id, lineId: l.id, billingFrequency: "one_time" });
+    expect(oneOff).toMatchObject({ billingFrequency: "one_time", billingTiming: null, billingOn: null });
+  });
+});
+
+// ── Phase 2 (0320): a service's own advance, and the advance bill ───────────
+
+describe("a service's own advance (0320)", () => {
+  async function twoLines(s: ReturnType<typeof setup>, id: string) {
+    const gst = await s.service.addLine({
+      tenantId: TENANT, letterId: id, entityPartyId: ENTITY_A, serviceVersionId: GST,
+      description: "GST filing", quantity: "1", unitAmount: "2000", discountPercent: "0",
+    });
+    const audit = await s.service.addLine({
+      tenantId: TENANT, letterId: id, entityPartyId: ENTITY_B, serviceVersionId: GST,
+      description: "Statutory audit", quantity: "1", unitAmount: "100000", discountPercent: "0",
+    });
+    return { gst, audit };
+  }
+
+  it("is set on a draft line and cleared with null", async () => {
+    const s = setup();
+    const id = await draft(s);
+    const { audit } = await twoLines(s, id);
+    const set = await s.service.updateLine({ tenantId: TENANT, letterId: id, lineId: audit.id, advanceAmount: "50000" });
+    expect(set.advanceAmount).toBe("50000");
+    const cleared = await s.service.updateLine({ tenantId: TENANT, letterId: id, lineId: audit.id, advanceAmount: null });
+    expect(cleared.advanceAmount).toBeNull();
+  });
+
+  it("must be an amount above zero", async () => {
+    const s = setup();
+    const id = await draft(s);
+    const { audit } = await twoLines(s, id);
+    for (const bad of ["0", "-5", "abc"]) {
+      await expect(
+        s.service.updateLine({ tenantId: TENANT, letterId: id, lineId: audit.id, advanceAmount: bad }),
+      ).rejects.toBeInstanceOf(InvalidLineAdvance);
+    }
+  });
+
+  it("is refused beside the letter's own advance, both ways round", async () => {
+    const s = setup();
+    const withLetterAdvance = await draft(s, { advanceRequired: true, advanceAmount: "10000" });
+    const { audit } = await twoLines(s, withLetterAdvance);
+    await expect(
+      s.service.updateLine({ tenantId: TENANT, letterId: withLetterAdvance, lineId: audit.id, advanceAmount: "500" }),
+    ).rejects.toBeInstanceOf(OneKindOfAdvance);
+
+    const withLineAdvance = await draft(s);
+    const lines = await twoLines(s, withLineAdvance);
+    await s.service.updateLine({ tenantId: TENANT, letterId: withLineAdvance, lineId: lines.audit.id, advanceAmount: "500" });
+    await expect(
+      s.service.revise({ tenantId: TENANT, letterId: withLineAdvance, advanceRequired: true, advanceAmount: "1000" }, ACTOR),
+    ).rejects.toBeInstanceOf(OneKindOfAdvance);
+  });
+
+  it("is refused on a grouped line, and given up when a line joins a group", async () => {
+    const s = setup();
+    const id = await draft(s);
+    const { gst, audit } = await twoLines(s, id);
+    await s.service.updateLine({ tenantId: TENANT, letterId: id, lineId: gst.id, advanceAmount: "500" });
+    const group = await s.service.addFeeGroup(TENANT, id, { title: "Retainer", billingFrequency: "monthly", amount: "5000" });
+    const moved = await s.service.setLinePricing({ tenantId: TENANT, letterId: id, lineId: gst.id, feeGroupId: group.id });
+    expect(moved.advanceAmount).toBeNull();
+    await s.service.setLinePricing({ tenantId: TENANT, letterId: id, lineId: audit.id, feeGroupId: group.id });
+    await expect(
+      s.service.updateLine({ tenantId: TENANT, letterId: id, lineId: audit.id, advanceAmount: "500" }),
+    ).rejects.toBeInstanceOf(InvalidLineAdvance);
+  });
+
+  it("holds no work since 0322: every service starts at signing, its own advance or not", async () => {
+    const s = setup();
+    const id = await draft(s);
+    const { audit } = await twoLines(s, id);
+    await s.service.updateLine({ tenantId: TENANT, letterId: id, lineId: audit.id, advanceAmount: "50000" });
+    await s.service.addClause(TENANT, id, SCOPE_CLAUSE);
+    await writeOpening(s.prose, TENANT, id);
+    await s.service.send(TENANT, id, ACTOR);
+    const { engagements } = await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
+    const byLine = new Map(engagements.map((e) => [e.engagement.engagementLetterLineId, e.engagement.status]));
+    expect(byLine.get(audit.id)).toBe("active");
+    expect([...byLine.values()].filter((st) => st === "active")).toHaveLength(2);
+    expect(s.events.recorded.filter((e) => e.verb === "contract.activated")).toHaveLength(2);
+  });
+
+  it("is a term: in the content hash when set, and absent when not", async () => {
+    const s = setup();
+    const id = await draft(s);
+    const { audit } = await twoLines(s, id);
+    const lines = await s.letters.listLines(TENANT, id);
+    const letter = await s.letters.findLetter(TENANT, id);
+    if (letter === null) throw new Error("no letter");
+    const base = { letter, lines, feeGroups: [], clauses: [] };
+    const without = canonicalContent(base);
+    // A line read before 0320 had no advance field at all: it hashes the same.
+    const before = lines.map(({ advanceAmount: _dropped, ...l }) => l);
+    expect(canonicalContent({ ...base, lines: before })).toBe(without);
+    await s.service.updateLine({ tenantId: TENANT, letterId: id, lineId: audit.id, advanceAmount: "50000" });
+    expect(canonicalContent({ ...base, lines: await s.letters.listLines(TENANT, id) })).not.toBe(without);
+  });
+});
+
+describe("the advance bill and its release (0320)", () => {
+  function withAdvanceBilling(fail = false) {
+    const s = setup();
+    const asked: string[] = [];
+    const service = new EngagementService({
+      ...s,
+      advanceBilling: {
+        billAdvances: (input) => {
+          asked.push(input.letterId);
+          return fail ? Promise.reject(new Error("billing is down")) : Promise.resolve({ created: 1 });
+        },
+      },
+    });
+    return { ...s, service, asked };
+  }
+
+  it("asks billing for the advance bill when a letter that asks for one is signed", async () => {
+    const s = withAdvanceBilling();
+    const id = await signedLetter(s, { advanceRequired: true, advanceAmount: "10000" });
+    expect(s.asked).toEqual([id]);
+  });
+
+  it("asks nothing when the letter asks for no advance", async () => {
+    const s = withAdvanceBilling();
+    await signedLetter(s);
+    expect(s.asked).toEqual([]);
+  });
+
+  it("never turns a signature into a failure when the advance bill cannot be written", async () => {
+    const s = withAdvanceBilling(true);
+    const id = await signedLetter(s, { advanceRequired: true, advanceAmount: "10000" });
+    expect((await s.letters.findLetter(TENANT, id))?.status).toBe("signed");
+  });
+
+  it("starts a service with its own advance at signature, and asks for its advance bill (0322)", async () => {
+    const s = withAdvanceBilling();
+    const id = await draft(s);
+    const audit = await s.service.addLine({
+      tenantId: TENANT, letterId: id, entityPartyId: ENTITY_B, serviceVersionId: GST,
+      description: "Statutory audit", quantity: "1", unitAmount: "100000", discountPercent: "0",
+    });
+    await s.service.updateLine({ tenantId: TENANT, letterId: id, lineId: audit.id, advanceAmount: "50000" });
+    await s.service.addClause(TENANT, id, SCOPE_CLAUSE);
+    await writeOpening(s.prose, TENANT, id);
+    await s.service.send(TENANT, id, ACTOR);
+    const { engagements } = await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
+    expect(engagements.map((e) => e.engagement.status)).toEqual(["active"]);
+    expect(s.asked).toEqual([id]);
   });
 });

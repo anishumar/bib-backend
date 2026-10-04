@@ -117,10 +117,16 @@ export class PortalAccessService {
    * `withPortal`, where treating the two the same is the one silent mistake
    * available.
    */
-  async scopeFor(tenantId: string, membershipId: string, on?: string): Promise<PortalScope> {
+  async scopeFor(
+    tenantId: string,
+    membershipId: string,
+    on?: string,
+  ): Promise<PortalScope & { readonly onDate: string }> {
     const day = on ?? (await this.today(tenantId));
     const grants = await this.deps.grants.listGrants(tenantId, membershipId);
-    return scopeOn(membershipId, grants, day);
+    // `onDate` is the day actually read on, so the route echoes THAT rather
+    // than a day of its own (audit 2026-10-03, B44).
+    return { ...scopeOn(membershipId, grants, day), onDate: day };
   }
 
   /**

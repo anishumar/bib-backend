@@ -109,6 +109,10 @@ async function main(): Promise<void> {
     const onDesks = walked.reduce((n, r) => n + r.awaitingPeople, 0);
     const finished = walked.reduce((n, r) => n + r.completed, 0);
     const noProcess = walked.reduce((n, r) => n + r.awaitingTemplate, 0);
+    // A firm, or a job, the walk could not move (B11): printed first, loudly.
+    for (const r of walked) {
+      if (r.failure !== undefined) console.log(`  !! walk failed for firm ${r.tenantId}: ${r.failure}`);
+    }
 
     if (started === 0 && advanced === 0 && noProcess === 0) {
       console.log("  nothing to walk — no job has a step that can move.\n");
@@ -129,6 +133,9 @@ async function main(): Promise<void> {
     const dunning = await wired.dunning.sweep();
     const escalated = dunning.reduce((n, r) => n + r.escalated, 0);
     const waiting = dunning.reduce((n, r) => n + r.awaitingApproval, 0);
+    for (const r of dunning) {
+      if (r.failure !== undefined) console.log(`  !! dunning skipped firm ${r.tenantId}: ${r.failure}`);
+    }
 
     if (escalated === 0) {
       console.log("  nothing to chase — no receivable has reached a rung it has not had.\n");
@@ -141,6 +148,47 @@ async function main(): Promise<void> {
       }
       console.log();
     }
+
+    // BILLING DUES (0318): only firms that turned auto-billing on.
+    const billing = await wired.billing.sweep();
+    for (const r of billing) {
+      if (r.failure !== undefined) console.log(`  billing: firm ${r.tenantId} could not be visited — ${r.failure}`);
+    }
+    const dues = billing.reduce((n, r) => n + r.created, 0);
+    const noYear = billing.reduce((n, r) => n + r.awaitingFiscalYear, 0);
+    if (dues === 0) {
+      console.log("  no bill has fallen due that is not already on the list.");
+    } else {
+      console.log(`  ${String(dues)} bill(s) fell due and are waiting to be raised`);
+    }
+    if (noYear > 0) {
+      console.log(`  ${String(noYear)} quarterly or yearly bill(s) wait for the firm's financial year to be set`);
+    }
+    // THE ADVANCE AND THE FINAL BILL (0320, 0322): signed letters whose advance
+    // still needs something (every firm: work from before 0322 started, a bill
+    // written, its invoice drafted), and one-time work finished with no final
+    // bill yet. Then the weekly advance summary, for firms whose slot has come.
+    const advances = await wired.advanceBills.catchUp();
+    const finals = await wired.finalBills.sweep();
+    for (const r of [...advances, ...finals]) {
+      if (r.failure !== undefined) console.log(`  advance/final bills: firm ${r.tenantId} could not be visited — ${r.failure}`);
+    }
+    const advanceCount = advances.reduce((n, r) => n + r.created, 0);
+    const draftedCount = advances.reduce((n, r) => n + r.drafted, 0);
+    const startedCount = advances.reduce((n, r) => n + r.started, 0);
+    const finalCount = finals.reduce((n, r) => n + r.created, 0);
+    if (startedCount > 0) console.log(`  ${String(startedCount)} engagement(s) waiting on an advance started (signed before 0322)`);
+    if (advanceCount > 0) console.log(`  ${String(advanceCount)} advance bill(s) written for signed letters`);
+    if (draftedCount > 0) console.log(`  ${String(draftedCount)} advance invoice(s) drafted`);
+    if (finalCount > 0) console.log(`  ${String(finalCount)} final bill(s) written for finished one-time work`);
+    for (const r of await wired.advanceDigest.sweep()) {
+      if (r.failure !== undefined) {
+        console.log(`  advance summary: firm ${r.tenantId} could not be visited — ${r.failure}`);
+      } else if (r.recipients > 0) {
+        console.log(`  advance summary for the week of ${r.weekOf}: ${String(r.advances)} advance(s), sent to ${String(r.recipients)}`);
+      }
+    }
+    console.log();
 
     // THE COMPLIANCE CALENDAR (T3.2), last, and after the spawn on purpose: an
     // engagement activated a moment ago should have its filings materialised on

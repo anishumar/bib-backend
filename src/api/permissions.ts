@@ -514,7 +514,7 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // the letter and starts the work, so it is not party:write.
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/acceptance"), "acceptance:record" as const],
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/signature-request"), "party:write" as const],
-  [routeKey("POST", "/api/v1/engagement-letters/{letterId}/advance"), "party:write" as const],
+
 
   // THE DELIVERY ENGINE (T2.6). `party:read`, the same permission the pipeline
   // and the proposals use — and for the same reason. A job names the engagement
@@ -624,6 +624,14 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
     "work:write" as const,
   ],
   [routeKey("POST", "/api/v1/work-items/{workItemId}/review"), "work:write" as const],
+  // A note on a task (0330, CA#30): the same permission as the work itself.
+  [routeKey("POST", "/api/v1/work-items/{workItemId}/notes"), "work:write" as const],
+  // The filing a task files (CA#36): reading is the board's own permission;
+  // linking writes the calendar's record of what work files a filing, which is
+  // the permission completing that work needs.
+  [routeKey("GET", "/api/v1/work-items/{workItemId}/filing"), "party:read" as const],
+  [routeKey("PUT", "/api/v1/work-items/{workItemId}/filing"), "work:write" as const],
+  [routeKey("DELETE", "/api/v1/work-items/{workItemId}/filing"), "work:write" as const],
   // The work-item review queue, split exactly as T2.9's step queue is: the two
   // reads are `party:read` so everybody can see what is waiting, and DECIDING is
   // `work:write`, because approving somebody's filing writes to the record of
@@ -720,6 +728,8 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
 
   [routeKey("GET", "/api/v1/work-item-checks"), "party:read" as const],
   [routeKey("GET", "/api/v1/work-item-checks/{approvalId}/checkers"), "party:read" as const],
+  // The firm's review rules by label (CA#27): what a task's sender picks from.
+  [routeKey("GET", "/api/v1/review-rules"), "party:read" as const],
   [routeKey("POST", "/api/v1/work-item-checks/{approvalId}/decide"), "work:write" as const],
 
   // THE FIRM'S OWN WORDS FOR WORK (T3.1). The same split the grade ladder and
@@ -755,8 +765,10 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // whether they see the amounts, not this table. Writing is `party:write`, the
   // same permission every other drafting route on both documents takes.
   //
-  // ISSUING AND CANCELLING ARE `tenant:admin`, and that is the one considered
-  // difference. Raising a draft is bookkeeping; ISSUING allocates nothing new
+  // ISSUING AND CANCELLING ARE `invoice:issue`, and that is the one considered
+  // difference. (They were `tenant:admin` until 0335, CA#6: a firm had to make
+  // its accounts person a full administrator to issue a bill. 0335 gave the new
+  // permission to exactly the roles that carried tenant:admin.) Raising a draft is bookkeeping; ISSUING allocates nothing new
   // but sends a legal demand to a client under one of the firm's own entities,
   // and CANCELLING withdraws one — both leave a permanent mark in a consecutive
   // series that a tax authority may ask about. That is a decision at the level
@@ -766,22 +778,53 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("POST", "/api/v1/invoices"), "party:write" as const],
   [routeKey("POST", "/api/v1/invoices/{invoiceId}/lines"), "party:write" as const],
   [routeKey("DELETE", "/api/v1/invoices/{invoiceId}/lines/{lineId}"), "party:write" as const],
-  [routeKey("POST", "/api/v1/invoices/{invoiceId}/issue"), "tenant:admin" as const],
-  [routeKey("POST", "/api/v1/invoices/{invoiceId}/cancel"), "tenant:admin" as const],
+  [routeKey("POST", "/api/v1/invoices/{invoiceId}/issue"), "invoice:issue" as const],
+  [routeKey("POST", "/api/v1/invoices/{invoiceId}/cancel"), "invoice:issue" as const],
   [routeKey("POST", "/api/v1/invoices/{invoiceId}/irn"), "party:write" as const],
+  // Who raised a draft may say whose revenue it is, as they did when raising.
+  [routeKey("PUT", "/api/v1/invoices/{invoiceId}/manager"), "party:write" as const],
+  // And when it is due (B20): a draft's term, set by whoever may raise it.
+  [routeKey("PUT", "/api/v1/invoices/{invoiceId}/due-date"), "party:write" as const],
   // MONEY AGAINST AN INVOICE (T3.5). Recording a payment is `party:write` —
   // it is bookkeeping, and the person chasing a receivable is the person who
-  // marks it settled. ISSUING A CREDIT NOTE IS `tenant:admin`, and that is the
+  // marks it settled. ISSUING A CREDIT NOTE IS `invoice:issue`, and that is the
   // considered line: it takes money off a legal document, it is the mechanism
   // through which revenue leaks, and the reason it demands a REASON is that
   // somebody has to answer for it later. Reading is `party:read`, with the fee
   // axis deciding whether the amounts are visible — not this table.
   [routeKey("POST", "/api/v1/invoices/{invoiceId}/payments"), "party:write" as const],
   [routeKey("GET", "/api/v1/invoices/{invoiceId}/payments"), "party:read" as const],
-  [routeKey("POST", "/api/v1/invoices/{invoiceId}/credit-notes"), "tenant:admin" as const],
+  [routeKey("POST", "/api/v1/invoices/{invoiceId}/credit-notes"), "invoice:issue" as const],
   [routeKey("GET", "/api/v1/invoices/{invoiceId}/credit-notes"), "party:read" as const],
   [routeKey("GET", "/api/v1/invoices/{invoiceId}/balance"), "party:read" as const],
   [routeKey("GET", "/api/v1/receivables"), "party:read" as const],
+
+  // BILL DUES (0318). Reading what is owed is `party:read`, with the fee axis
+  // redacting the amounts. Raising, linking, skipping and setting a schedule
+  // are `party:write`, the permission that raises an invoice by hand: SPOCs
+  // and managers both raise bills (Ashish, 2026-10-01). Issuing is
+  // `invoice:issue` on the invoice routes (0335). The FIRM'S SETTINGS are
+  // `tenant:admin`: the switch starts a sweep across every client, and the
+  // advance policy and default tax rates (0322) change what every advance does.
+  [routeKey("GET", "/api/v1/billing/dues"), "party:read" as const],
+  [routeKey("GET", "/api/v1/billing/unscheduled"), "party:read" as const],
+  [routeKey("PUT", "/api/v1/engagements/{engagementId}/billing"), "party:write" as const],
+  [routeKey("POST", "/api/v1/billing/raise"), "party:write" as const],
+  // Skipping gives up revenue: the firm's own permission, Partner and Manager by
+  // default (0321), moved on the roles screen.
+  [routeKey("POST", "/api/v1/billing/dues/{dueId}/skip"), "billing:skip" as const],
+  [routeKey("POST", "/api/v1/billing/dues/{dueId}/link"), "party:write" as const],
+  // The advance and the final bill (0320). A refund's credit note and keeping
+  // an advance are `invoice:issue`, as credit notes are (0335). (Approve start
+  // went with 0322: the advance no longer holds the work.)
+  [routeKey("GET", "/api/v1/billing/advances"), "party:read" as const],
+  [routeKey("GET", "/api/v1/billing/refunds"), "party:read" as const],
+  [routeKey("POST", "/api/v1/billing/refunds/{dueId}/credit-note"), "invoice:issue" as const],
+  [routeKey("POST", "/api/v1/billing/refunds/{dueId}/keep"), "invoice:issue" as const],
+  [routeKey("GET", "/api/v1/billing/bill-now"), "party:read" as const],
+  [routeKey("POST", "/api/v1/billing/engagements/{engagementId}/bill-now"), "party:write" as const],
+  [routeKey("GET", "/api/v1/billing/settings"), "party:read" as const],
+  [routeKey("PUT", "/api/v1/billing/settings"), "tenant:admin" as const],
 
   // THE DUNNING LADDER (T3.5). Reading how far a receivable has been chased is
   // `party:read` — the person on the phone to the client needs to know what has
@@ -828,6 +871,7 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("GET", "/api/v1/dashboard/mrr/{axis}"), "party:read" as const],
   [routeKey("GET", "/api/v1/dashboard/receivables/by-client"), "party:read" as const],
   [routeKey("GET", "/api/v1/dashboard/revenue/by-company"), "party:read" as const],
+  [routeKey("GET", "/api/v1/dashboard/revenue/by-manager"), "party:read" as const],
 
   [routeKey("GET", "/api/v1/documents"), "party:read" as const],
   [routeKey("POST", "/api/v1/documents"), "party:write" as const],
