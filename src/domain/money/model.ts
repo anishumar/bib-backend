@@ -244,3 +244,26 @@ export function amountProblem(
     `decimal places, e.g. 1499.50.`
   );
 }
+
+/**
+ * Money as the screens write it: rupees in lakhs ("INR 1,18,000"), every other
+ * currency in its own thousands, no ".00" on a whole amount. Grouped from the
+ * western string rather than asked of `en-IN`, which a Node built with small
+ * ICU silently answers as en-US. Never a JavaScript number: Intl formats the
+ * decimal string exactly.
+ */
+export function displayMoney(amount: string, currency: string): string {
+  const whole = /^-?\d+(\.0+)?$/.test(amount);
+  const western = new Intl.NumberFormat("en-US", {
+    minimumFractionDigits: whole ? 0 : 2,
+    maximumFractionDigits: whole ? 0 : 2,
+  }).format(amount as unknown as number);
+  if (currency !== "INR") return `${currency} ${western}`;
+  const negative = western.startsWith("-");
+  const [integer = "", fraction] = (negative ? western.slice(1) : western).split(".");
+  const digits = integer.replace(/,/g, "");
+  const last = digits.slice(-3);
+  const rest = digits.slice(0, -3);
+  const pairs = rest.length === 0 ? [] : (rest.match(/(\d{1,2})(?=(\d{2})*$)/g) ?? []);
+  return `INR ${negative ? "-" : ""}${[...pairs, last].join(",")}${fraction === undefined ? "" : `.${fraction}`}`;
+}

@@ -107,3 +107,14 @@ export function utcDayOf(expr: string, alias: string): string {
 export function zoneDayOf(expr: string, zoneExpr: string, alias: string): string {
   return `(${expr} AT TIME ZONE ${zoneExpr})::date::text AS ${alias}`;
 }
+
+/**
+ * The same instant at FULL precision (microseconds), for a value that never
+ * reaches a browser and is compared back against the column it came from: the
+ * notification outbox's cursor (0323). Milliseconds would round the cursor
+ * BELOW events it has already passed. Not for the wire: six fractional digits
+ * are outside the format every engine must accept, which is `isoInstant`'s job.
+ */
+export function fullInstant(expr: string, alias: string): string {
+  return `to_char(${expr} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS ${alias}`;
+}

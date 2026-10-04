@@ -125,6 +125,12 @@ import {
 import { PostgresAdvanceBillFacts, PostgresFinalBillFacts } from "../infrastructure/postgres/billing-facts";
 import { DunningService } from "../usecase/dunning/service";
 import { EscalationService } from "../usecase/escalation/service";
+import { NotificationService } from "../usecase/notify/service";
+import {
+  PostgresNotificationInbox,
+  PostgresNotificationSettings,
+} from "../infrastructure/postgres/notification-repository";
+import { PostgresNotificationEmailStore } from "../infrastructure/postgres/notification-email";
 import {
   PostgresDunningLadder,
   PostgresDunningRepository,
@@ -675,6 +681,15 @@ export function wire(cfg: Config, log: Logger): Wired {
   // climbed. The sweep is wired in `setup/worker.ts` and is deliberately not
   // reachable from a request — a monitor a person can trigger is a monitor that
   // can be triggered a hundred times, and nothing here needs it.
+  // NOTIFICATIONS (0323). The inbox and its settings only: what WRITES a
+  // notification is the worker's fan-out, never a request.
+  const notifications = new NotificationService({
+    inbox: new PostgresNotificationInbox(pools.app),
+    settings: new PostgresNotificationSettings(pools.app),
+    firm: new PostgresNotificationEmailStore(pools.app),
+    events: ledger,
+  });
+
   const escalations = new EscalationService({
     timeZones: new PostgresFirmTimeZone(pools.app),
     ladders: new PostgresEscalationLadder(pools.app),
@@ -1390,6 +1405,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         },
         invoice: { service: invoices, dunning, authz },
         billing: { service: billing, authz, advances: advanceDesk, finals: finalBills },
+        notifications: { service: notifications, authz },
         filestore: { service: fileStore, authz },
         dashboard: { service: dashboards, authz },
         readiness: { service: readiness },
