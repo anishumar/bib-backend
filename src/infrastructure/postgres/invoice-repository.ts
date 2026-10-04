@@ -55,6 +55,7 @@ import {
   DEFAULT_CREDIT_NOTE_PREFIX,
   DEFAULT_SERIES_PREFIX,
   formatInvoiceNumber,
+  INDIAN_FY_START_MONTH,
   isCreditReason,
   isInvoiceStatus,
   isPaymentMethod,
@@ -184,16 +185,46 @@ const LINE_COLUMNS =
   "id, tenant_id, invoice_id, engagement_id, description, position, quantity, unit_amount, " +
   "currency, discount_percent, tax_percent";
 
-/** The company's invoice series for the year exists. ON CONFLICT DO NOTHING so
- *  two concurrent first invoices do not race to create it; the `FOR UPDATE`
- *  read in `issue` is what actually orders them. */
-async function ensureInvoiceSeries(db: Db, tenantId: string, entityPartyId: string, financialYear: number): Promise<void> {
+/**
+ * The company's invoice series for the year exists. ON CONFLICT DO NOTHING so
+ * two concurrent first invoices do not race to create it; the `FOR UPDATE`
+ * read in `issue` is what actually orders them.
+ *
+ * A NEW YEAR'S ROW (0337) is fixed to the month the company's year starts in,
+ * so its label never moves when the setting changes mid-series, and takes the
+ * prefix of the company's latest series of the kind: a custom prefix used to
+ * fall back to `INV` every 1 April. A row that exists is left exactly as it is.
+ */
+async function ensureSeries(
+  db: Db,
+  tenantId: string,
+  entityPartyId: string,
+  financialYear: number,
+  documentType: "invoice" | "credit_note",
+  startMonth: number,
+): Promise<void> {
+  const defaultPrefix = documentType === "invoice" ? DEFAULT_SERIES_PREFIX : DEFAULT_CREDIT_NOTE_PREFIX;
   await db`
     INSERT INTO crm.invoice_series
-      (tenant_id, entity_party_id, financial_year, document_type, prefix)
-    VALUES (${tenantId}, ${entityPartyId}, ${financialYear}, 'invoice', ${DEFAULT_SERIES_PREFIX})
+      (tenant_id, entity_party_id, financial_year, document_type, prefix, start_month)
+    VALUES (${tenantId}, ${entityPartyId}, ${financialYear}, ${documentType},
+            coalesce((SELECT s.prefix FROM crm.invoice_series s
+                       WHERE s.tenant_id = ${tenantId} AND s.entity_party_id = ${entityPartyId}
+                         AND s.document_type = ${documentType}
+                       ORDER BY s.financial_year DESC LIMIT 1), ${defaultPrefix}),
+            ${startMonth})
     ON CONFLICT (tenant_id, entity_party_id, financial_year, document_type) DO NOTHING
   `;
+}
+
+async function ensureInvoiceSeries(
+  db: Db,
+  tenantId: string,
+  entityPartyId: string,
+  financialYear: number,
+  startMonth: number,
+): Promise<void> {
+  await ensureSeries(db, tenantId, entityPartyId, financialYear, "invoice", startMonth);
 }
 
 /**
@@ -229,7 +260,13 @@ async function latestIssued(
  * bills they settle as one (B34).
  */
 export async function insertDraftInvoice(db: Db, i: NewInvoice): Promise<Invoice> {
-  await ensureInvoiceSeries(db, i.tenantId, i.entityPartyId, i.financialYear);
+  await ensureInvoiceSeries(
+    db,
+    i.tenantId,
+    i.entityPartyId,
+    i.financialYear,
+    i.fiscalYearStartMonth ?? INDIAN_FY_START_MONTH,
+  );
   const [row] = await db<InvoiceRow[]>`
     INSERT INTO crm.invoice
       (id, tenant_id, party_id, entity_party_id, number, financial_year, sequence_number,
@@ -566,7 +603,7 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
         // NUMBERED BEFORE 0322 (B51). Its series' counter row, under the same
         // lock an unnumbered issue takes, so nothing in this series is issued
         // between the question and the answer.
-        await ensureInvoiceSeries(db, tenantId, draft.entity_party_id, draft.financial_year);
+        await ensureInvoiceSeries(db, tenantId, draft.entity_party_id, draft.financial_year, on.fiscalYearStartMonth);
         await db`
           SELECT 1 FROM crm.invoice_series
           WHERE tenant_id = ${tenantId}
@@ -584,12 +621,12 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
       }
       if (number === null) {
         financialYear = on.financialYear;
-        await ensureInvoiceSeries(db, tenantId, draft.entity_party_id, financialYear);
+        await ensureInvoiceSeries(db, tenantId, draft.entity_party_id, financialYear, on.fiscalYearStartMonth);
         // THE LOCK. Everything this file exists for is this line. A second
         // writer waits here until the first transaction ends, and then reads
         // what is stored rather than a snapshot taken at its own BEGIN.
-        const [series] = await db<{ last_number: number; prefix: string }[]>`
-          SELECT last_number, prefix FROM crm.invoice_series
+        const [series] = await db<{ last_number: number; prefix: string; start_month: number }[]>`
+          SELECT last_number, prefix, start_month FROM crm.invoice_series
           WHERE tenant_id = ${tenantId}
             AND entity_party_id = ${draft.entity_party_id}
             AND financial_year = ${financialYear}
@@ -606,11 +643,14 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
           );
         }
         sequence = series.last_number + 1;
+        // THE SERIES' OWN YEAR (0337), fixed when it started: a company that
+        // changes its year mid-series keeps this series' label until the new
+        // year begins, as a statutory transition period does.
         number = formatInvoiceNumber({
           prefix: series.prefix,
           financialYear,
           sequence,
-          startMonth: on.fiscalYearStartMonth,
+          startMonth: series.start_month,
         });
         // The counter moves and the invoice takes the number below, in this
         // same transaction. Either both happen or neither does.
@@ -737,12 +777,13 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
           entity_party_id: string;
           entity_name: string;
           financial_year: number;
+          start_month: number;
           document_type: string;
           prefix: string;
           last_number: number;
         }[]
       >`
-        SELECT s.entity_party_id, e.display_name AS entity_name, s.financial_year,
+        SELECT s.entity_party_id, e.display_name AS entity_name, s.financial_year, s.start_month,
                s.document_type, s.prefix, s.last_number
         FROM crm.invoice_series s
         JOIN core.party e ON e.id = s.entity_party_id
@@ -752,6 +793,7 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
         entityPartyId: r.entity_party_id,
         entityName: r.entity_name,
         financialYear: r.financial_year,
+        startMonth: r.start_month,
         documentType: r.document_type,
         prefix: r.prefix,
         lastNumber: r.last_number,
@@ -879,16 +921,10 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
       `;
       if (cap !== undefined && !cap.ok) return { maxCredit: cap.max_credit, takenByBills: cap.taken };
 
-      await db`
-        INSERT INTO crm.invoice_series
-          (tenant_id, entity_party_id, financial_year, document_type, prefix)
-        VALUES (${c.tenantId}, ${c.entityPartyId}, ${financialYear}, 'credit_note',
-                ${DEFAULT_CREDIT_NOTE_PREFIX})
-        ON CONFLICT (tenant_id, entity_party_id, financial_year, document_type) DO NOTHING
-      `;
+      await ensureSeries(db, c.tenantId, c.entityPartyId, financialYear, "credit_note", c.fiscalYearStartMonth);
 
-      const [series] = await db<{ last_number: number; prefix: string }[]>`
-        SELECT last_number, prefix FROM crm.invoice_series
+      const [series] = await db<{ last_number: number; prefix: string; start_month: number }[]>`
+        SELECT last_number, prefix, start_month FROM crm.invoice_series
         WHERE tenant_id = ${c.tenantId}
           AND entity_party_id = ${c.entityPartyId}
           AND financial_year = ${financialYear}
@@ -907,7 +943,8 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
         prefix: series.prefix,
         financialYear,
         sequence,
-        startMonth: c.fiscalYearStartMonth,
+        // The series' own year (0337), as for an invoice.
+        startMonth: series.start_month,
       });
 
       await db`

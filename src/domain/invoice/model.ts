@@ -157,6 +157,21 @@ export function financialYearLabel(startYear: number, startMonth: number = INDIA
 }
 
 /**
+ * The year label a number was drawn under (0337): `INV/2026-27/0001` ->
+ * `2026-27`, `INV/2027/0001` -> `2027`. Read OFF the number because the number
+ * is frozen and was formatted from its series' own start month; working the
+ * label out again from today's setting is how a screen came to print `2026-27`
+ * for a company on a calendar year. Counted from the end, since a prefix may
+ * hold a slash. Null for a draft (no number) or a shape it does not know.
+ */
+export function financialYearLabelOfNumber(number: string | null): string | null {
+  if (number === null) return null;
+  const parts = number.split("/");
+  const label = parts.length >= 3 ? parts[parts.length - 2] : undefined;
+  return label !== undefined && /^\d{4}(-\d{2})?$/.test(label) ? label : null;
+}
+
+/**
  * `INV/2026-27/0001`.
  *
  * Slashes rather than the hyphens `PR-2026-0007` uses, and that is not
