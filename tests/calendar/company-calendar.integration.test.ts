@@ -8,9 +8,11 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import postgres from "postgres";
 import { load } from "../../src/config/config";
+import { PostgresFirmTimeZone } from "../../src/infrastructure/postgres/firm-timezone-repository";
 
 const cfg = load();
 const owner = postgres(cfg.db.ownerUrl, { max: 2 });
+const app = postgres(cfg.db.appUrl, { max: 2 });
 
 const stamp = Date.now().toString(36);
 let tenant = "";
@@ -54,7 +56,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await owner.end({ timeout: 5 });
+  await Promise.all([owner.end({ timeout: 5 }), app.end({ timeout: 5 })]);
 });
 
 describe("a company's own time zone (0337)", () => {
@@ -116,5 +118,52 @@ describe("a number series remembers the month its year started (0337)", () => {
         VALUES (${tenant}, ${company}, 2027, 'invoice', 'INV', 13)
       `,
     ).rejects.toMatchObject({ code: "23514" });
+  });
+});
+
+describe("companyCalendars: the firm's companies that keep their own (0337)", () => {
+  const zones = new PostgresFirmTimeZone(app);
+  let self = "";
+  let client = "";
+
+  beforeAll(async () => {
+    // The firm itself, on India's clock and an April year.
+    const [p] = await owner<{ id: string }[]>`
+      INSERT INTO core.party (tenant_id, kind, display_name)
+      VALUES (${tenant}, 'organization', 'Firm Itself Private Limited') RETURNING id
+    `;
+    if (!p) throw new Error("no party");
+    self = p.id;
+    await owner`
+      INSERT INTO core.organization (party_id, tenant_id, legal_name, is_firm_self)
+      VALUES (${self}, ${tenant}, 'Firm Itself Private Limited', true)
+    `;
+    await owner`
+      INSERT INTO core.legal_entity (party_id, tenant_id, jurisdiction, entity_type, time_zone, financial_year_end)
+      VALUES (${self}, ${tenant}, 'IN', 'private_limited', 'Asia/Kolkata', '03-31')
+    `;
+    // The Gulf company on a calendar year.
+    await owner`UPDATE core.legal_entity SET time_zone = 'Asia/Dubai', financial_year_end = '12-31' WHERE party_id = ${company}`;
+    // A CLIENT with a year end of its own: never a company of the firm's.
+    client = await party(tenant, "Client With A Year End Ltd", true);
+    await owner`UPDATE core.legal_entity SET financial_year_end = '03-31', time_zone = 'Asia/Dubai' WHERE party_id = ${client}`;
+  });
+
+  it("lists exactly the companies with a year or zone of their own", async () => {
+    const cals = await zones.companyCalendars(tenant);
+    expect(cals.get(self)).toEqual({ timeZone: "Asia/Kolkata", fiscalYearStartMonth: 4 });
+    expect(cals.get(company)).toEqual({ timeZone: "Asia/Dubai", fiscalYearStartMonth: 1 });
+    expect(cals.size).toBe(2);
+  });
+
+  it("never reads a client's year end as a company's", async () => {
+    const cals = await zones.companyCalendars(tenant);
+    expect(cals.has(client)).toBe(false);
+  });
+
+  it("leaves out a company with nothing of its own, or no registration", async () => {
+    const cals = await zones.companyCalendars(tenant);
+    expect(cals.has(plainCompany)).toBe(false);
+    expect(cals.has(bareParty)).toBe(false);
   });
 });

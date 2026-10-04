@@ -16,8 +16,17 @@
 // has any business asking for it. So the portal's digest resolves the zone
 // BEFORE its `withPortal` transaction opens and passes it in, which is exactly
 // what T6.9 did with the Key Manager for the same reason.
+//
+// ── AND EACH COMPANY'S OWN, WHEN IT KEEPS ONE (0337) ───────────────────────
+//
+// A firm's companies may keep their own zone and year (Sid, 2026-10-04).
+// `companyCalendars` answers only those that do; a company absent from the map
+// is on the firm's. It lives HERE, on the one zone adapter, for 0071's reason:
+// two adapters would be two answers to "which day is it for this document".
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
+import { startMonthOfYearEnd } from "../../domain/calendar/model";
+import type { CompanyCalendars } from "../../domain/calendar/model";
 import { DEFAULT_TIME_ZONE } from "../../domain/tenancy/model";
 import type { FirmTimeZone as ChaserFirmTimeZone } from "../../usecase/chaser/ports";
 import type { FirmTimeZone as LibraryFirmTimeZone } from "../../usecase/portallibrary/ports";
@@ -50,6 +59,30 @@ export class PostgresFirmTimeZone
       // could not read. `PostgresRequestRoutingRepository` takes the same
       // position about `none`, for the same reason.
       return row?.time_zone ?? DEFAULT_TIME_ZONE;
+    });
+  }
+
+  /**
+   * The firm's companies that keep their OWN zone or year (0337), keyed by
+   * party id. `crm.is_firm_entity` is the filter, so a CLIENT's year end
+   * (stored in the same column for its filings) is never read as a company's.
+   * A company with neither set, or with no registration yet, is absent: it is
+   * on the firm's.
+   */
+  async companyCalendars(tenantId: string): Promise<CompanyCalendars> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<{ party_id: string; time_zone: string | null; financial_year_end: string | null }[]>`
+        SELECT le.party_id, le.time_zone, le.financial_year_end
+          FROM core.legal_entity le
+         WHERE (le.time_zone IS NOT NULL OR le.financial_year_end IS NOT NULL)
+           AND crm.is_firm_entity(le.tenant_id, le.party_id)
+      `;
+      return new Map(
+        rows.map((r) => [
+          r.party_id,
+          { timeZone: r.time_zone, fiscalYearStartMonth: startMonthOfYearEnd(r.financial_year_end) },
+        ]),
+      );
     });
   }
 
