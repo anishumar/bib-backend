@@ -1390,6 +1390,54 @@ with `letterPdf: null` and never raises. Not built: a
 Connect webhook (the sixth public route — completion is within five minutes instead), and
 reminders or resends from bib.
 
+## Who signs for the firm — a list, and a choice on each letter (0343, Q005)
+
+The client (Ashish, 30 Sep 2026): *"add option to add signatories and then the drop down at the
+time of finalizing EL to select who will sign that particular EL"*. 0022 gave the firm ONE
+signatory; a firm with several partners signs different clients' letters with different partners.
+
+**The list is `tenancy.firm_signatory`** (tenant-scoped, RLS, composite keys): a staff member, the
+capacity they sign in, their OWN signature image (a `files.document_version`), `is_active`.
+Firm-wide, whichever company issues (Shrestha, 2026-10-04). One entry per person. Retired, never
+deleted: a partner who left still names the letters they signed. Routes under
+`/api/v1/tenancy/signatories` (read `config:read`, write `tenant:admin`); the old
+`PUT /tenancy/firm-signatory` still works and now lists the person and makes them the default, so
+every seed script that calls it keeps working.
+
+**The DEFAULT stays on `tenancy.tenant.firm_signatory_*`**, because the owner rule (T6.17), the job
+desk and the preview already read it there. Two places, one fact, held by a KEY rather than by
+care: the tenant's `(id, user, title)` references the list's `(tenant_id, user_id, title)` ON UPDATE
+CASCADE. So the default is always somebody on the list (even the owner role cannot name anyone
+else), and renaming the default's title on the list moves the tenant's copy in the same
+statement. A firm's first signatory becomes its default; the default cannot be retired until
+another is named (`DEFAULT_SIGNATORY_CANNOT_RETIRE`). `TenantRepository.setFirmSignatory` is
+gone: `SignatoryRepository.makeDefault` points the default, from the list's own row.
+
+**A letter chooses on the DRAFT** (`crm.engagement_letter.chosen_signatory_id`, null = the default
+at send), through `PATCH /engagement-letters/{id}` `chosenSignatoryId`. Why on the draft and not as a
+send parameter: the preview must print the right name before anybody presses send. `send()` still
+SNAPSHOTS the person, title and image into 0022's and 0081's columns, which stay the record. A
+retired choice is refused when chosen and again at send (`SIGNATORY_RETIRED`, 409), before
+anything is written (`EngagementService.signerFor` runs before the signature request is opened).
+0019's freeze covers the new column; it was added with no backfill, so the freeze had nothing to
+refuse.
+
+**The signature image is a PERSON's (`signerFor`).** Their own image first. Only the DEFAULT, with
+none of their own, falls back to the issuing company's `brand_asset` signature, which is exactly
+what every letter sent before 0343 carried. Anyone else with no image prints a bare rule. The
+company's mark IS somebody's signature; printing it over another partner's name would forge a
+document with one choice in a dropdown. The preview (`render-source.ts`) reads the same rule in
+SQL, and `tests/render/preview.integration.test.ts` proves a chosen signatory's preview is
+byte-identical to what Send renders.
+
+**Not in `canonicalContent`.** The content hash already carries the snapshot
+(`firmSignatoryUserId` + title); the choice is how the snapshot was reached. Adding it would move the
+hash of every letter in flight. The function's own `Pick` type does not admit the column.
+
+**Not decided, and said:** the owner rule's last resort is still the FIRM default ("the signing
+partner"), not the letter's chosen signatory; copy-as-new-draft does not carry the choice (the copy
+signs as the default until somebody chooses again).
+
 ## What a document SAYS — its prose, and whose law it names (G1.7, G1.8)
 
 Two things sit beside a document's priced lines, and neither is a clause.
