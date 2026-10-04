@@ -203,6 +203,11 @@ export interface FirmEntityRecord {
   readonly pan: string | null;
   readonly phone: string | null;
   readonly email: string | null;
+  /** Its OWN time zone (0337), or null: its documents are dated on the firm's. */
+  readonly timeZone: string | null;
+  /** The month its OWN financial year starts in (0337), or null for the
+   *  firm's. Stored as core.legal_entity.financial_year_end (its last day). */
+  readonly fiscalYearStartMonth: number | null;
 }
 
 /** One of a company's numbers: which kind, and its value. */
@@ -241,6 +246,9 @@ export interface NewFirmEntity {
   readonly preferenceId: string;
   /** Its numbers, written in the same transaction (audit 2026-10-03). */
   readonly numbers: readonly FirmEntityNumberWrite[];
+  /** Its own zone and year end (MM-DD) (0337); null = the firm's. */
+  readonly timeZone: string | null;
+  readonly fiscalYearEnd: string | null;
 }
 
 /** A change to one of the firm's companies. `register` records the country of
@@ -252,6 +260,11 @@ export interface FirmEntityChange {
   readonly register?: { readonly jurisdiction: string; readonly entityType: string } | undefined;
   /** Numbers set or cleared, in the same transaction (audit 2026-10-03). */
   readonly numbers?: readonly FirmEntityNumberWrite[] | undefined;
+  /** Its own zone and year end (MM-DD) set or cleared (0337); a key left out
+   *  keeps what is there, null clears it back to the firm's. */
+  readonly calendar?:
+    | { readonly timeZone?: string | null | undefined; readonly fiscalYearEnd?: string | null | undefined }
+    | undefined;
 }
 
 export interface FirmEntityRepository {

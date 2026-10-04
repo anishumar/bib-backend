@@ -100,6 +100,8 @@ describe("the firm's own companies, against real Postgres (T6.18)", () => {
       registeredAddress: null,
       preferenceId: crypto.randomUUID(),
       numbers: [],
+      timeZone: null,
+      fiscalYearEnd: null,
     });
     expect(wrote).toEqual({ created: false });
     expect(await organizationsNamed("Test Gulf Rival LLC")).toBe(0);
@@ -309,5 +311,46 @@ describe("a company's numbers and address, against real Postgres (audit 2026-10-
       ),
     ).rejects.toThrow(/email address is already recorded for another/);
     expect(await organizationsNamed("Test Taken FZE")).toBe(before);
+  });
+});
+
+describe("a company's own year and clock, against real Postgres (0337)", () => {
+  it("is stored beside its registration and read back as a start month", async () => {
+    const made = await service.create(
+      {
+        tenantId: tenant,
+        name: "Test Mauritius Ltd",
+        jurisdiction: "MU",
+        entityType: "Ltd",
+        timeZone: "Indian/Mauritius",
+        fiscalYearStartMonth: 7,
+      },
+      SYSTEM_ACTOR,
+    );
+    expect(made).toMatchObject({ timeZone: "Indian/Mauritius", fiscalYearStartMonth: 7 });
+    const listed = (await service.list(tenant)).entities.find((e) => e.partyId === made.partyId);
+    expect(listed).toMatchObject({ timeZone: "Indian/Mauritius", fiscalYearStartMonth: 7 });
+
+    const cleared = await service.edit(
+      { tenantId: tenant, partyId: made.partyId, timeZone: null, fiscalYearStartMonth: null },
+      SYSTEM_ACTOR,
+    );
+    expect(cleared).toMatchObject({ timeZone: null, fiscalYearStartMonth: null });
+
+    const back = await service.edit(
+      { tenantId: tenant, partyId: made.partyId, fiscalYearStartMonth: 1 },
+      SYSTEM_ACTOR,
+    );
+    expect(back).toMatchObject({ timeZone: null, fiscalYearStartMonth: 1 });
+  });
+
+  it("is refused by the database itself when a zone gets past the service", async () => {
+    const made = await service.create(
+      { tenantId: tenant, name: "Test Nepal Pvt Ltd", jurisdiction: "NP", entityType: "Pvt Ltd" },
+      SYSTEM_ACTOR,
+    );
+    await expect(
+      repository.edit(tenant, made.partyId, { calendar: { timeZone: "Mars/Olympus" } }),
+    ).rejects.toMatchObject({ code: "23514" });
   });
 });

@@ -29,7 +29,10 @@ export type DocumentErrorCode =
   | "INVALID_FIRM_ENTITY"
   | "COUNTRY_ALREADY_SERVED"
   | "JURISDICTION_FIXED"
-  | "NOTHING_TO_CHANGE_ON_ENTITY";
+  | "NOTHING_TO_CHANGE_ON_ENTITY"
+  | "INVALID_TIME_ZONE"
+  | "INVALID_FISCAL_YEAR_START"
+  | "COMPANY_NOT_REGISTERED";
 
 /**
  * The firm has published no entity that could issue this document.
@@ -131,7 +134,45 @@ export class NothingToChangeOnEntity extends DocumentError {
   constructor() {
     super(
       "NOTHING_TO_CHANGE_ON_ENTITY",
-      "Nothing to change: send at least one of name, entityType, registeredAddress or jurisdiction.",
+      "Nothing to change: send at least one of name, entityType, registeredAddress, jurisdiction, " +
+        "a number, timeZone or fiscalYearStartMonth.",
+    );
+  }
+}
+
+// ── A company's own year and clock (0337) ──────────────────────────────────
+
+/** The firm card's own refusal (serviceaxis), in this layer's vocabulary: the
+ *  trigger on core.legal_entity is the real one, this is the sentence. */
+export class InvalidCompanyTimeZone extends DocumentError {
+  constructor(value: string) {
+    super(
+      "INVALID_TIME_ZONE",
+      `${JSON.stringify(value)} is not a time zone this system knows. Use an IANA name: ` +
+        `"Asia/Dubai", "Asia/Singapore", "America/New_York", or "Asia/Kolkata". It decides the ` +
+        `date on this company's invoices and letters, and the day its bills fall due.`,
+    );
+  }
+}
+
+export class InvalidCompanyYearStart extends DocumentError {
+  constructor(value: unknown) {
+    super(
+      "INVALID_FISCAL_YEAR_START",
+      `A financial year starts in a month from 1 (January) to 12 (December), not ` +
+        `${JSON.stringify(value)}. An Indian company's starts in 4 (April).`,
+    );
+  }
+}
+
+/** The firm's own seeded company has no registration until its country is
+ *  recorded, and its year and clock are kept beside that registration. */
+export class CompanyNotRegistered extends DocumentError {
+  constructor(name: string) {
+    super(
+      "COMPANY_NOT_REGISTERED",
+      `Record where ${name} is registered first. Until then it uses the firm's financial year ` +
+        `and time zone.`,
     );
   }
 }

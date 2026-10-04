@@ -180,8 +180,29 @@ const FirmEntitySchema = z
      *  US USD, anything else the firm's reporting currency. The one copy of
      *  that table — a screen reads it here rather than keeping its own. */
     defaultCurrency: z.string().length(3),
+    /** Its OWN time zone (0337): the date on its invoices, letters and
+     *  proposals, and the day its bills fall due. Null = the firm's. */
+    timeZone: z.string().nullable(),
+    /** The month its OWN financial year starts in, 1-12 (0337): its invoice
+     *  numbers' year and its quarters and years. Null = the firm's. */
+    fiscalYearStartMonth: z.number().int().min(1).max(12).nullable(),
   })
   .openapi("FirmEntity");
+
+/** A company's own year and clock as a form sends them (0337): absent keeps
+ *  what is there, null goes back to the firm's. */
+const firmEntityCalendar = {
+  timeZone: z.string().max(64).nullable().optional().openapi({
+    description:
+      "An IANA zone (Asia/Dubai, America/New_York), never an offset. Dates this company's documents. " +
+      "Null = the firm's. Needs the company registered in a country first (COMPANY_NOT_REGISTERED).",
+  }),
+  fiscalYearStartMonth: z.number().int().nullable().optional().openapi({
+    description:
+      "1-12, the month its financial year starts. Null = the firm's. A change applies to invoice numbers " +
+      "drawn after it: a series already started keeps its year (0337).",
+  }),
+};
 
 const FirmEntitiesResponse = z
   .object({
@@ -202,6 +223,7 @@ const CreateFirmEntityRequest = z
     entityType: z.string().min(1).max(100),
     registeredAddress: RegisteredAddressSchema.optional(),
     ...firmEntityNumbers,
+    ...firmEntityCalendar,
   })
   .openapi("CreateFirmEntityRequest");
 
@@ -215,6 +237,7 @@ const EditFirmEntityRequest = z
      *  it). A company that has one does not move: JURISDICTION_FIXED. */
     jurisdiction: z.string().length(2).optional(),
     ...firmEntityNumbers,
+    ...firmEntityCalendar,
   })
   .openapi("EditFirmEntityRequest");
 
@@ -279,7 +302,9 @@ const editEntityRoute = createRoute({
     401: errorResponse("Not signed in"),
     403: errorResponse("No org selected, or the role does not permit it"),
     404: errorResponse("Not one of the firm's own companies"),
-    409: errorResponse("A company already registered in a country does not move"),
+    409: errorResponse(
+      "A company already registered in a country does not move, or its year and clock were sent before its country",
+    ),
   },
 });
 
@@ -306,6 +331,8 @@ function toFirmEntityBody(e: FirmEntityView): z.infer<typeof FirmEntitySchema> {
     phone: e.phone,
     email: e.email,
     defaultCurrency: e.defaultCurrency,
+    timeZone: e.timeZone,
+    fiscalYearStartMonth: e.fiscalYearStartMonth,
   };
 }
 
@@ -572,6 +599,8 @@ export function registerDocumentRoutes(app: OpenAPIHono<AppEnv>, deps: DocumentD
         pan: body.pan,
         phone: body.phone,
         email: body.email,
+        timeZone: body.timeZone,
+        fiscalYearStartMonth: body.fiscalYearStartMonth,
       },
       s.actor,
     );
@@ -594,6 +623,8 @@ export function registerDocumentRoutes(app: OpenAPIHono<AppEnv>, deps: DocumentD
         pan: body.pan,
         phone: body.phone,
         email: body.email,
+        timeZone: body.timeZone,
+        fiscalYearStartMonth: body.fiscalYearStartMonth,
       },
       s.actor,
     );

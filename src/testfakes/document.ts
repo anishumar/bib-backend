@@ -43,6 +43,7 @@ import { FirmEntityService } from "../usecase/document/firm-entities";
 import { DocumentService } from "../usecase/document/service";
 import { FakeIds } from "./ids";
 import { RecordingEventSink } from "./ledger";
+import { startMonthOfYearEnd } from "../domain/calendar/model";
 
 /** The entity every firm is seeded with — see the note on `FakePreferenceRepo`. */
 export const SEEDED_FIRM_ENTITY = "00000000-0000-0000-0000-0000000000f1";
@@ -366,6 +367,8 @@ export class FakeFirmEntityRepo implements FirmEntityRepository {
       pan: null,
       phone: null,
       email: null,
+      timeZone: null,
+      fiscalYearStartMonth: null,
     },
   ];
   /** "type value" pairs another party at the firm holds, so a test can make
@@ -428,6 +431,8 @@ export class FakeFirmEntityRepo implements FirmEntityRepository {
       pan: null,
       phone: null,
       email: null,
+      timeZone: e.timeZone,
+      fiscalYearStartMonth: startMonthOfYearEnd(e.fiscalYearEnd),
     };
     const { next, written } = this.applyNumbers(record, e.numbers);
     this.entities.push(next);
@@ -453,6 +458,10 @@ export class FakeFirmEntityRepo implements FirmEntityRepository {
           : { jurisdiction: change.register.jurisdiction, entityType: change.register.entityType }),
         ...(change.entityType === undefined ? {} : { entityType: change.entityType }),
         ...(change.registeredAddress === undefined ? {} : { registeredAddress: change.registeredAddress }),
+        ...(change.calendar?.timeZone === undefined ? {} : { timeZone: change.calendar.timeZone }),
+        ...(change.calendar?.fiscalYearEnd === undefined
+          ? {}
+          : { fiscalYearStartMonth: startMonthOfYearEnd(change.calendar.fiscalYearEnd) }),
       },
       change.numbers ?? [],
     );
