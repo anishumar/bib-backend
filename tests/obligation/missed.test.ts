@@ -140,6 +140,7 @@ function harness(opts: { now?: string; zone?: string } = {}) {
       stateId: byCode(opts.stateCode ?? "pending").id,
       workItemId: null,
       filedOn: opts.filedOn ?? null,
+      filedByWorkItemId: null,
       resolutionOptionId: null,
       resolutionReason: null,
       resolvedAt: null,

@@ -640,6 +640,10 @@ export interface CalendarRow {
   readonly needsDecision: boolean;
   readonly workItemId: string | null;
   readonly filedOn: IsoDate | null;
+  /** The task that filed it (0357) and its title: its own task, or the period
+   *  job's task that covered it (Q063). Null while unfiled. */
+  readonly filedByWorkItemId: string | null;
+  readonly filedByTitle: string | null;
   /** What was decided about it, once somebody has. `resolutionName` is joined
    *  rather than left as an id for the reason every read model in this codebase
    *  joins its names: a list returning uuids is one somebody fetches per row. */
@@ -741,6 +745,8 @@ export interface CalendarQuery {
   /** Whether to include rows that have reached a terminal state. Off by
    *  default: within a year the filed ones are almost the whole table. */
   readonly includeSettled?: boolean | undefined;
+  /** Only rows this task filed (0357): what a period job's task page lists. */
+  readonly filedByWorkItemId?: string | undefined;
   readonly limit?: number | undefined;
 }
 
@@ -852,15 +858,40 @@ export interface ObligationInstanceRepository {
     obligationId: string,
     filedOn: IsoDate,
     stateId: string,
+    /** The task whose completion files it (0357): its own, or a period
+     *  job's task (Q063). Written with `filed_on`, never apart from it. */
+    filedByWorkItemId: string,
   ): Promise<boolean>;
   /**
    * Take a recorded filing back and return the obligation to `stateId`.
-   * Returns false if it was not filed to begin with.
+   * Returns false if it was not filed to begin with, or was filed by a task
+   * other than `filedByWorkItemId`.
    *
    * Same shape and same reason as `markFiled`: the caller writes
-   * `obligation.filing_reversed` only when a filing really was withdrawn.
+   * `obligation.filing_reversed` only when a filing really was withdrawn. The
+   * task is in the WHERE (0357): a task reopening un-files only what IT filed,
+   * so a job's task reopened leaves a return filed through its own task alone,
+   * and a filing's own task reopened leaves one the job filed alone.
    */
-  clearFiled(tenantId: string, obligationId: string, stateId: string): Promise<boolean>;
+  clearFiled(
+    tenantId: string,
+    obligationId: string,
+    stateId: string,
+    filedByWorkItemId: string,
+  ): Promise<boolean>;
+  /** Every row this task filed (0357), withdrawn or not: what reopening the
+   *  task takes back. */
+  listFiledBy(tenantId: string, workItemId: string): Promise<readonly ObligationInstance[]>;
+  /**
+   * THE FILINGS A PERIOD JOB'S TASK FILES (Q063): when the task is a period
+   * job's (`delivery.job.period_start`), every row of that task's company
+   * whose period lies INSIDE the job's period (contained, never merely
+   * overlapping: July's task does not file the July-September quarter), on a
+   * chain the task's engagement's service carries (a live catalogue link, or
+   * the row's own engagement), not filed, not withdrawn, not in a finished
+   * state. Empty for a task that is not a period job's.
+   */
+  listJobFilingsForTask(tenantId: string, workItemId: string): Promise<readonly ObligationInstance[]>;
   /**
    * Everything whose statutory date has passed with nothing filed, nobody
    * having decided, and whose state can still be missed.

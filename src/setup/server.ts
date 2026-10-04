@@ -319,6 +319,8 @@ export function wire(cfg: Config, log: Logger): Wired {
     jobSteps: {
       adoptUnheldSteps: (tenantId, jobId, from, to, actor): Promise<number> =>
         orchestrator.adoptUnheldSteps(tenantId, jobId, from, to, actor),
+      openStepLabels: (tenantId, jobId): Promise<readonly string[]> =>
+        orchestrator.openStepLabels(tenantId, jobId),
     },
     axes: serviceAxisRepository,
     policies: configRepository,

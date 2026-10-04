@@ -944,6 +944,14 @@ export interface ObligationInstance {
   readonly stateId: string;
   readonly workItemId: string | null;
   readonly filedOn: IsoDate | null;
+  /**
+   * The task whose completion filed this row (Q063, 0357): its own task, or
+   * the task of the period job that covered it. Null while unfiled. Reopening
+   * a task un-files only the rows naming it, so a job's task reopened never
+   * un-files a return somebody filed through its own task, and the other way
+   * round.
+   */
+  readonly filedByWorkItemId: string | null;
   /** What the partner chose when the statutory date passed unfiled, and why.
    *  All three together or all three null — 0055 checks it in the database
    *  because a decision with no reason is what this feature exists to prevent. */

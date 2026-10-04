@@ -107,6 +107,7 @@ interface InstanceRow {
   state_id: string;
   work_item_id: string | null;
   filed_on: string | null;
+  filed_by_work_item_id: string | null;
   resolution_option_id: string | null;
   resolution_reason: string | null;
   resolved_at: string | null;
@@ -118,7 +119,8 @@ interface InstanceRow {
 const INSTANCE_COLUMNS =
   "id, tenant_id, template_id, entity_party_id, engagement_id, period_start::text, " +
   "period_end::text, period_label, statutory_due_on::text, internal_target_on::text, " +
-  "state_id, work_item_id, filed_on::text, resolution_option_id, resolution_reason, " +
+  "state_id, work_item_id, filed_on::text, filed_by_work_item_id, resolution_option_id, " +
+  "resolution_reason, " +
   isoInstant("resolved_at", "resolved_at") + ", " +
   isoInstant("withdrawn_at", "withdrawn_at") + ", withdrawn_by_user_id, withdrawn_reason";
 
@@ -137,6 +139,7 @@ function toInstance(r: InstanceRow): ObligationInstance {
     stateId: r.state_id,
     workItemId: r.work_item_id,
     filedOn: r.filed_on,
+    filedByWorkItemId: r.filed_by_work_item_id,
     resolutionOptionId: r.resolution_option_id,
     resolutionReason: r.resolution_reason,
     resolvedAt: r.resolved_at,
@@ -301,6 +304,7 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
           rule_pack: string; resolution_option_id: string | null;
           resolution_name: string | null; resolution_reason: string | null;
           resolved_at: string | null;
+          filed_by_work_item_id: string | null; filed_by_title: string | null;
         }[]
       >`
         SELECT oi.id,
@@ -316,12 +320,15 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
                oi.work_item_id, oi.filed_on::text,
                oi.resolution_option_id, ro.name AS resolution_name,
                oi.resolution_reason, ${db.unsafe(isoInstant("oi.resolved_at", "resolved_at"))},
-               t.status AS rule_status, t.rule_pack
+               t.status AS rule_status, t.rule_pack,
+               oi.filed_by_work_item_id, fb.title AS filed_by_title
         FROM delivery.obligation_instance oi
         JOIN delivery.obligation_template t
           ON t.id = oi.template_id AND t.tenant_id = oi.tenant_id
         JOIN delivery.obligation_state s
           ON s.id = oi.state_id AND s.tenant_id = oi.tenant_id
+        LEFT JOIN delivery.work_item fb
+          ON fb.id = oi.filed_by_work_item_id AND fb.tenant_id = oi.tenant_id
         LEFT JOIN core.party ep
           ON ep.id = oi.entity_party_id AND ep.tenant_id = oi.tenant_id
         LEFT JOIN crm.engagement e
@@ -335,6 +342,8 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
           AND (${query.entityPartyId ?? null}::uuid IS NULL OR oi.entity_party_id = ${query.entityPartyId ?? null}::uuid)
           AND (${query.module ?? null}::text IS NULL OR t.module = ${query.module ?? null}::text)
           AND (${query.includeSettled ?? false} OR NOT s.is_terminal)
+          AND (${query.filedByWorkItemId ?? null}::uuid IS NULL
+               OR oi.filed_by_work_item_id = ${query.filedByWorkItemId ?? null}::uuid)
           -- A WITHDRAWN filing is off the calendar whatever else is asked
           -- (0309). It is not a flavour of "settled": it was never filed or
           -- decided, and includeSettled must not bring it back.
@@ -360,6 +369,8 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
           needsDecision: r.needs_decision,
           workItemId: r.work_item_id,
           filedOn: r.filed_on,
+          filedByWorkItemId: r.filed_by_work_item_id,
+          filedByTitle: r.filed_by_title,
           resolutionOptionId: r.resolution_option_id,
           resolutionName: r.resolution_name,
           resolutionReason: r.resolution_reason,
@@ -461,6 +472,7 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
     obligationId: string,
     filedOn: IsoDate,
     stateId: string,
+    filedByWorkItemId: string,
   ): Promise<boolean> {
     return withTenant(this.app, tenantId, async (db) => {
       // `AND filed_on IS NULL` is what makes this safe to call twice. Two
@@ -470,7 +482,8 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
       // the other request has already committed.
       const rows = await db<{ id: string }[]>`
         UPDATE delivery.obligation_instance
-        SET filed_on = ${filedOn}::date, state_id = ${stateId}
+        SET filed_on = ${filedOn}::date, state_id = ${stateId},
+            filed_by_work_item_id = ${filedByWorkItemId}
         WHERE id = ${obligationId} AND filed_on IS NULL
         RETURNING id
       `;
@@ -478,15 +491,82 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
     });
   }
 
-  async clearFiled(tenantId: string, obligationId: string, stateId: string): Promise<boolean> {
+  async clearFiled(
+    tenantId: string,
+    obligationId: string,
+    stateId: string,
+    filedByWorkItemId: string,
+  ): Promise<boolean> {
     return withTenant(this.app, tenantId, async (db) => {
+      // The task in the WHERE (0357): a reopened task un-files only what it
+      // filed, decided by the database between the read and the write.
       const rows = await db<{ id: string }[]>`
         UPDATE delivery.obligation_instance
-        SET filed_on = NULL, state_id = ${stateId}
+        SET filed_on = NULL, state_id = ${stateId}, filed_by_work_item_id = NULL
         WHERE id = ${obligationId} AND filed_on IS NOT NULL
+          AND filed_by_work_item_id = ${filedByWorkItemId}
         RETURNING id
       `;
       return rows.length > 0;
+    });
+  }
+
+  async listFiledBy(tenantId: string, workItemId: string): Promise<readonly ObligationInstance[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<InstanceRow[]>`
+        SELECT ${db.unsafe(INSTANCE_COLUMNS)} FROM delivery.obligation_instance
+        WHERE filed_by_work_item_id = ${workItemId}
+        ORDER BY statutory_due_on, id
+      `;
+      return rows.map(toInstance);
+    });
+  }
+
+  async listJobFilingsForTask(
+    tenantId: string,
+    workItemId: string,
+  ): Promise<readonly ObligationInstance[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // THE JOB'S PERIOD, THE TASK'S COMPANY, THE TASK'S SERVICE (Q063). The
+      // service half is `earliestFilingDue`'s (obligation-coverage.ts), the
+      // rule CA#11 already applies to the same task's due date: a live link
+      // from the row's chain to the entry the task's letter line pinned, or
+      // the row owed under this very engagement. CONTAINED in the period, so
+      // a month's task never files the quarter it falls in.
+      const rows = await db<InstanceRow[]>`
+        SELECT ${db.unsafe(INSTANCE_COLUMNS)} FROM delivery.obligation_instance
+        WHERE id IN (
+          SELECT oi.id
+            FROM delivery.work_item wi
+            JOIN delivery.job j
+              ON j.id = wi.job_id AND j.tenant_id = wi.tenant_id
+            JOIN crm.engagement e
+              ON e.id = wi.engagement_id AND e.tenant_id = wi.tenant_id
+            JOIN crm.engagement_letter_line ln
+              ON ln.id = e.engagement_letter_line_id AND ln.tenant_id = e.tenant_id
+            JOIN config.version pinned
+              ON pinned.id = ln.service_version_id AND pinned.tenant_id = ln.tenant_id
+            JOIN delivery.obligation_instance oi
+              ON oi.tenant_id = wi.tenant_id AND oi.entity_party_id = e.entity_party_id
+            JOIN delivery.obligation_state os
+              ON os.id = oi.state_id AND os.tenant_id = oi.tenant_id
+           WHERE wi.id = ${workItemId}
+             AND j.period_start IS NOT NULL
+             AND oi.period_start >= j.period_start
+             AND oi.period_end <= j.period_end
+             AND oi.filed_on IS NULL
+             AND oi.withdrawn_at IS NULL
+             AND NOT os.is_terminal
+             AND (oi.engagement_id = e.id
+                  OR EXISTS (SELECT 1 FROM delivery.obligation_rule_service k
+                              WHERE k.tenant_id = oi.tenant_id
+                                AND k.lineage_id = oi.lineage_id
+                                AND k.service_entry_id = pinned.entry_id
+                                AND k.unlinked_at IS NULL))
+        )
+        ORDER BY statutory_due_on, id
+      `;
+      return rows.map(toInstance);
     });
   }
 

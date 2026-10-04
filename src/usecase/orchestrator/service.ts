@@ -548,6 +548,18 @@ export class OrchestratorService {
     return this.deps.runs.openForJob(tenantId, jobId);
   }
 
+  /**
+   * What holds a job's task from being finished (Q063): the labels of its
+   * steps that have not settled. A job that cannot be found holds nothing,
+   * for `adoptUnheldSteps`'s reason.
+   */
+  async openStepLabels(tenantId: string, jobId: string): Promise<readonly string[]> {
+    const steps = await this.deps.steps.listForJob(tenantId, jobId);
+    return steps
+      .filter((s) => s.status !== "done" && s.status !== "skipped" && s.status !== "failed")
+      .map((s) => s.label);
+  }
+
   async stepsOf(tenantId: string, jobId: string): Promise<readonly JobStep[]> {
     const job = await this.deps.jobs.findById(tenantId, jobId);
     if (!job) throw new JobNotFound(jobId);

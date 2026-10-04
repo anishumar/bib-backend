@@ -385,6 +385,12 @@ const CalendarRowSchema = z
         "started' — a year of those is the calendar's normal state, not a backlog.",
     }),
     filedOn: z.string().nullable(),
+    filedByWorkItemId: z.string().uuid().nullable().openapi({
+      description:
+        "The task that filed it (Q063): its own task, or the period job's task that covered " +
+        "it. Null while unfiled.",
+    }),
+    filedByTitle: z.string().nullable().openapi({ description: "That task's title, e.g. 'GST · Sep 2026'." }),
     resolutionOptionId: z.string().uuid().nullable(),
     resolutionName: z.string().nullable().openapi({
       description:
@@ -1596,6 +1602,8 @@ export function registerObligationRoutes(app: OpenAPIHono<AppEnv>, deps: Obligat
           needsDecision: r.needsDecision,
           workItemId: r.workItemId,
           filedOn: r.filedOn,
+          filedByWorkItemId: r.filedByWorkItemId,
+          filedByTitle: r.filedByTitle,
           resolutionOptionId: r.resolutionOptionId,
           resolutionName: r.resolutionName,
           resolutionReason: r.resolutionReason,

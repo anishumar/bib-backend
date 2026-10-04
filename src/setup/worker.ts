@@ -332,6 +332,8 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     jobSteps: {
       adoptUnheldSteps: (tenantId, jobId, from, to, actor): Promise<number> =>
         orchestrator.adoptUnheldSteps(tenantId, jobId, from, to, actor),
+      openStepLabels: (tenantId, jobId): Promise<readonly string[]> =>
+        orchestrator.openStepLabels(tenantId, jobId),
     },
     axes: new PostgresServiceAxisRepository(pools.app),
     policies: configRepository,

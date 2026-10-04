@@ -65,6 +65,7 @@ import {
   BlockReasonRequired,
   ChecklistItemDone,
   ChecklistOpen,
+  JobStepsOpen,
   ChecklistItemNotFound,
   ConflictingStateFlags,
   DependencyCycle,
@@ -1387,6 +1388,9 @@ export class WorkItemService {
     if (to.isTerminal && to.isSuccess && !(from.isTerminal && from.isSuccess)) {
       const open = openChecklistLines(await this.deps.items.listChecklist(input.tenantId, item.id));
       if (open.length > 0) throw new ChecklistOpen(open, "doer");
+      // AND A JOB'S TASK WAITS FOR THE JOB'S STEPS (Q063). Finishing it files
+      // its period's returns, so the process must have run.
+      await this.assertJobStepsSettled(input.tenantId, item.jobId, "doer");
     }
 
     const now = this.deps.clock.now().toISOString();
@@ -1460,6 +1464,17 @@ export class WorkItemService {
       actor,
     );
     return updated;
+  }
+
+  /** Refuse finishing a job's task while the job has steps open (Q063). */
+  private async assertJobStepsSettled(
+    tenantId: string,
+    jobId: string | null,
+    to: "doer" | "checker",
+  ): Promise<void> {
+    if (jobId === null) return;
+    const open = await this.deps.jobSteps.openStepLabels(tenantId, jobId);
+    if (open.length > 0) throw new JobStepsOpen(open, to);
   }
 
   /**
@@ -1748,7 +1763,11 @@ export class WorkItemService {
   async filingFor(
     tenantId: string,
     workItemId: string,
-  ): Promise<{ readonly linked: LinkableFiling | null; readonly open: readonly LinkableFiling[] }> {
+  ): Promise<{
+    readonly linked: LinkableFiling | null;
+    readonly open: readonly LinkableFiling[];
+    readonly filedHere: readonly LinkableFiling[];
+  }> {
     const item = await this.requireItem(tenantId, workItemId);
     return this.deps.filings.filingsForTask(tenantId, item.id, item.entityPartyId ?? item.clientPartyId);
   }
@@ -2148,6 +2167,12 @@ export class WorkItemService {
         await this.deps.items.listChecklist(input.tenantId, approval.workItemId),
       );
       if (open.length > 0) throw new ChecklistOpen(open, "checker");
+      // The job's steps hold Approve as they hold Done (Q063), and BEFORE the
+      // decision is written: approving finishes the task, and a decision
+      // recorded over a finish that is then refused would leave the review
+      // approved and the task open.
+      const reviewed = await this.requireItem(input.tenantId, approval.workItemId);
+      await this.assertJobStepsSettled(input.tenantId, reviewed.jobId, "checker");
     }
 
     const decided = await this.deps.approvals.decide(input.tenantId, input.approvalId, {

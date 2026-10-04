@@ -2241,6 +2241,21 @@ export class ObligationService {
    *
    * The obligation returns to the firm's INITIAL state — where `raise` left it,
    * since raising deliberately does not move it either.
+   *
+   * ── A PERIOD JOB'S TASK FILES ITS PERIOD'S FILINGS (Q063, 0357) ──────────
+   *
+   * 10x: "Job marked as done means the return is being filed." So a task that
+   * is a period job's ("GST · Sep 2026") files, besides any filing of its own,
+   * every unfiled filing of its company inside the job's period on a rule its
+   * service carries (`listJobFilingsForTask`). Each is the same write and the
+   * same `obligation.filed`, with `byJobTask: true`. A filing whose own task is
+   * still open on a desk is filed too; that task stays where it is and its page
+   * says which task filed it (Shrestha, 2026-10-05).
+   *
+   * Every filed row names the task that filed it (`filedByWorkItemId`), and
+   * reopening takes back exactly those rows and no others: the job's task
+   * reopened leaves a return filed through its own task alone, and a filing's
+   * own task reopened leaves one the job filed alone.
    */
   async reconcileFiling(
     tenantId: string,
@@ -2248,51 +2263,63 @@ export class ObligationService {
     discharged: boolean,
     actor: Actor = SYSTEM_ACTOR,
   ): Promise<void> {
+    if (!discharged) {
+      // The rows THIS task filed: its own filing, and a period job's.
+      const filedBy = await this.deps.instances.listFiledBy(tenantId, workItemId);
+      if (filedBy.length === 0) return;
+      const initial = initialState(await this.deps.states.list(tenantId));
+      if (initial === null) throw new NoInitialState();
+      for (const o of filedBy) {
+        if (!(await this.deps.instances.clearFiled(tenantId, o.id, initial.id, workItemId))) continue;
+        await this.deps.events.recordEvent({
+          tenantId,
+          verb: "obligation.filing_reversed",
+          objectId: o.id,
+          actor,
+          payload: {
+            workItemId,
+            filedOn: o.filedOn,
+            statutoryDueOn: o.statutoryDueOn,
+            ...(o.workItemId === workItemId ? {} : { byJobTask: true }),
+          },
+        });
+      }
+      return;
+    }
+
     // Most work items are not a filing. This is the ordinary answer, and it
-    // costs one indexed lookup rather than a state list nobody needs.
-    const obligation = await this.deps.instances.findByWorkItem(tenantId, workItemId);
-    if (obligation === null) return;
+    // costs indexed lookups rather than a state list nobody needs.
+    const own = await this.deps.instances.findByWorkItem(tenantId, workItemId);
+    const byJob = await this.deps.instances.listJobFilingsForTask(tenantId, workItemId);
+    const toFile = [
+      ...(own !== null && own.filedOn === null ? [{ row: own, byJobTask: false }] : []),
+      ...byJob.filter((o) => o.id !== own?.id).map((row) => ({ row, byJobTask: true })),
+    ];
+    if (toFile.length === 0) return;
 
-    // Already in the shape being asked for. Checked before the state list so a
-    // repeated call is a single read.
-    if (discharged === (obligation.filedOn !== null)) return;
-
-    const states = await this.deps.states.list(tenantId);
-
-    if (discharged) {
-      const filed = filedState(states);
-      if (filed === null) throw new NoFiledState();
-      const filedOn = this.today();
-      if (!(await this.deps.instances.markFiled(tenantId, obligation.id, filedOn, filed.id))) {
-        return; // somebody else got there first; their event is the one that counts
+    const filed = filedState(await this.deps.states.list(tenantId));
+    if (filed === null) throw new NoFiledState();
+    const filedOn = this.today();
+    for (const { row, byJobTask } of toFile) {
+      if (!(await this.deps.instances.markFiled(tenantId, row.id, filedOn, filed.id, workItemId))) {
+        continue; // somebody else got there first; their event is the one that counts
       }
       await this.deps.events.recordEvent({
         tenantId,
         verb: "obligation.filed",
-        objectId: obligation.id,
+        objectId: row.id,
         actor,
         payload: {
           workItemId,
           filedOn,
-          statutoryDueOn: obligation.statutoryDueOn,
+          statutoryDueOn: row.statutoryDueOn,
           // The one number a partner asks for afterwards, computed once here
           // rather than by whoever reads the log. Negative is early.
-          daysLate: daysBetween(obligation.statutoryDueOn, filedOn),
+          daysLate: daysBetween(row.statutoryDueOn, filedOn),
+          ...(byJobTask ? { byJobTask: true } : {}),
         },
       });
-      return;
     }
-
-    const initial = initialState(states);
-    if (initial === null) throw new NoInitialState();
-    if (!(await this.deps.instances.clearFiled(tenantId, obligation.id, initial.id))) return;
-    await this.deps.events.recordEvent({
-      tenantId,
-      verb: "obligation.filing_reversed",
-      objectId: obligation.id,
-      actor,
-      payload: { workItemId, filedOn: obligation.filedOn, statutoryDueOn: obligation.statutoryDueOn },
-    });
   }
 
   // ── a task raised by hand files a filing (audit 2026-10-03, CA#36) ────────
@@ -2316,7 +2343,11 @@ export class ObligationService {
     tenantId: string,
     workItemId: string,
     entityPartyId: string,
-  ): Promise<{ readonly linked: CalendarRow | null; readonly open: readonly CalendarRow[] }> {
+  ): Promise<{
+    readonly linked: CalendarRow | null;
+    readonly open: readonly CalendarRow[];
+    readonly filedHere: readonly CalendarRow[];
+  }> {
     // OPEN ones only, and the read's widest page: a company with years of
     // filed history would push its open filings off a settled-inclusive page.
     const rows = await this.deps.instances.calendar(tenantId, {
@@ -2341,7 +2372,18 @@ export class ObligationService {
               includeSettled: true,
             })
           ).find((r) => r.id === linkedRow.id) ?? null);
-    return { linked, open };
+    // What THIS task filed besides its own filing (Q063): a period job's task
+    // files its period's returns, and its page says which.
+    const filedHere = (
+      await this.deps.instances.calendar(tenantId, {
+        filedByWorkItemId: workItemId,
+        includeSettled: true,
+        limit: 500,
+      })
+    )
+      .filter((r) => r.id !== linkedRow?.id)
+      .sort((a, b) => a.statutoryDueOn.localeCompare(b.statutoryDueOn) || a.name.localeCompare(b.name));
+    return { linked, open, filedHere };
   }
 
   /**

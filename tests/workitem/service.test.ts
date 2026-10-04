@@ -2247,3 +2247,84 @@ describe("a cancelled job closes its tasks (V2.4)", () => {
     expect(h.items.rows[0]?.stateId).toBe(stateBefore);
   });
 });
+
+describe("a job's task waits for the job's steps (Q063)", () => {
+  // Finishing a period job's task files its period's returns, so "done" must
+  // mean the process ran (Shrestha, 2026-10-05): the steps first, the way a
+  // step's Done waits for its sub-steps (T6.15).
+  async function jobTask() {
+    const h = await harness();
+    h.engagements.rows.push(engagementWork());
+    await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR);
+    const item = h.items.rows[0];
+    if (!item) throw new Error("the job's task was not created");
+    const states = await h.vocab.listStates(FIRM);
+    const done = states.find((st) => st.isTerminal && st.isSuccess);
+    const cancelled = states.find((st) => st.isTerminal && !st.isSuccess);
+    if (!done || !cancelled) throw new Error("the seed no longer ships both terminal states");
+    return { h, item, done, cancelled };
+  }
+
+  it("refuses Done while a step is open, naming it, and files nothing", async () => {
+    const { h, item, done } = await jobTask();
+    h.jobSteps.open.set(JOB, ["Reconcile ITC with GSTR-2B", "File GSTR-3B"]);
+
+    const refused = h.service.moveToState({ tenantId: FIRM, workItemId: item.id, stateId: done.id }, ACTOR);
+    await expect(refused).rejects.toMatchObject({ code: "JOB_STEPS_OPEN" });
+    await expect(refused).rejects.toThrow(/2 steps of this job are not finished yet: "Reconcile ITC with GSTR-2B", "File GSTR-3B"/);
+    expect(h.filings.calls).toEqual([]);
+  });
+
+  it("takes Done once the steps have settled, and the calendar is told", async () => {
+    const { h, item, done } = await jobTask();
+    // Every step settled: the job holds nothing.
+    h.jobSteps.open.set(JOB, []);
+    await h.service.moveToState({ tenantId: FIRM, workItemId: item.id, stateId: done.id }, ACTOR);
+    expect(h.filings.calls).toContainEqual({ workItemId: item.id, discharged: true });
+  });
+
+  it("still lets the task be cancelled with steps open", async () => {
+    const { h, item, cancelled } = await jobTask();
+    h.jobSteps.open.set(JOB, ["File GSTR-3B"]);
+    await h.service.moveToState({ tenantId: FIRM, workItemId: item.id, stateId: cancelled.id }, ACTOR);
+    expect(h.filings.calls).toContainEqual({ workItemId: item.id, discharged: false });
+  });
+
+  it("refuses Approve BEFORE writing the decision, so the review stays open", async () => {
+    const { h, item } = await jobTask();
+    h.reviewers.rows.push({
+      userId: ANAND,
+      displayName: "Anand",
+      role: "manager",
+      gradeRank: 8,
+      gradeName: "Senior Manager",
+      reportsToUserId: null,
+    });
+    h.permissions.byRole.set("manager", ["work:write"]);
+    const approval = await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+    h.jobSteps.open.set(JOB, ["File GSTR-3B"]);
+
+    await expect(
+      h.service.decideReview(
+        { tenantId: FIRM, approvalId: approval.id, decision: "approved", decidedBy: ANAND },
+        ACTOR,
+      ),
+    ).rejects.toMatchObject({ code: "JOB_STEPS_OPEN" });
+    expect(h.approvals.rows.find((a) => a.id === approval.id)?.decision).toBe("pending");
+    // Send back is never held.
+    const back = await h.service.decideReview(
+      { tenantId: FIRM, approvalId: approval.id, decision: "rejected", notes: "finish the steps", decidedBy: ANAND },
+      ACTOR,
+    );
+    expect(back.decision).toBe("rejected");
+  });
+
+  it("asks nothing of a task with no job", async () => {
+    const h = await harness();
+    const item = await h.service.create({ tenantId: FIRM, clientPartyId: CLIENT, title: "x" }, ACTOR);
+    h.jobSteps.open.set(JOB, ["File GSTR-3B"]);
+    const done = (await h.vocab.listStates(FIRM)).find((st) => st.isTerminal && st.isSuccess);
+    if (!done) throw new Error("no done state");
+    await h.service.moveToState({ tenantId: FIRM, workItemId: item.id, stateId: done.id }, ACTOR);
+  });
+});

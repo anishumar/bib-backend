@@ -521,6 +521,7 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
         ...r,
         workItemId: null,
         filedOn: null,
+        filedByWorkItemId: null,
         resolutionOptionId: null,
         resolutionReason: null,
         resolvedAt: null,
@@ -547,10 +548,11 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
     );
   }
 
-  calendar(tenantId: string, _query: CalendarQuery): Promise<readonly CalendarRow[]> {
+  calendar(tenantId: string, query: CalendarQuery): Promise<readonly CalendarRow[]> {
     return Promise.resolve(
       this.rows
         .filter((r) => r.tenantId === tenantId && r.withdrawnAt === null)
+        .filter((r) => query.filedByWorkItemId === undefined || r.filedByWorkItemId === query.filedByWorkItemId)
         .map(
           (r): CalendarRow => ({
             id: r.id,
@@ -569,6 +571,8 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
             needsDecision: false,
             workItemId: r.workItemId,
             filedOn: r.filedOn,
+            filedByWorkItemId: r.filedByWorkItemId,
+            filedByTitle: null,
             resolutionOptionId: r.resolutionOptionId,
             resolutionName: null,
             resolutionReason: r.resolutionReason,
@@ -640,22 +644,72 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
     obligationId: string,
     filedOn: string,
     stateId: string,
+    filedByWorkItemId: string,
   ): Promise<boolean> {
     const i = this.rows.findIndex((r) => r.tenantId === tenantId && r.id === obligationId);
     const row = this.rows[i];
     // `AND filed_on IS NULL`, modelled — the guard that makes a second
     // completion of the same task write no second event.
     if (!row || row.filedOn !== null) return Promise.resolve(false);
-    this.rows[i] = { ...row, filedOn, stateId };
+    this.rows[i] = { ...row, filedOn, stateId, filedByWorkItemId };
     return Promise.resolve(true);
   }
 
-  clearFiled(tenantId: string, obligationId: string, stateId: string): Promise<boolean> {
+  clearFiled(
+    tenantId: string,
+    obligationId: string,
+    stateId: string,
+    filedByWorkItemId: string,
+  ): Promise<boolean> {
     const i = this.rows.findIndex((r) => r.tenantId === tenantId && r.id === obligationId);
     const row = this.rows[i];
-    if (!row || row.filedOn === null) return Promise.resolve(false);
-    this.rows[i] = { ...row, filedOn: null, stateId };
+    // `AND filed_by_work_item_id = $task`, modelled (0357).
+    if (!row || row.filedOn === null || row.filedByWorkItemId !== filedByWorkItemId) {
+      return Promise.resolve(false);
+    }
+    this.rows[i] = { ...row, filedOn: null, stateId, filedByWorkItemId: null };
     return Promise.resolve(true);
+  }
+
+  listFiledBy(tenantId: string, workItemId: string): Promise<readonly ObligationInstance[]> {
+    return Promise.resolve(
+      this.rows.filter((r) => r.tenantId === tenantId && r.filedByWorkItemId === workItemId),
+    );
+  }
+
+  /**
+   * A period job's task, as the adapter reads it from `delivery.job` and the
+   * task's engagement (Q063): the company, the job's period, and the rules its
+   * service carries. Set by a test; an unknown task is not a period job's.
+   */
+  jobTasks = new Map<
+    string,
+    {
+      readonly entityPartyId: string;
+      readonly periodStart: string;
+      readonly periodEnd: string;
+      readonly templateIds: ReadonlySet<string>;
+    }
+  >();
+  /** States the adapter reads as finished off `obligation_state`. */
+  terminalStateIds = new Set<string>();
+
+  listJobFilingsForTask(tenantId: string, workItemId: string): Promise<readonly ObligationInstance[]> {
+    const t = this.jobTasks.get(workItemId);
+    if (t === undefined) return Promise.resolve([]);
+    return Promise.resolve(
+      this.rows.filter(
+        (r) =>
+          r.tenantId === tenantId &&
+          r.entityPartyId === t.entityPartyId &&
+          r.periodStart >= t.periodStart &&
+          r.periodEnd <= t.periodEnd &&
+          t.templateIds.has(r.templateId) &&
+          r.filedOn === null &&
+          r.withdrawnAt === null &&
+          !this.terminalStateIds.has(r.stateId),
+      ),
+    );
   }
 
   /**

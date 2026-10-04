@@ -470,6 +470,107 @@ describe("the filing closes when its task does, and opens again if the task reop
   });
 });
 
+describe("a period job's task files its period's filings, and takes back only those (Q063)", () => {
+  // Ashish (10x), 2026-10-04: "Job marked as done means the return is being
+  // filed." The month task of a recurring service ("GST · Aug 2026") is what
+  // the firm marks done; it is not the filing's own task.
+  const JOB_TASK = "00000000-0000-4000-8000-00000000a0b1";
+  let h: H;
+  beforeEach(() => {
+    h = harness();
+  });
+
+  /** August to October generated; the job's task is August's, on the GST
+   *  service that carries the rule. */
+  async function augustJob(): Promise<string> {
+    const rule = await firmWithGst(h);
+    await h.service.generate(FIRM, { from: "2026-08-01", to: "2026-10-31" }, ACTOR);
+    h.instances.jobTasks.set(JOB_TASK, {
+      entityPartyId: ENTITY,
+      periodStart: "2026-08-01",
+      periodEnd: "2026-08-31",
+      templateIds: new Set([rule.id]),
+    });
+    return rule.id;
+  }
+  const row = (label: string) => h.instances.rows.find((r) => r.periodLabel === label);
+
+  it("files the period's filing, names the job's task on it, and leaves other months alone", async () => {
+    await augustJob();
+    await h.service.reconcileFiling(FIRM, JOB_TASK, true, ACTOR);
+
+    expect(row("Aug 2026")).toMatchObject({ filedOn: TODAY, filedByWorkItemId: JOB_TASK });
+    expect(row("Sep 2026")?.filedOn).toBeNull();
+    expect(row("Oct 2026")?.filedOn).toBeNull();
+    const ev = h.events.recorded.find((e) => e.verb === "obligation.filed");
+    expect(ev?.payload).toMatchObject({ workItemId: JOB_TASK, byJobTask: true, daysLate: -21 });
+    expect(findPiiKey(ev?.payload ?? {})).toBeNull();
+  });
+
+  it("reopening the job's task un-files exactly what it filed", async () => {
+    await augustJob();
+    await h.service.reconcileFiling(FIRM, JOB_TASK, true, ACTOR);
+    await h.service.reconcileFiling(FIRM, JOB_TASK, false, ACTOR);
+
+    expect(row("Aug 2026")).toMatchObject({ filedOn: null, filedByWorkItemId: null });
+    const initial = (await h.states.list(FIRM)).find((st) => st.isInitial);
+    expect(row("Aug 2026")?.stateId).toBe(initial?.id);
+    const ev = h.events.recorded.find((e) => e.verb === "obligation.filing_reversed");
+    expect(ev?.payload).toMatchObject({ workItemId: JOB_TASK, byJobTask: true });
+  });
+
+  it("never un-files a return filed through its own task", async () => {
+    await augustJob();
+    await h.service.raise(FIRM, "2026-09-30", ACTOR);
+    const own = row("Aug 2026")?.workItemId;
+    if (!own) throw new Error("August was not raised");
+    // The filing's own task is finished first: filed by it.
+    await h.service.reconcileFiling(FIRM, own, true, ACTOR);
+    // The job's task done and then reopened: nothing of its own to take back.
+    await h.service.reconcileFiling(FIRM, JOB_TASK, true, ACTOR);
+    await h.service.reconcileFiling(FIRM, JOB_TASK, false, ACTOR);
+
+    expect(row("Aug 2026")).toMatchObject({ filedOn: TODAY, filedByWorkItemId: own });
+    expect(h.events.verbs().filter((v) => v === "obligation.filed")).toHaveLength(1);
+    expect(h.events.verbs()).not.toContain("obligation.filing_reversed");
+  });
+
+  it("the filing's own task reopened leaves a return the job filed alone", async () => {
+    await augustJob();
+    await h.service.raise(FIRM, "2026-09-30", ACTOR);
+    const own = row("Aug 2026")?.workItemId;
+    if (!own) throw new Error("August was not raised");
+    // The job files it while its own task is still open on a desk.
+    await h.service.reconcileFiling(FIRM, JOB_TASK, true, ACTOR);
+    expect(row("Aug 2026")).toMatchObject({ filedOn: TODAY, filedByWorkItemId: JOB_TASK, workItemId: own });
+    // That task cancelled or reopened says nothing about the return; finishing
+    // it writes no second filing.
+    await h.service.reconcileFiling(FIRM, own, false, ACTOR);
+    await h.service.reconcileFiling(FIRM, own, true, ACTOR);
+
+    expect(row("Aug 2026")).toMatchObject({ filedOn: TODAY, filedByWorkItemId: JOB_TASK });
+    expect(h.events.verbs().filter((v) => v === "obligation.filed")).toHaveLength(1);
+    expect(h.events.verbs()).not.toContain("obligation.filing_reversed");
+  });
+
+  it("files nothing for a task that is not a period job's", async () => {
+    await augustJob();
+    const before = h.events.verbs().length;
+    await h.service.reconcileFiling(FIRM, "00000000-0000-4000-8000-0000000000ff", true, ACTOR);
+    expect(h.events.verbs()).toHaveLength(before);
+    expect(h.instances.rows.filter((r) => r.filedOn !== null)).toHaveLength(0);
+  });
+
+  it("the task page lists what the job's task filed", async () => {
+    await augustJob();
+    await h.service.reconcileFiling(FIRM, JOB_TASK, true, ACTOR);
+    const read = await h.service.filingsForTask(FIRM, JOB_TASK, ENTITY);
+    expect(read.linked).toBeNull();
+    expect(read.filedHere.map((r) => r.periodLabel)).toEqual(["Aug 2026"]);
+    expect(read.filedHere[0]?.filedByWorkItemId).toBe(JOB_TASK);
+  });
+});
+
 describe("a task raised by hand can be the one that files a filing (audit 2026-10-03, CA#36)", () => {
   // The roleplay firm approved "File GSTR-3B for September", an ad-hoc task,
   // and the calendar and the client's portal went on saying "GSTR-3B Sep 2026,
