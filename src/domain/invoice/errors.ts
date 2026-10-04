@@ -51,7 +51,14 @@ export type InvoiceErrorCode =
   | "FX_RATE_NOT_ONE"
   | "DUE_DATE_IN_THE_PAST"
   | "DUE_BEFORE_ISSUE"
-  | "INVOICE_NUMBER_OUT_OF_ORDER";
+  | "INVOICE_NUMBER_OUT_OF_ORDER"
+  | "INVALID_SAC"
+  | "INVALID_PLACE_OF_SUPPLY"
+  | "INVALID_TDS"
+  | "PLACE_OF_SUPPLY_UNKNOWN"
+  | "INVOICE_LINE_NEEDS_SAC"
+  | "INVALID_COMPANY_INVOICING"
+  | "COMPANY_RECORD_NOT_FOUND";
 
 /** `asOf` is the caller's TODAY, not a date to choose (see `isCallersToday`).
  *  A document that genuinely belongs to another day has its own field. */
@@ -600,5 +607,76 @@ export class InvoiceNumberOutOfOrder extends InvoiceError {
           `invoice issued today belongs to ${issueYearLabel}. `) +
         `Cancel this draft and raise it again: the new draft is numbered when it is issued.`,
     );
+  }
+}
+
+// ── The GST tax invoice (Q056, Q057, S5) ───────────────────────────────────
+
+/** A SAC is chapter 99, six digits. */
+export class InvalidSac extends InvoiceError {
+  constructor(given: string) {
+    super(
+      "INVALID_SAC",
+      `${JSON.stringify(given)} is not a SAC. A service's SAC is six digits starting 99, like 998222 for ` +
+        `accounting and bookkeeping.`,
+    );
+  }
+}
+
+/** A place of supply is one of India's GST state codes. */
+export class InvalidPlaceOfSupply extends InvoiceError {
+  constructor(given: string) {
+    super(
+      "INVALID_PLACE_OF_SUPPLY",
+      `${JSON.stringify(given)} is not a GST state code. Choose the state from the list (27 is Maharashtra).`,
+    );
+  }
+}
+
+/** A client's TDS: the section as the Act writes it, and a rate above 0. */
+export class InvalidTds extends InvoiceError {
+  constructor(problem: string) {
+    super("INVALID_TDS", problem);
+  }
+}
+
+/**
+ * An Indian GST invoice whose place of supply cannot be read: the client has an
+ * address on record, but no GSTIN and no state that names one.
+ */
+export class PlaceOfSupplyUnknown extends InvoiceError {
+  constructor(clientName: string) {
+    super(
+      "PLACE_OF_SUPPLY_UNKNOWN",
+      `A GST invoice names the place of supply, and ${clientName}'s address does not say which state it is ` +
+        `in. Choose the state on this invoice, or add the state (or the client's GSTIN) to the client.`,
+    );
+  }
+}
+
+/** Rule 46(f): every line of a GST invoice carries its service's SAC. */
+export class InvoiceLineNeedsSac extends InvoiceError {
+  constructor(readonly descriptions: readonly string[]) {
+    super(
+      "INVOICE_LINE_NEEDS_SAC",
+      `A GST invoice prints each service's SAC, and ${descriptions.length === 1 ? "this line has" : "these lines have"} ` +
+        `none: ${descriptions.map((d) => `"${d}"`).join(", ")}. Add the SAC on the line, or to the service in ` +
+        `the catalogue.`,
+    );
+  }
+}
+
+/** A company's bank account or LUT (0369) that cannot be stored, in words
+ *  for the person who typed it. */
+export class InvalidCompanyInvoicing extends InvoiceError {
+  constructor(problem: string) {
+    super("INVALID_COMPANY_INVOICING", problem);
+  }
+}
+
+/** A bank account or LUT the request named that is not this company's live one. */
+export class CompanyRecordNotFound extends InvoiceError {
+  constructor(what: string, id: string) {
+    super("COMPANY_RECORD_NOT_FOUND", `There is no ${what} ${id} on this company.`);
   }
 }

@@ -29,8 +29,18 @@ import type {
   InvoiceBalance,
   InvoiceLine,
   InvoiceStatus,
+  InvoiceTaxSnapshot,
   Payment,
 } from "../../domain/invoice/model";
+import {
+  decideTreatment,
+  isSac,
+  isTdsPercent,
+  isTdsSection,
+  placeOfSupplyOf,
+  stateByCode,
+  stateCodeOfGstin,
+} from "../../domain/invoice/gst";
 import {
   CREDIT_REASONS,
   PAYMENT_METHODS,
@@ -80,6 +90,11 @@ import {
   CreditNoteDateOutOfRange,
   InvoiceHasPayments,
   CreditExceedsUnusedAdvance,
+  InvalidPlaceOfSupply,
+  InvalidSac,
+  InvalidTds,
+  InvoiceLineNeedsSac,
+  PlaceOfSupplyUnknown,
   FxRateNotOne,
   FxRateRequired,
   DueBeforeIssue,
@@ -90,8 +105,10 @@ import { addDays } from "../../domain/scheduler/model";
 import { dayInZone, isCallersToday } from "../../domain/scheduler/zone";
 import { yearStartOfCompany, zoneOfCompany } from "../../domain/calendar/model";
 import type {
+  ClientTds,
   FirmEntities,
   FirmTimeZone,
+  InvoiceTaxFacts,
   InvoiceFilters,
   InvoiceFirmSettings,
   InvoiceRepository,
@@ -164,6 +181,89 @@ export interface AddInvoiceLineInput {
   readonly unitAmount: string;
   readonly discountPercent?: string | undefined;
   readonly taxPercent?: string | undefined;
+  /** The service's SAC (Q056). Absent: the catalogue's, for a line billing a
+   *  catalogued service; else none. */
+  readonly sac?: string | undefined;
+}
+
+/** What a GST invoice's tax comes to from its facts (Q056), before it is
+ *  written: the snapshot, the line SACs the catalogue fills, and what would
+ *  stop it being issued. */
+interface TaxOutcome {
+  readonly snapshot: InvoiceTaxSnapshot;
+  readonly fillSacs: readonly { readonly lineId: string; readonly sac: string }[];
+  readonly placeUnknown: boolean;
+  /** Lines of a GST invoice with no SAC, from the line or the catalogue. */
+  readonly missingSac: readonly string[];
+}
+
+/** Two snapshots say the same. */
+function sameTax(a: InvoiceTaxSnapshot, b: InvoiceTaxSnapshot): boolean {
+  return (Object.keys(a) as (keyof InvoiceTaxSnapshot)[]).every((k) => {
+    const x = a[k];
+    const y = b[k];
+    // A rate read back from `numeric(5,2)` reads "10.00"; typed, "10".
+    if (k === "tdsPercent" && x !== null && y !== null) return Number(x) === Number(y);
+    return x === y;
+  });
+}
+
+/**
+ * The tax an invoice comes to (Q056), from what `taxFacts` read. Pure.
+ *
+ * The place of supply follows a state a person chose on the draft, else the
+ * client (its GSTIN's state, its address's); `decideTreatment` takes it from
+ * there. A plain invoice keeps only the bank account and the TDS: those print
+ * on any invoice.
+ */
+function taxFrom(facts: InvoiceTaxFacts, chosenPlaceOfSupply: string | null): TaxOutcome {
+  const base: InvoiceTaxSnapshot = {
+    treatment: null,
+    supplierGstin: null,
+    supplierStateCode: null,
+    recipientGstin: null,
+    placeOfSupplyStateCode: null,
+    placeOfSupplyCountry: null,
+    chosenPlaceOfSupply,
+    lutId: null,
+    bankAccountId: facts.bankAccountId,
+    tdsSection: facts.clientTds?.section ?? null,
+    tdsPercent: facts.clientTds?.percent ?? null,
+  };
+  const fillSacs = facts.lines.flatMap((l) =>
+    l.sac === null && l.serviceSac !== null ? [{ lineId: l.id, sac: l.serviceSac }] : [],
+  );
+  const placeOfSupply = placeOfSupplyOf({
+    recipientCountry: facts.recipientCountry,
+    recipientGstin: facts.recipientGstin,
+    addressRegion: facts.recipientRegion,
+    hasAddress: facts.recipientHasAddress,
+    chosenStateCode: chosenPlaceOfSupply,
+  });
+  const decided = decideTreatment({
+    supplierCountry: facts.supplierCountry ?? "",
+    supplierGstin: facts.supplierGstin,
+    placeOfSupply,
+    lutInForce: facts.lutId !== null,
+  });
+  if (!decided.ok) return { snapshot: base, fillSacs, placeUnknown: true, missingSac: [] };
+  if (decided.treatment === "plain") {
+    return { snapshot: { ...base, treatment: "plain" }, fillSacs, placeUnknown: false, missingSac: [] };
+  }
+  const pos = decided.placeOfSupply;
+  const snapshot: InvoiceTaxSnapshot = {
+    ...base,
+    treatment: decided.treatment,
+    supplierGstin: facts.supplierGstin,
+    supplierStateCode: decided.supplierStateCode,
+    // An Indian recipient's GSTIN only: a client abroad has none to print.
+    recipientGstin: pos.kind === "state" && stateCodeOfGstin(facts.recipientGstin) !== null ? facts.recipientGstin : null,
+    placeOfSupplyStateCode: pos.kind === "state" ? pos.stateCode : null,
+    placeOfSupplyCountry: pos.kind === "outside_india" ? pos.country : null,
+    lutId: decided.treatment === "gst_export_lut" ? facts.lutId : null,
+  };
+  const missingSac = facts.lines.filter((l) => (l.sac ?? l.serviceSac) === null).map((l) => l.description);
+  return { snapshot, fillSacs, placeUnknown: false, missingSac };
 }
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -181,9 +281,148 @@ export class InvoiceService {
    * as on a proposal. The rate is stored even when the currencies match.
    */
   async raise(input: RaiseInvoiceInput, actor: Actor): Promise<Invoice> {
-    const invoice = await this.deps.invoices.create(await this.prepareDraft(input));
-    await this.recordRaised(invoice, actor);
-    return invoice;
+    const created = await this.deps.invoices.create(await this.prepareDraft(input));
+    await this.recordRaised(created, actor);
+    return this.refreshTax(input.tenantId, created.id);
+  }
+
+  /**
+   * A DRAFT's tax, decided again from today's facts (Q056): the client's GSTIN
+   * and state, the company's LUT and bank account, the client's TDS, and SACs
+   * the catalogue now gives its lines. Written only when something changed.
+   * Called when a draft is made, a line added, its place of supply chosen, it
+   * is read, and by the billing desk after it writes one; Issue decides once
+   * more for the issue date and freezes the answer.
+   */
+  async refreshTax(tenantId: string, invoiceId: string): Promise<Invoice> {
+    const invoice = await this.mustFind(tenantId, invoiceId);
+    if (invoice.status !== "draft") return invoice;
+    const onDay = await this.today(tenantId, invoice.entityPartyId);
+    const outcome = await this.taxOn(tenantId, invoice, onDay);
+    if (sameTax(outcome.snapshot, invoice.tax) && outcome.fillSacs.length === 0) return invoice;
+    return this.deps.invoices.setDraftTax(tenantId, invoiceId, outcome.snapshot, outcome.fillSacs);
+  }
+
+  /** The tax an invoice comes to on `onDay`, with the LUT of that day's year
+   *  on its company's calendar. */
+  private async taxOn(tenantId: string, invoice: Invoice, onDay: string): Promise<TaxOutcome> {
+    const settings = await this.deps.settings.invoiceSettingsFor(tenantId);
+    const startMonth = await this.startMonthOf(tenantId, invoice.entityPartyId, settings.fiscalYearStartMonth);
+    const facts = await this.deps.invoices.taxFacts(tenantId, invoice.id, {
+      onDay,
+      financialYear: financialYearOf(onDay, startMonth),
+    });
+    return taxFrom(facts, invoice.tax.chosenPlaceOfSupply);
+  }
+
+  /**
+   * Choose a DRAFT's place of supply (Q056): a GST state code, over the one the
+   * client's GSTIN or address gives (a client registered in several states, or
+   * an address whose state cannot be read). Null goes back to the client's.
+   */
+  async setPlaceOfSupply(
+    tenantId: string,
+    invoiceId: string,
+    stateCode: string | null,
+    actor: Actor,
+  ): Promise<Invoice> {
+    const invoice = await this.editableOrThrow(tenantId, invoiceId);
+    if (stateCode !== null && stateByCode(stateCode) === null) throw new InvalidPlaceOfSupply(stateCode);
+    const onDay = await this.today(tenantId, invoice.entityPartyId);
+    const outcome = await this.taxOn(tenantId, { ...invoice, tax: { ...invoice.tax, chosenPlaceOfSupply: stateCode } }, onDay);
+    const saved = await this.deps.invoices.setDraftTax(tenantId, invoiceId, outcome.snapshot, outcome.fillSacs);
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "invoice.place_of_supply_set",
+      objectId: invoiceId,
+      actor,
+      payload: {
+        chosenPlaceOfSupply: stateCode,
+        previousChosenPlaceOfSupply: invoice.tax.chosenPlaceOfSupply,
+        taxTreatment: saved.tax.treatment,
+      },
+    });
+    return saved;
+  }
+
+  /** A DRAFT line's SAC (Q056); null clears it. */
+  async setLineSac(
+    tenantId: string,
+    invoiceId: string,
+    lineId: string,
+    sac: string | null,
+    actor: Actor,
+  ): Promise<void> {
+    await this.editableOrThrow(tenantId, invoiceId);
+    if (sac !== null && !isSac(sac)) throw new InvalidSac(sac);
+    const lines = await this.deps.invoices.listLines(tenantId, invoiceId);
+    const line = lines.find((l) => l.id === lineId);
+    if (line === undefined) throw new InvoiceLineNotFound(lineId);
+    if (line.sac === sac) return;
+    await this.deps.invoices.setLineSac(tenantId, invoiceId, lineId, sac);
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "invoice.line_sac_set",
+      objectId: invoiceId,
+      actor,
+      payload: { lineId, sac, previousSac: line.sac },
+    });
+  }
+
+  // ── Q057: the TDS a client deducts ───────────────────────────────────────
+
+  clientTds(tenantId: string, partyId: string): Promise<ClientTds | null> {
+    return this.deps.invoices.clientTds(tenantId, partyId);
+  }
+
+  /**
+   * Set, change or stop (null) the TDS a client deducts on the firm's fees.
+   * Drafts take it the next time they are read or issued; an issued invoice
+   * keeps the rate it went out with.
+   */
+  async setClientTds(
+    tenantId: string,
+    partyId: string,
+    tds: { readonly section: string; readonly percent: string } | null,
+    actor: Actor,
+  ): Promise<ClientTds | null> {
+    const party = await this.deps.parties.findParty(tenantId, partyId);
+    if (party === null) throw new InvoiceEngagementNotFound(partyId);
+    if (await this.deps.firmEntities.isFirmEntity(tenantId, partyId)) {
+      throw new InvoiceBillsTheFirm(party.displayName);
+    }
+    let next: ClientTds | null = null;
+    if (tds !== null) {
+      const section = tds.section.trim().toUpperCase().replace(/\((.*)\)$/, (m) => m.toLowerCase());
+      const percent = tds.percent.trim();
+      if (!isTdsSection(section)) {
+        throw new InvalidTds(
+          `${JSON.stringify(tds.section)} is not a TDS section. Write it as the Act does: 194J, 194JB, 194C, 195.`,
+        );
+      }
+      if (!isTdsPercent(percent)) {
+        throw new InvalidTds(
+          `${JSON.stringify(tds.percent)} is not a TDS rate. A rate is above 0 and at most 100, with at most two ` +
+            `decimal places, like 10 or 2.`,
+        );
+      }
+      next = { section, percent };
+    }
+    const previous = await this.deps.invoices.clientTds(tenantId, partyId);
+    await this.deps.invoices.setClientTds(tenantId, partyId, next);
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "client.tds_set",
+      objectId: partyId,
+      actor,
+      payload: {
+        section: next?.section ?? null,
+        percent: next?.percent ?? null,
+        previousSection: previous?.section ?? null,
+        previousPercent: previous?.percent ?? null,
+      },
+    });
+    return next;
   }
 
   /**
@@ -345,7 +584,9 @@ export class InvoiceService {
 
   async addLine(input: AddInvoiceLineInput): Promise<InvoiceLine> {
     const invoice = await this.editableOrThrow(input.tenantId, input.invoiceId);
-    return this.deps.invoices.addLine(await this.prepareLine(invoice, input));
+    const line = await this.deps.invoices.addLine(await this.prepareLine(invoice, input));
+    await this.refreshTax(input.tenantId, input.invoiceId);
+    return line;
   }
 
   /**
@@ -367,10 +608,8 @@ export class InvoiceService {
     if (!isAmount(discount) || Number(discount) < 0 || Number(discount) > 100) {
       throw new InvalidInvoiceAmount("discountPercent", discount);
     }
-    const tax = input.taxPercent ?? "0";
-    if (!isAmount(tax) || Number(tax) < 0 || Number(tax) > 100) {
-      throw new InvalidInvoiceAmount("taxPercent", tax);
-    }
+    const sac = input.sac?.trim() === "" ? undefined : input.sac?.trim();
+    if (sac !== undefined && !isSac(sac)) throw new InvalidSac(sac);
 
     // The engagement is the BILLED client's (F-10-1). The invoice PDF goes to
     // that client's portal, and a line billing another client's engagement
@@ -408,6 +647,17 @@ export class InvoiceService {
       }
     }
 
+    // HOW THE CATALOGUE TAXES IT (Q056): the service's SAC, and its rate when
+    // the person did not type one. Read for the ISSUING company's country.
+    const catalogue =
+      input.engagementId === undefined
+        ? null
+        : await this.deps.invoices.serviceTaxFor(input.tenantId, input.engagementId, invoice.entityPartyId);
+    const tax = input.taxPercent ?? catalogue?.ratePercent ?? "0";
+    if (!isAmount(tax) || Number(tax) < 0 || Number(tax) > 100) {
+      throw new InvalidInvoiceAmount("taxPercent", tax);
+    }
+
     return {
       id: this.deps.ids.newId(),
       tenantId: input.tenantId,
@@ -422,6 +672,7 @@ export class InvoiceService {
       currency: invoice.currency,
       discountPercent: discount,
       taxPercent: tax,
+      sac: sac ?? catalogue?.sac ?? null,
     };
   }
 
@@ -470,11 +721,21 @@ export class InvoiceService {
       financialYearOf(issuedOn, startMonth),
       await this.deps.invoices.newestNumberedYear(tenantId, invoice.entityPartyId, "invoice"),
     );
+    // WHAT IT SAYS ABOUT TAX (Q056), for the issue date: frozen by the same
+    // write. A GST invoice names its place of supply and each line's SAC
+    // (Rule 46), and is refused without them.
+    const tax = await this.taxOn(tenantId, invoice, issuedOn);
+    if (tax.placeUnknown) {
+      throw new PlaceOfSupplyUnknown((await this.deps.parties.findParty(tenantId, invoice.partyId))?.displayName ?? "the client");
+    }
+    if (tax.missingSac.length > 0) throw new InvoiceLineNeedsSac(tax.missingSac);
     const outcome = await this.deps.invoices.issue(tenantId, invoiceId, {
       issuedOn,
       financialYear,
       fiscalYearStartMonth: startMonth,
       dueOnIfUnset,
+      tax: tax.snapshot,
+      fillSacs: tax.fillSacs,
     });
     if ("outOfOrder" in outcome) {
       throw new InvoiceNumberOutOfOrder(
@@ -501,6 +762,13 @@ export class InvoiceService {
         issuedOn: issued.issuedOn,
         dueOn: issued.dueOn,
         lineCount: lines.length,
+        // Q056: which taxes it charges and where it was supplied; machine facts.
+        taxTreatment: issued.tax.treatment,
+        placeOfSupplyStateCode: issued.tax.placeOfSupplyStateCode,
+        placeOfSupplyCountry: issued.tax.placeOfSupplyCountry,
+        lutId: issued.tax.lutId,
+        tdsSection: issued.tax.tdsSection,
+        tdsPercent: issued.tax.tdsPercent,
       },
     });
     // Its paper, drawn now and never again: the copy of record. After the
@@ -572,14 +840,33 @@ export class InvoiceService {
   }
 
   async describe(tenantId: string, invoiceId: string): Promise<InvoiceView> {
+    // A draft is read as it would go out today (Q056): its tax follows the
+    // client, the company and the catalogue until it is issued.
+    const found = await this.deps.invoices.find(tenantId, invoiceId);
+    if (found?.status === "draft") await this.refreshTax(tenantId, invoiceId);
     const record = await this.deps.invoices.describe(tenantId, invoiceId);
     if (record === null) throw new InvoiceNotFound(invoiceId);
     const draft = record.invoice.status === "draft";
     return {
       ...record,
-      issueBlocked: await this.issueBlocked(tenantId, record.invoice),
+      issueBlocked: (await this.issueBlocked(tenantId, record.invoice)) ?? (draft ? await this.taxBlocked(tenantId, record.invoice) : null),
       issuesOn: draft ? await this.today(tenantId, record.invoice.entityPartyId) : null,
     };
+  }
+
+  /** Whether Issue would be refused for its tax today (Q056), in the refusal's
+   *  own words. */
+  private async taxBlocked(tenantId: string, invoice: Invoice): Promise<InvoiceView["issueBlocked"]> {
+    const onDay = await this.today(tenantId, invoice.entityPartyId);
+    const tax = await this.taxOn(tenantId, invoice, onDay);
+    if (tax.placeUnknown) {
+      const name = (await this.deps.parties.findParty(tenantId, invoice.partyId))?.displayName ?? "the client";
+      return { reason: "PLACE_OF_SUPPLY_UNKNOWN", message: new PlaceOfSupplyUnknown(name).message };
+    }
+    if (tax.missingSac.length > 0) {
+      return { reason: "INVOICE_LINE_NEEDS_SAC", message: new InvoiceLineNeedsSac(tax.missingSac).message };
+    }
+    return null;
   }
 
   /**
@@ -694,14 +981,20 @@ export class InvoiceService {
       readonly method: string;
       readonly reference?: string | undefined;
       readonly note?: string | undefined;
+      /** Q057: the TDS the client deducted from this remittance; "0" or absent
+       *  for none. Signed like the amount. */
+      readonly tdsAmount?: string | undefined;
     },
     actor: Actor,
   ): Promise<Payment> {
     const invoice = await this.issuedOrThrow(input.tenantId, input.invoiceId);
     // SIGNED, unlike every other amount in this product. A negative payment is
     // a reversal — see `isSignedAmount`. Zero is refused either way: it records
-    // nothing and would sit in the ledger claiming something happened.
-    if (!isSignedAmount(input.amount) || Number(input.amount) === 0) {
+    // nothing and would sit in the ledger claiming something happened. With TDS
+    // (Q057) the money may be zero: the client's deduction recorded on its own.
+    const tdsAmount = input.tdsAmount?.trim() || "0";
+    if (!isSignedAmount(tdsAmount)) throw new InvalidInvoiceAmount("tdsAmount", tdsAmount);
+    if (!isSignedAmount(input.amount) || (Number(input.amount) === 0 && Number(tdsAmount) === 0)) {
       throw new InvalidInvoiceAmount("amount", input.amount);
     }
     if (!isPaymentMethod(input.method)) {
@@ -722,9 +1015,13 @@ export class InvoiceService {
       method: input.method,
       reference: input.reference ?? null,
       note: input.note ?? null,
+      tdsAmount,
     });
     if ("paid" in outcome) {
       throw new ReversalExceedsPaid(invoice.number, input.amount.replace(/^-/, ""), outcome.paid, invoice.currency);
+    }
+    if ("tds" in outcome) {
+      throw new ReversalExceedsPaid(invoice.number, tdsAmount.replace(/^-/, ""), outcome.tds, invoice.currency);
     }
     const payment = outcome.payment;
 
@@ -746,6 +1043,7 @@ export class InvoiceService {
         receivedOn: payment.receivedOn,
         method: payment.method,
         hasReference: payment.reference !== null && payment.reference.trim() !== "",
+        tdsAmount: payment.tdsAmount,
       },
     });
     return payment;

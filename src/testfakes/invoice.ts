@@ -15,9 +15,12 @@ import type {
   Invoice,
   InvoiceBalance,
   InvoiceLine,
+  InvoiceTaxSnapshot,
   Payment,
 } from "../domain/invoice/model";
+import { lineTax, tdsOn, netPayable } from "../domain/invoice/gst";
 import {
+  NO_TAX_SNAPSHOT,
   DEFAULT_CREDIT_NOTE_PREFIX,
   DEFAULT_SERIES_PREFIX,
   formatInvoiceNumber,
@@ -43,8 +46,13 @@ import type {
   NewInvoiceLine,
   NewPayment,
   ReceivableRecord,
+  BankAccountView,
+  ClientTds,
+  InvoiceTaxFacts,
 } from "../usecase/invoice/ports";
 import type { Deps } from "../usecase/invoice/service";
+import { CompanyInvoicingService } from "../usecase/invoice/company";
+import type { CompanyInvoicing, CompanyInvoicingRepository, NewBankAccount } from "../usecase/invoice/company";
 import { FakeIds } from "./ids";
 import { FakeFirmTimeZone } from "./tenancy";
 import { FakePartyStanding } from "./party";
@@ -62,7 +70,100 @@ function keyOf(k: SeriesKey): string {
   return `${k.tenantId}|${k.entityPartyId}|${String(k.financialYear)}`;
 }
 
+/**
+ * The world an invoice's tax is decided from (Q056), as a test sets it. The
+ * default is a company with no country: every invoice is `plain`, as before.
+ */
+export interface FakeTaxWorld {
+  supplierCountry: string | null;
+  supplierGstin: string | null;
+  recipientCountry: string | null;
+  recipientGstin: string | null;
+  recipientRegion: string | null;
+  recipientHasAddress: boolean;
+  /** LUT ids by financial year. */
+  luts: Map<number, string>;
+  bankAccountId: string | null;
+  /** The catalogue's tax per engagement's service. */
+  serviceTax: Map<string, { sac: string | null; ratePercent: string | null }>;
+}
+
 export class FakeInvoiceRepo implements InvoiceRepository {
+  readonly world: FakeTaxWorld = {
+    supplierCountry: null,
+    supplierGstin: null,
+    recipientCountry: null,
+    recipientGstin: null,
+    recipientRegion: null,
+    recipientHasAddress: false,
+    luts: new Map(),
+    bankAccountId: null,
+    serviceTax: new Map(),
+  };
+  readonly clientTdsByParty = new Map<string, ClientTds>();
+
+  taxFacts(
+    tenantId: string,
+    invoiceId: string,
+    on: { readonly onDay: string; readonly financialYear: number },
+  ): Promise<InvoiceTaxFacts> {
+    const invoice = this.invoices.find((i) => i.tenantId === tenantId && i.id === invoiceId);
+    if (invoice === undefined) return Promise.reject(new Error(`no invoice ${invoiceId}`));
+    const w = this.world;
+    return Promise.resolve({
+      supplierCountry: w.supplierCountry,
+      supplierGstin: w.supplierGstin,
+      recipientName: this.nameOf(invoice.partyId),
+      recipientCountry: w.recipientCountry,
+      recipientGstin: w.recipientGstin,
+      recipientRegion: w.recipientRegion,
+      recipientHasAddress: w.recipientHasAddress,
+      lutId: w.luts.get(on.financialYear) ?? null,
+      bankAccountId: w.bankAccountId,
+      clientTds: this.clientTdsByParty.get(invoice.partyId) ?? null,
+      lines: this.liveLines(invoiceId).map((l) => ({
+        id: l.id,
+        description: l.description,
+        sac: l.sac,
+        serviceSac: l.engagementId === null ? null : (w.serviceTax.get(l.engagementId)?.sac ?? null),
+      })),
+    });
+  }
+
+  async setDraftTax(
+    tenantId: string,
+    invoiceId: string,
+    tax: InvoiceTaxSnapshot,
+    fillSacs: readonly { readonly lineId: string; readonly sac: string }[],
+  ): Promise<Invoice> {
+    for (const f of fillSacs) await this.setLineSac(tenantId, invoiceId, f.lineId, f.sac, true);
+    return this.patch(tenantId, invoiceId, { tax });
+  }
+
+  setLineSac(_tenantId: string, invoiceId: string, lineId: string, sac: string | null, onlyIfEmpty = false): Promise<void> {
+    const at = this.lines.findIndex((l) => l.id === lineId && l.invoiceId === invoiceId && !l.removed);
+    const line = this.lines[at];
+    if (line !== undefined && (!onlyIfEmpty || line.sac === null)) this.lines[at] = { ...line, sac };
+    return Promise.resolve();
+  }
+
+  serviceTaxFor(
+    _tenantId: string,
+    engagementId: string,
+  ): Promise<{ readonly sac: string | null; readonly ratePercent: string | null } | null> {
+    return Promise.resolve(this.world.serviceTax.get(engagementId) ?? null);
+  }
+
+  clientTds(_tenantId: string, partyId: string): Promise<ClientTds | null> {
+    return Promise.resolve(this.clientTdsByParty.get(partyId) ?? null);
+  }
+
+  setClientTds(_tenantId: string, partyId: string, tds: ClientTds | null): Promise<void> {
+    if (tds === null) this.clientTdsByParty.delete(partyId);
+    else this.clientTdsByParty.set(partyId, tds);
+    return Promise.resolve();
+  }
+
   readonly invoices: Invoice[] = [];
   readonly lines: (InvoiceLine & { removed: boolean })[] = [];
   /** Display names, so a joined read returns something a screen could render. */
@@ -115,6 +216,7 @@ export class FakeInvoiceRepo implements InvoiceRepository {
       irnRegisteredAt: null,
       notes: i.notes,
       managerUserId: i.managerUserId ?? null,
+      tax: NO_TAX_SNAPSHOT,
     };
     this.invoices.push(invoice);
     return Promise.resolve(invoice);
@@ -134,8 +236,10 @@ export class FakeInvoiceRepo implements InvoiceRepository {
       invoice,
       party: { id: invoice.partyId, displayName: this.nameOf(invoice.partyId) },
       entity: { id: invoice.entityPartyId, displayName: this.nameOf(invoice.entityPartyId) },
-      lines: lines.map((line) => ({ line, net: net(line), tax: tax(line) })),
+      lines: lines.map((line) => this.lineRecord(line, invoice)),
       totals: this.totalsOf(invoice),
+      lut: invoice.tax.lutId === null ? null : { id: invoice.tax.lutId, reference: "AD2704260000001", financialYear: invoice.financialYear },
+      bankAccount: null,
       manager:
         invoice.managerUserId === null
           ? null
@@ -174,7 +278,7 @@ export class FakeInvoiceRepo implements InvoiceRepository {
             // `/receivables` has always read it this way.
             balance:
               invoice.status === "issued"
-                ? { paid: b.paid, credited: b.credited, outstanding: b.outstanding }
+                ? { paid: b.paid, credited: b.credited, outstanding: b.outstanding, tds: b.tds }
                 : null,
           };
         }),
@@ -233,6 +337,7 @@ export class FakeInvoiceRepo implements InvoiceRepository {
       irnRegisteredAt: null,
       notes: null,
       managerUserId: null,
+      tax: NO_TAX_SNAPSHOT,
     };
     this.invoices.push(invoice);
     return invoice;
@@ -245,6 +350,8 @@ export class FakeInvoiceRepo implements InvoiceRepository {
     if (draft === null || draft.status !== "draft") throw new Error(`could not issue invoice ${invoiceId}`);
     const issuedOn = on.issuedOn;
     const dueOn = draft.dueOn ?? on.dueOnIfUnset;
+    for (const f of on.fillSacs) await this.setLineSac(tenantId, invoiceId, f.lineId, f.sac, true);
+    const tax = on.tax;
     if (draft.number !== null && draft.sequenceNumber !== null) {
       const order = preDrawnNumberOrder({
         draft: { financialYear: draft.financialYear, sequenceNumber: draft.sequenceNumber },
@@ -252,7 +359,7 @@ export class FakeInvoiceRepo implements InvoiceRepository {
         latestIssued: await this.latestIssuedInSeries(tenantId, draft, invoiceId),
       });
       if (!order.inOrder) return { outOfOrder: { number: draft.number, order } };
-      return { issued: await this.patch(tenantId, invoiceId, { status: "issued", issuedOn, dueOn }) };
+      return { issued: await this.patch(tenantId, invoiceId, { status: "issued", issuedOn, dueOn, tax }) };
     }
     // The issue date's year (B03), as the adapter moves an unnumbered draft.
     const financialYear = on.financialYear;
@@ -265,6 +372,7 @@ export class FakeInvoiceRepo implements InvoiceRepository {
         status: "issued",
         issuedOn,
         dueOn,
+        tax,
         financialYear,
         number: formatInvoiceNumber({ prefix: existing.prefix, financialYear, sequence, startMonth: existing.startMonth }),
         sequenceNumber: sequence,
@@ -301,8 +409,10 @@ export class FakeInvoiceRepo implements InvoiceRepository {
     // As the adapter: an issued invoice with money on it stays (B05).
     const invoice = await this.find(tenantId, invoiceId);
     if (invoice?.status === "issued") {
-      const paid = this.payments.filter((p) => p.invoiceId === invoiceId).reduce((acc, p) => acc + scaled(p.amount), 0n);
-      if (paid !== 0n) return { paid: unscaled(paid) };
+      const mine = this.payments.filter((p) => p.invoiceId === invoiceId);
+      const paid = mine.reduce((acc, p) => acc + scaled(p.amount), 0n);
+      const tds = mine.reduce((acc, p) => acc + scaled(p.tdsAmount), 0n);
+      if (paid !== 0n || tds !== 0n) return { paid: unscaled(paid) };
     }
     return { cancelled: await this.patch(tenantId, invoiceId, { status: "cancelled" }) };
   }
@@ -355,8 +465,10 @@ export class FakeInvoiceRepo implements InvoiceRepository {
     const invoice = await this.find(p.tenantId, p.invoiceId);
     if (invoice !== null) {
       const amount = scaled(p.amount);
-      const paid = this.balance(invoice).paid;
+      const { paid, tds } = this.balance(invoice);
       if (amount < 0n && -amount > scaled(paid)) return { paid };
+      const tdsAmount = scaled(p.tdsAmount);
+      if (tdsAmount < 0n && -tdsAmount > scaled(tds)) return { tds };
     }
     this.payments.push(p);
     return { payment: p };
@@ -441,6 +553,9 @@ export class FakeInvoiceRepo implements InvoiceRepository {
     const credited = this.creditNotes
       .filter((c) => c.invoiceId === invoice.id)
       .reduce((acc, c) => acc + scaled(c.amount), 0n);
+    const tds = this.payments
+      .filter((p) => p.invoiceId === invoice.id)
+      .reduce((acc, p) => acc + scaled(p.tdsAmount), 0n);
     return {
       invoiceId: invoice.id,
       partyId: invoice.partyId,
@@ -450,8 +565,10 @@ export class FakeInvoiceRepo implements InvoiceRepository {
       invoiced: totals.total,
       paid: unscaled(paid),
       credited: unscaled(credited),
-      // Only an ISSUED invoice owes anything, as the view says since 0326 (B22).
-      outstanding: invoice.status === "issued" ? unscaled(scaled(totals.total) - paid - credited) : "0.0000",
+      // Only an ISSUED invoice owes anything, as the view says since 0326 (B22);
+      // TDS the client deducted settles like money (Q057, 0371).
+      outstanding: invoice.status === "issued" ? unscaled(scaled(totals.total) - paid - tds - credited) : "0.0000",
+      tds: unscaled(tds),
     };
   }
 
@@ -486,21 +603,54 @@ export class FakeInvoiceRepo implements InvoiceRepository {
     return this.partyNames.get(partyId) ?? partyId;
   }
 
+  /**
+   * A line's figures. On a GST invoice (Q056) the domain's `lineTax`, the rule
+   * `crm.invoice_line_amount` holds (0370); on a plain or pre-0370 one this
+   * fake's own four-place arithmetic, as before.
+   */
+  private lineRecord(line: InvoiceLine & { removed: boolean }, invoice: Invoice) {
+    const t = invoice.tax.treatment;
+    if (t === null || t === "plain") {
+      return { line, net: net(line), tax: tax(line), cgst: "0.0000", sgst: "0.0000", utgst: "0.0000", igst: "0.0000" };
+    }
+    const r = lineTax({
+      quantity: line.quantity,
+      unitAmount: line.unitAmount,
+      discountPercent: line.discountPercent,
+      taxPercent: line.taxPercent,
+      currency: invoice.currency,
+      treatment: t,
+    });
+    return { line, net: r.net, tax: r.tax, cgst: r.cgst, sgst: r.sgst, utgst: r.utgst, igst: r.igst };
+  }
+
   private totalsOf(invoice: Invoice): InvoiceRecord["totals"] {
     const lines = this.liveLines(invoice.id);
-    const sum = (f: (l: InvoiceLine) => bigint): bigint =>
-      lines.reduce((acc, l) => acc + f(l), 0n);
-    const gross = sum((l) => scaled(l.quantity) * scaled(l.unitAmount) / UNIT);
-    const netTotal = sum((l) => scaledNet(l));
-    const taxTotal = sum((l) => scaledTax(l));
+    const records = lines.map((l) => this.lineRecord(l, invoice));
+    const sum = (f: (r: (typeof records)[number]) => string): bigint =>
+      records.reduce((acc, r) => acc + scaled(f(r)), 0n);
+    const gross = lines.reduce((acc, l) => acc + (scaled(l.quantity) * scaled(l.unitAmount)) / UNIT, 0n);
+    const netTotal = sum((r) => r.net);
+    const taxTotal = sum((r) => r.tax);
+    const total = unscaled(netTotal + taxTotal);
+    const tds =
+      invoice.tax.tdsPercent === null
+        ? "0.0000"
+        : tdsOn({ taxable: unscaled(netTotal), percent: invoice.tax.tdsPercent, currency: invoice.currency });
     return {
       lineCount: lines.length,
       gross: unscaled(gross),
       discount: unscaled(gross - netTotal),
       net: unscaled(netTotal),
       tax: unscaled(taxTotal),
-      total: unscaled(netTotal + taxTotal),
+      total,
       currency: invoice.currency,
+      cgst: unscaled(sum((r) => r.cgst)),
+      sgst: unscaled(sum((r) => r.sgst)),
+      utgst: unscaled(sum((r) => r.utgst)),
+      igst: unscaled(sum((r) => r.igst)),
+      tds,
+      netPayable: netPayable(total, tds),
     };
   }
 }
@@ -615,4 +765,57 @@ export function makeInvoiceFakes(): Deps & {
     staff: new FakeStaffDirectory(),
     settings: new FakeInvoiceFirmSettings(),
   };
+}
+
+/** A company's bank accounts and LUTs in memory (Q056, 0369). */
+export class FakeCompanyInvoicingRepo implements CompanyInvoicingRepository {
+  readonly accounts: (BankAccountView & { entityPartyId: string; retired: boolean })[] = [];
+  readonly luts: { id: string; entityPartyId: string; financialYear: number; reference: string; filedOn: string | null; retired: boolean }[] = [];
+
+  list(): Promise<readonly CompanyInvoicing[]> {
+    return Promise.resolve([]);
+  }
+
+  addBankAccount(_t: string, entityPartyId: string, id: string, a: NewBankAccount): Promise<{ readonly replaced: string | null }> {
+    const old = this.accounts.find((x) => x.entityPartyId === entityPartyId && !x.retired && x.currency === a.currency);
+    if (old !== undefined) old.retired = true;
+    this.accounts.push({ ...a, id, entityPartyId, retired: false });
+    return Promise.resolve({ replaced: old?.id ?? null });
+  }
+
+  retireBankAccount(_t: string, entityPartyId: string, accountId: string): Promise<boolean> {
+    const a = this.accounts.find((x) => x.id === accountId && x.entityPartyId === entityPartyId && !x.retired);
+    if (a === undefined) return Promise.resolve(false);
+    a.retired = true;
+    return Promise.resolve(true);
+  }
+
+  addLut(
+    _t: string,
+    entityPartyId: string,
+    lut: { readonly id: string; readonly financialYear: number; readonly reference: string; readonly filedOn: string | null },
+  ): Promise<{ readonly replaced: string | null }> {
+    const old = this.luts.find((x) => x.entityPartyId === entityPartyId && !x.retired && x.financialYear === lut.financialYear);
+    if (old !== undefined) old.retired = true;
+    this.luts.push({ ...lut, entityPartyId, retired: false });
+    return Promise.resolve({ replaced: old?.id ?? null });
+  }
+
+  retireLut(_t: string, entityPartyId: string, lutId: string): Promise<number | null> {
+    const l = this.luts.find((x) => x.id === lutId && x.entityPartyId === entityPartyId && !x.retired);
+    if (l === undefined) return Promise.resolve(null);
+    l.retired = true;
+    return Promise.resolve(l.financialYear);
+  }
+}
+
+/** The company-invoicing use case over fakes, for route tests. */
+export function makeCompanyInvoicing(): CompanyInvoicingService {
+  return new CompanyInvoicingService({
+    companies: new FakeCompanyInvoicingRepo(),
+    firmEntities: new FakeFirmEntities(),
+    parties: new FakePartyStanding(),
+    ids: new FakeIds(),
+    events: new RecordingEventSink(),
+  });
 }

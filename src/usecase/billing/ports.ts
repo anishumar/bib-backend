@@ -395,6 +395,9 @@ export interface InvoiceDrafter {
   ): Promise<NewInvoiceLine>;
   /** The ledger's `invoice.raised`, once the draft's transaction committed. */
   recordRaised(invoice: Invoice, actor: Actor): Promise<void>;
+  /** Decide the written draft's tax (Q056): its GST split, LUT, bank and the
+   *  client's TDS, and the SACs its lines take from the catalogue. */
+  refreshTax(tenantId: string, invoiceId: string): Promise<unknown>;
   find(
     tenantId: string,
     invoiceId: string,

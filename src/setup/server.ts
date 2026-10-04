@@ -95,6 +95,8 @@ import { PostgresDocumentRepository } from "../infrastructure/postgres/document-
 import { PostgresFirmEntityRepository } from "../infrastructure/postgres/firm-entity-repository";
 import { PostgresInvoiceFirmSettings } from "../infrastructure/postgres/invoice-settings";
 import { PostgresInvoiceRepository } from "../infrastructure/postgres/invoice-repository";
+import { PostgresCompanyInvoicingRepository } from "../infrastructure/postgres/company-invoicing-repository";
+import { CompanyInvoicingService } from "../usecase/invoice/company";
 import { PostgresDocumentStoreRepository } from "../infrastructure/postgres/document-store-repository";
 import { Sha256ByteDigest } from "../infrastructure/storage/filesystem-blob-store";
 import { FileStoreService } from "../usecase/filestore/service";
@@ -624,6 +626,7 @@ export function wire(cfg: Config, log: Logger): Wired {
       prepareDraft: (input) => invoices.prepareDraft(input),
       prepareLine: (draft, input) => invoices.prepareLine(draft, input),
       recordRaised: (invoice, actor) => invoices.recordRaised(invoice, actor),
+      refreshTax: (tenantId, invoiceId) => invoices.refreshTax(tenantId, invoiceId),
       find: (tenantId, invoiceId) => invoiceRepository.find(tenantId, invoiceId),
       issueCreditNote: (input, actor) => invoices.issueCreditNote(input, actor),
     },
@@ -1428,7 +1431,19 @@ export function wire(cfg: Config, log: Logger): Wired {
             events: ledger,
           }),
         },
-        invoice: { service: invoices, dunning, authz },
+        invoice: {
+          service: invoices,
+          dunning,
+          authz,
+          // A company's bank accounts and LUTs (Q056, 0369).
+          companies: new CompanyInvoicingService({
+            companies: new PostgresCompanyInvoicingRepository(pools.app),
+            firmEntities: documents,
+            parties: partyRepository,
+            ids: systemIds,
+            events: ledger,
+          }),
+        },
         billing: { service: billing, authz, advances: advanceDesk, finals: finalBills, workBilling },
         notifications: { service: notifications, authz },
         filestore: { service: fileStore, authz },

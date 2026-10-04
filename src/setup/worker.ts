@@ -669,6 +669,7 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
       prepareDraft: (input) => invoices.prepareDraft(input),
       prepareLine: (draft, input) => invoices.prepareLine(draft, input),
       recordRaised: (invoice, actor) => invoices.recordRaised(invoice, actor),
+      refreshTax: (tenantId, invoiceId) => invoices.refreshTax(tenantId, invoiceId),
       find: (tenantId, invoiceId) => invoiceRepository.find(tenantId, invoiceId),
       issueCreditNote: (input, actor) => invoices.issueCreditNote(input, actor),
     },

@@ -1013,11 +1013,16 @@ export function mapError(err: unknown): MappedError {
       case "FX_RATE_REQUIRED":
       case "FX_RATE_NOT_ONE":
       case "DUE_DATE_IN_THE_PAST":
+      case "INVALID_SAC":
+      case "INVALID_PLACE_OF_SUPPLY":
+      case "INVALID_TDS":
+      case "INVALID_COMPANY_INVOICING":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       case "INVOICE_NOT_FOUND":
       case "INVOICE_LINE_NOT_FOUND":
       case "DUNNING_ACTION_NOT_FOUND":
       case "ENGAGEMENT_NOT_FOUND":
+      case "COMPANY_RECORD_NOT_FOUND":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
       // "The invoice is not in the state this call assumed", and none of them is
       // a malformed request. INVOICE_NOT_EDITABLE in particular is answered by
@@ -1033,7 +1038,10 @@ export function mapError(err: unknown): MappedError {
       // roster says no. A manager is frozen once the invoice is issued.
       // INVOICE_NUMBER_OUT_OF_ORDER (B51): a draft numbered before 0322 whose
       // number would now go out of order; answered by cancelling it and raising
-      // it again, never by retrying.
+      // it again, never by retrying. PLACE_OF_SUPPLY_UNKNOWN and
+      // INVOICE_LINE_NEEDS_SAC (Q056): the invoice is well formed, but a GST
+      // invoice cannot go out without them; the fix is on the draft or the
+      // client, never a retry.
       case "INVOICE_NOT_EDITABLE":
       case "EMPTY_INVOICE":
       case "INVALID_INVOICE_TRANSITION":
@@ -1053,6 +1061,8 @@ export function mapError(err: unknown): MappedError {
       case "DUNNING_NOTHING_OWED":
       case "DUE_BEFORE_ISSUE":
       case "INVOICE_NUMBER_OUT_OF_ORDER":
+      case "PLACE_OF_SUPPLY_UNKNOWN":
+      case "INVOICE_LINE_NEEDS_SAC":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

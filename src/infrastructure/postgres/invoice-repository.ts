@@ -49,8 +49,10 @@ import type {
   InvoiceBalance,
   InvoiceLine,
   InvoiceStatus,
+  InvoiceTaxSnapshot,
   Payment,
 } from "../../domain/invoice/model";
+import { isTaxTreatment } from "../../domain/invoice/gst";
 import {
   DEFAULT_CREDIT_NOTE_PREFIX,
   DEFAULT_SERIES_PREFIX,
@@ -79,6 +81,9 @@ import type {
   NewInvoice,
   NewInvoiceLine,
   NewPayment,
+  BankAccountView,
+  ClientTds,
+  InvoiceTaxFacts,
 } from "../../usecase/invoice/ports";
 import { MAX_LIST_ROWS } from "../../db/limits";
 
@@ -100,6 +105,40 @@ interface InvoiceRow {
   irn_registered_at: Date | null;
   notes: string | null;
   manager_user_id: string | null;
+  tax_treatment: string | null;
+  supplier_gstin: string | null;
+  supplier_state_code: string | null;
+  recipient_gstin: string | null;
+  place_of_supply_state_code: string | null;
+  place_of_supply_country: string | null;
+  chosen_place_of_supply: string | null;
+  lut_id: string | null;
+  bank_account_id: string | null;
+  tds_section: string | null;
+  tds_percent: string | null;
+}
+
+function toTaxSnapshot(r: InvoiceRow): InvoiceTaxSnapshot {
+  const treatment = r.tax_treatment;
+  if (treatment !== null && !isTaxTreatment(treatment)) {
+    throw new Error(
+      `crm.invoice holds tax_treatment ${JSON.stringify(treatment)}, which is not a TaxTreatment. The ` +
+        `CHECK constraint and domain/invoice/gst.ts have drifted apart.`,
+    );
+  }
+  return {
+    treatment,
+    supplierGstin: r.supplier_gstin,
+    supplierStateCode: r.supplier_state_code,
+    recipientGstin: r.recipient_gstin,
+    placeOfSupplyStateCode: r.place_of_supply_state_code,
+    placeOfSupplyCountry: r.place_of_supply_country,
+    chosenPlaceOfSupply: r.chosen_place_of_supply,
+    lutId: r.lut_id,
+    bankAccountId: r.bank_account_id,
+    tdsSection: r.tds_section,
+    tdsPercent: r.tds_percent,
+  };
 }
 
 /**
@@ -143,6 +182,7 @@ function toInvoice(r: InvoiceRow): Invoice {
     irnRegisteredAt: r.irn_registered_at === null ? null : r.irn_registered_at.toISOString(),
     notes: r.notes,
     managerUserId: r.manager_user_id,
+    tax: toTaxSnapshot(r),
   };
 }
 
@@ -158,6 +198,7 @@ interface InvoiceLineRow {
   currency: string;
   discount_percent: string;
   tax_percent: string;
+  sac: string | null;
 }
 
 function toLine(r: InvoiceLineRow): InvoiceLine {
@@ -173,17 +214,29 @@ function toLine(r: InvoiceLineRow): InvoiceLine {
     currency: r.currency,
     discountPercent: r.discount_percent,
     taxPercent: r.tax_percent,
+    sac: r.sac,
   };
 }
+
+/** The tax snapshot (0370), as `crm.invoice` columns. */
+const TAX_COLUMNS =
+  "tax_treatment, supplier_gstin, supplier_state_code, recipient_gstin, place_of_supply_state_code, " +
+  "place_of_supply_country, chosen_place_of_supply, lut_id, bank_account_id, tds_section, tds_percent";
+
+/** The same, read through the alias `i`, the rate as text. */
+const I_TAX_COLUMNS = TAX_COLUMNS.split(", ")
+  .map((c) => (c === "tds_percent" ? "i.tds_percent::text AS tds_percent" : `i.${c}`))
+  .join(", ");
 
 const INVOICE_COLUMNS =
   "id, tenant_id, party_id, entity_party_id, number, financial_year, sequence_number, " +
   "status, currency, fx_rate, fx_rate_date, issued_on, due_on, irn, irn_registered_at, notes, " +
-  "manager_user_id";
+  "manager_user_id, " +
+  TAX_COLUMNS.replace("tds_percent", "tds_percent::text AS tds_percent");
 
 const LINE_COLUMNS =
   "id, tenant_id, invoice_id, engagement_id, description, position, quantity, unit_amount, " +
-  "currency, discount_percent, tax_percent";
+  "currency, discount_percent, tax_percent, sac";
 
 /**
  * The company's invoice series for the year exists. ON CONFLICT DO NOTHING so
@@ -291,13 +344,13 @@ export async function insertInvoiceLine(db: Db, l: NewInvoiceLine): Promise<Invo
   const [row] = await db<InvoiceLineRow[]>`
     INSERT INTO crm.invoice_line
       (id, tenant_id, invoice_id, engagement_id, description, position, quantity,
-       unit_amount, currency, discount_percent, tax_percent)
+       unit_amount, currency, discount_percent, tax_percent, sac)
     SELECT ${l.id}, ${l.tenantId}, ${l.invoiceId}, ${l.engagementId}, ${l.description},
            -- The next position among LIVE lines: a struck-off line frees
            -- its position (0326).
            COALESCE(MAX(position), 0) + 1,
            ${l.quantity}, ${l.unitAmount}, ${l.currency}, ${l.discountPercent},
-           ${l.taxPercent}
+           ${l.taxPercent}, ${l.sac}
     FROM crm.invoice_line
     WHERE invoice_id = ${l.invoiceId} AND removed_at IS NULL
     RETURNING ${db.unsafe(LINE_COLUMNS)}
@@ -340,6 +393,7 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
         SELECT i.id, i.tenant_id, i.party_id, i.entity_party_id, i.number, i.financial_year,
                i.sequence_number, i.status, i.currency, i.fx_rate, i.fx_rate_date, i.issued_on,
                i.due_on, i.irn, i.irn_registered_at, i.notes, i.manager_user_id,
+               ${db.unsafe(I_TAX_COLUMNS)},
                -- Both by NAME, in the query. An invoice prints an address block
                -- and a letterhead, and a uuid prints as nothing.
                p.display_name AS party_name,
@@ -365,21 +419,36 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
          ORDER BY l.ref
       `;
 
-      const lines = await db<(InvoiceLineRow & { net: string; tax: string })[]>`
+      const lines = await db<
+        (InvoiceLineRow & { net: string; tax: string; cgst: string; sgst: string; utgst: string; igst: string })[]
+      >`
         SELECT ${db.unsafe(LINE_COLUMNS.split(", ").map((c) => `l.${c}`).join(", "))},
-               a.net, a.tax
+               a.net, a.tax, a.cgst::text, a.sgst::text, a.utgst::text, a.igst::text
         FROM crm.invoice_line l
         JOIN crm.invoice_line_amount a ON a.invoice_line_id = l.id
         WHERE l.invoice_id = ${invoiceId} AND l.removed_at IS NULL
         ORDER BY l.position
       `;
 
-      const [totals] = await db<
-        { line_count: string; gross: string; discount: string; net: string; tax: string; total: string }[]
-      >`
-        SELECT line_count::text, gross::text, discount::text, net::text, tax::text, total::text
+      const [totals] = await db<TotalsRow[]>`
+        SELECT ${db.unsafe(TOTALS_COLUMNS)}
         FROM crm.invoice_totals WHERE invoice_id = ${invoiceId}
       `;
+
+      // What it prints for the LUT and the bank (0369), by the ids frozen on it.
+      const [lut] =
+        head.lut_id === null
+          ? []
+          : await db<{ id: string; reference: string; financial_year: number }[]>`
+              SELECT id, reference, financial_year FROM crm.firm_entity_lut WHERE id = ${head.lut_id}
+            `;
+      const [bank] =
+        head.bank_account_id === null
+          ? []
+          : await db<BankAccountRow[]>`
+              SELECT ${db.unsafe(BANK_COLUMNS)} FROM crm.firm_entity_bank_account
+               WHERE id = ${head.bank_account_id}
+            `;
 
       // THE RATE A LINE TYPED BY HAND STARTS AT (CA#5): 0322's rule for the
       // automatic advance, offered to a person. The last rate on each of this
@@ -406,20 +475,24 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
           companyDefault: companyRate?.tax_percent ?? null,
           byEngagement: lastRates.map((r) => ({ engagementId: r.engagement_id, taxPercent: r.tax_percent })),
         },
-        lines: lines.map((r): InvoiceLineRecord => ({ line: toLine(r), net: r.net, tax: r.tax })),
+        lines: lines.map(
+          (r): InvoiceLineRecord => ({
+            line: toLine(r),
+            net: r.net,
+            tax: r.tax,
+            cgst: r.cgst,
+            sgst: r.sgst,
+            utgst: r.utgst,
+            igst: r.igst,
+          }),
+        ),
         // An invoice with no live lines has no row in the totals view at all —
         // `sum()` over nothing is NULL and `GROUP BY` emits no group. Zeroes are
         // the honest reading of "nothing on it yet", and the alternative is a
         // screen that renders "null" where a figure belongs.
-        totals: {
-          lineCount: Number(totals?.line_count ?? "0"),
-          gross: totals?.gross ?? "0",
-          discount: totals?.discount ?? "0",
-          net: totals?.net ?? "0",
-          tax: totals?.tax ?? "0",
-          total: totals?.total ?? "0",
-          currency: head.currency,
-        },
+        totals: toTotals(totals, head.currency),
+        lut: lut === undefined ? null : { id: lut.id, reference: lut.reference, financialYear: lut.financial_year },
+        bankAccount: bank === undefined ? null : toBankAccount(bank),
         manager:
           head.manager_user_id === null || head.manager_email === null
             ? null
@@ -440,18 +513,27 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
           net: string | null;
           tax: string | null;
           total: string | null;
+          cgst: string | null;
+          sgst: string | null;
+          utgst: string | null;
+          igst: string | null;
+          tds: string | null;
+          net_payable: string | null;
           paid: string | null;
           credited: string | null;
           outstanding: string | null;
+          tds_paid: string | null;
         })[]
       >`
         SELECT i.id, i.tenant_id, i.party_id, i.entity_party_id, i.number, i.financial_year,
                i.sequence_number, i.status, i.currency, i.fx_rate, i.fx_rate_date, i.issued_on,
-               i.due_on, i.irn, i.irn_registered_at, i.notes,
+               i.due_on, i.irn, i.irn_registered_at, i.notes, i.manager_user_id,
+               ${db.unsafe(I_TAX_COLUMNS)},
                p.display_name AS party_name,
                t.line_count::text, t.gross::text, t.discount::text, t.net::text,
-               t.tax::text, t.total::text,
-               b.paid::text, b.credited::text, b.outstanding::text
+               t.tax::text, t.total::text, t.cgst::text, t.sgst::text, t.utgst::text, t.igst::text,
+               t.tds::text, t.net_payable::text,
+               b.paid::text, b.credited::text, b.outstanding::text, b.tds::text AS tds_paid
         FROM crm.invoice i
         JOIN core.party p ON p.id = i.party_id
         -- LEFT, because a draft with no lines yet has no totals row and must
@@ -476,15 +558,25 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
       return rows.map((r) => ({
         invoice: toInvoice(r),
         party: { id: r.party_id, displayName: r.party_name },
-        totals: {
-          lineCount: Number(r.line_count ?? "0"),
-          gross: r.gross ?? "0",
-          discount: r.discount ?? "0",
-          net: r.net ?? "0",
-          tax: r.tax ?? "0",
-          total: r.total ?? "0",
-          currency: r.currency,
-        },
+        totals: toTotals(
+          r.line_count === null
+            ? undefined
+            : {
+                line_count: r.line_count,
+                gross: r.gross ?? "0",
+                discount: r.discount ?? "0",
+                net: r.net ?? "0",
+                tax: r.tax ?? "0",
+                total: r.total ?? "0",
+                cgst: r.cgst ?? "0",
+                sgst: r.sgst ?? "0",
+                utgst: r.utgst ?? "0",
+                igst: r.igst ?? "0",
+                tds: r.tds ?? "0",
+                net_payable: r.net_payable ?? "0",
+              },
+          r.currency,
+        ),
         // ONLY AN ISSUED INVOICE OWES ANYTHING, and the rule is here rather
         // than in the query because `crm.invoice_balance` holds a row for every
         // invoice whatever its status.
@@ -502,6 +594,7 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
                 paid: r.paid ?? "0",
                 credited: r.credited ?? "0",
                 outstanding: r.outstanding ?? "0",
+                tds: r.tds_paid ?? "0",
               }
             : null,
       }));
@@ -667,12 +760,34 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
         `;
       }
 
+      // Lines the catalogue gives a SAC since they were drafted, before the
+      // status moves: an issued invoice's lines do not change (0027).
+      for (const f of on.fillSacs) {
+        await db`
+          UPDATE crm.invoice_line SET sac = ${f.sac}
+           WHERE id = ${f.lineId} AND invoice_id = ${invoiceId} AND sac IS NULL AND removed_at IS NULL
+        `;
+      }
       const [row] = await db<InvoiceRow[]>`
         UPDATE crm.invoice
            SET status = 'issued', issued_on = ${issuedOn},
                number = ${number}, sequence_number = coalesce(sequence_number, ${sequence}),
                financial_year = ${financialYear},
                due_on = coalesce(due_on, ${on.dueOnIfUnset}::date),
+               -- WHAT IT SAYS ABOUT TAX (Q056, 0370), decided for the issue
+               -- date and frozen from this write on (the trigger admits only
+               -- the draft -> issued write).
+               tax_treatment = ${on.tax.treatment},
+               supplier_gstin = ${on.tax.supplierGstin},
+               supplier_state_code = ${on.tax.supplierStateCode},
+               recipient_gstin = ${on.tax.recipientGstin},
+               place_of_supply_state_code = ${on.tax.placeOfSupplyStateCode},
+               place_of_supply_country = ${on.tax.placeOfSupplyCountry},
+               chosen_place_of_supply = ${on.tax.chosenPlaceOfSupply},
+               lut_id = ${on.tax.lutId}::uuid,
+               bank_account_id = ${on.tax.bankAccountId}::uuid,
+               tds_section = ${on.tax.tdsSection},
+               tds_percent = ${on.tax.tdsPercent}::numeric,
                -- WHO IT IS FROM AND TO, FROZEN (0334): the supplier and the
                -- client as they stand today on the issuing company's calendar
                -- (0337), in this same write (the only one the trigger lets set
@@ -723,8 +838,10 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
         SELECT status FROM crm.invoice WHERE id = ${invoiceId} FOR UPDATE
       `;
       if (current?.status === "issued") {
+        // Money, or TDS the client deducted (Q057): either is attached to it.
         const [money] = await db<{ paid: string; any: boolean }[]>`
-          SELECT coalesce(sum(amount), 0)::text AS paid, coalesce(sum(amount), 0) <> 0 AS any
+          SELECT coalesce(sum(amount), 0)::text AS paid,
+                 (coalesce(sum(amount), 0) <> 0 OR coalesce(sum(tds_amount), 0) <> 0) AS any
             FROM crm.payment WHERE invoice_id = ${invoiceId}
         `;
         if (money?.any === true) return { paid: money.paid };
@@ -859,6 +976,191 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
       return toInvoice(row);
     });
   }
+  // ── The GST tax invoice (Q056, Q057) ──────────────────────────────────────
+
+  /**
+   * What decides the invoice's tax, as it stands on `onDay`. Both parties are
+   * read through `crm.print_identity`, the function Issue freezes into the
+   * paper (0334), so the GSTIN the tax is decided on is the GSTIN printed.
+   */
+  async taxFacts(
+    tenantId: string,
+    invoiceId: string,
+    on: { readonly onDay: string; readonly financialYear: number },
+  ): Promise<InvoiceTaxFacts> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [head] = await db<
+        {
+          entity_party_id: string;
+          party_id: string;
+          currency: string;
+          supplier: { country?: string; taxId?: { type: string; value: string } } | null;
+          recipient: {
+            name?: string;
+            country?: string;
+            taxId?: { type: string; value: string };
+            address?: { lines?: unknown; region?: string };
+          } | null;
+        }[]
+      >`
+        SELECT i.entity_party_id, i.party_id, i.currency,
+               crm.print_identity(i.entity_party_id, ${on.onDay}::date) AS supplier,
+               crm.print_identity(i.party_id, ${on.onDay}::date) AS recipient
+          FROM crm.invoice i
+         WHERE i.id = ${invoiceId}
+      `;
+      if (!head) throw new Error(`invoice ${invoiceId} is not at this firm`);
+      const [lut] = await db<{ id: string }[]>`
+        SELECT id FROM crm.firm_entity_lut
+         WHERE entity_party_id = ${head.entity_party_id}
+           AND financial_year = ${on.financialYear}
+           AND retired_at IS NULL
+      `;
+      // The account FOR this currency, else the company's general one.
+      const [bank] = await db<{ id: string }[]>`
+        SELECT id FROM crm.firm_entity_bank_account
+         WHERE entity_party_id = ${head.entity_party_id}
+           AND retired_at IS NULL
+           AND (currency = ${head.currency} OR currency IS NULL)
+         ORDER BY (currency IS NULL), created_at DESC
+         LIMIT 1
+      `;
+      const [tds] = await db<{ section: string; percent: string }[]>`
+        SELECT section, percent::text AS percent FROM crm.client_tds
+         WHERE party_id = ${head.party_id} AND section IS NOT NULL
+      `;
+      const supplierCountry = head.supplier?.country ?? null;
+      const lines = await db<{ id: string; description: string; sac: string | null; service_sac: string | null }[]>`
+        -- The SAC the catalogue gives each line's service NOW (its published
+        -- version), for the issuing company's country.
+        SELECT l.id, l.description, l.sac,
+               st.body -> 'tax' -> ${supplierCountry ?? ""}::text ->> 'sac' AS service_sac
+          FROM crm.invoice_line l
+          LEFT JOIN crm.engagement e ON e.id = l.engagement_id AND e.tenant_id = l.tenant_id
+          LEFT JOIN crm.engagement_letter_line ll
+            ON ll.id = e.engagement_letter_line_id AND ll.tenant_id = e.tenant_id
+          LEFT JOIN config.version sv ON sv.id = ll.service_version_id AND sv.tenant_id = ll.tenant_id
+          LEFT JOIN config.version st
+            ON st.entry_id = sv.entry_id AND st.tenant_id = sv.tenant_id AND st.status = 'published'
+         WHERE l.invoice_id = ${invoiceId} AND l.removed_at IS NULL
+         ORDER BY l.position
+      `;
+      const taxId = (who: typeof head.supplier) =>
+        who?.taxId !== undefined && who.taxId.type === "gstin" ? who.taxId.value : null;
+      const address = head.recipient?.address;
+      const lineCount = Array.isArray(address?.lines) ? address.lines.length : 0;
+      return {
+        supplierCountry,
+        supplierGstin: taxId(head.supplier),
+        recipientName: head.recipient?.name ?? head.party_id,
+        recipientCountry: head.recipient?.country ?? null,
+        recipientGstin: taxId(head.recipient),
+        recipientRegion: address?.region ?? null,
+        recipientHasAddress: lineCount > 0 || (address?.region ?? "") !== "",
+        lutId: lut?.id ?? null,
+        bankAccountId: bank?.id ?? null,
+        clientTds: tds === undefined ? null : { section: tds.section, percent: tds.percent },
+        lines: lines.map((l) => ({ id: l.id, description: l.description, sac: l.sac, serviceSac: l.service_sac })),
+      };
+    });
+  }
+
+  async setDraftTax(
+    tenantId: string,
+    invoiceId: string,
+    tax: InvoiceTaxSnapshot,
+    fillSacs: readonly { readonly lineId: string; readonly sac: string }[],
+  ): Promise<Invoice> {
+    return withTenant(this.app, tenantId, async (db) => {
+      for (const f of fillSacs) {
+        await db`
+          UPDATE crm.invoice_line SET sac = ${f.sac}
+           WHERE id = ${f.lineId} AND invoice_id = ${invoiceId} AND sac IS NULL AND removed_at IS NULL
+        `;
+      }
+      const [row] = await db<InvoiceRow[]>`
+        UPDATE crm.invoice
+           SET tax_treatment = ${tax.treatment},
+               supplier_gstin = ${tax.supplierGstin},
+               supplier_state_code = ${tax.supplierStateCode},
+               recipient_gstin = ${tax.recipientGstin},
+               place_of_supply_state_code = ${tax.placeOfSupplyStateCode},
+               place_of_supply_country = ${tax.placeOfSupplyCountry},
+               chosen_place_of_supply = ${tax.chosenPlaceOfSupply},
+               lut_id = ${tax.lutId}::uuid,
+               bank_account_id = ${tax.bankAccountId}::uuid,
+               tds_section = ${tax.tdsSection},
+               tds_percent = ${tax.tdsPercent}::numeric
+         WHERE id = ${invoiceId} AND status = 'draft'
+        RETURNING ${db.unsafe(INVOICE_COLUMNS)}
+      `;
+      if (!row) {
+        throw new Error(
+          `could not set the tax of invoice ${invoiceId}: no draft matched. It has moved on since it ` +
+            `was read — another request got there first.`,
+        );
+      }
+      return toInvoice(row);
+    });
+  }
+
+  async setLineSac(tenantId: string, invoiceId: string, lineId: string, sac: string | null): Promise<void> {
+    await withTenant(
+      this.app,
+      tenantId,
+      (db) => db`
+        UPDATE crm.invoice_line SET sac = ${sac}
+         WHERE id = ${lineId} AND invoice_id = ${invoiceId} AND removed_at IS NULL
+      `,
+    );
+  }
+
+  async serviceTaxFor(
+    tenantId: string,
+    engagementId: string,
+    issuerPartyId: string,
+  ): Promise<{ readonly sac: string | null; readonly ratePercent: string | null } | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [found] = await db<{ entry: Record<string, unknown> | null }[]>`
+        SELECT v.body -> 'tax' -> le.jurisdiction AS entry
+          FROM crm.engagement e
+          JOIN crm.engagement_letter_line ll ON ll.id = e.engagement_letter_line_id AND ll.tenant_id = e.tenant_id
+          JOIN config.version sv ON sv.id = ll.service_version_id AND sv.tenant_id = ll.tenant_id
+          JOIN config.version v ON v.entry_id = sv.entry_id AND v.tenant_id = sv.tenant_id AND v.status = 'published'
+          LEFT JOIN core.legal_entity le ON le.party_id = ${issuerPartyId} AND le.tenant_id = e.tenant_id
+         WHERE e.id = ${engagementId}
+      `;
+      if (found === undefined) return null;
+      const entry = found.entry;
+      const sac = typeof entry?.["sac"] === "string" ? entry["sac"] : null;
+      const ratePercent = typeof entry?.["ratePercent"] === "string" ? entry["ratePercent"] : null;
+      return { sac, ratePercent };
+    });
+  }
+
+  async clientTds(tenantId: string, partyId: string): Promise<ClientTds | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ section: string; percent: string }[]>`
+        SELECT section, percent::text AS percent FROM crm.client_tds
+         WHERE party_id = ${partyId} AND section IS NOT NULL
+      `;
+      return row === undefined ? null : { section: row.section, percent: row.percent };
+    });
+  }
+
+  async setClientTds(tenantId: string, partyId: string, tds: ClientTds | null): Promise<void> {
+    await withTenant(
+      this.app,
+      tenantId,
+      (db) => db`
+        INSERT INTO crm.client_tds (tenant_id, party_id, section, percent)
+        VALUES (${tenantId}, ${partyId}, ${tds?.section ?? null}, ${tds?.percent ?? null}::numeric)
+        ON CONFLICT (tenant_id, party_id)
+        DO UPDATE SET section = EXCLUDED.section, percent = EXCLUDED.percent
+      `,
+    );
+  }
+
   // ── Money against an invoice (T3.5) ──────────────────────────────────────
 
   async recordPayment(p: NewPayment): Promise<PaymentOutcome> {
@@ -868,17 +1170,20 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
       // waits for this one and reads the balance this one leaves. More than is
       // owed is recorded on purpose (a credit).
       await db`SELECT 1 FROM crm.invoice WHERE id = ${p.invoiceId} FOR UPDATE`;
-      const [b] = await db<{ paid: string; reversesTooMuch: boolean }[]>`
-        SELECT paid::text AS paid,
-               (${p.amount}::numeric < 0 AND -${p.amount}::numeric > paid) AS "reversesTooMuch"
+      const [b] = await db<{ paid: string; tds: string; reversesTooMuch: boolean; reversesTdsTooMuch: boolean }[]>`
+        SELECT paid::text AS paid, tds::text AS tds,
+               (${p.amount}::numeric < 0 AND -${p.amount}::numeric > paid) AS "reversesTooMuch",
+               (${p.tdsAmount}::numeric < 0 AND -${p.tdsAmount}::numeric > tds) AS "reversesTdsTooMuch"
           FROM crm.invoice_balance WHERE invoice_id = ${p.invoiceId}
       `;
       if (b?.reversesTooMuch === true) return { paid: b.paid };
+      // The same for TDS (Q057): a TDS reversal no larger than the TDS recorded.
+      if (b?.reversesTdsTooMuch === true) return { tds: b.tds };
       const [row] = await db<PaymentRow[]>`
         INSERT INTO crm.payment
-          (id, tenant_id, invoice_id, amount, currency, received_on, method, reference, note)
+          (id, tenant_id, invoice_id, amount, currency, received_on, method, reference, note, tds_amount)
         VALUES (${p.id}, ${p.tenantId}, ${p.invoiceId}, ${p.amount}, ${p.currency},
-                ${p.receivedOn}, ${p.method}, ${p.reference}, ${p.note})
+                ${p.receivedOn}, ${p.method}, ${p.reference}, ${p.note}, ${p.tdsAmount})
         RETURNING ${db.unsafe(PAYMENT_COLUMNS)}
       `;
       if (!row) throw new Error("payment insert returned no row");
@@ -1047,10 +1352,11 @@ interface PaymentRow {
   method: string;
   reference: string | null;
   note: string | null;
+  tds_amount: string;
 }
 
 const PAYMENT_COLUMNS =
-  "id, tenant_id, invoice_id, amount, currency, received_on, method, reference, note";
+  "id, tenant_id, invoice_id, amount, currency, received_on, method, reference, note, tds_amount";
 
 function toPayment(r: PaymentRow): Payment {
   if (!isPaymentMethod(r.method)) {
@@ -1069,6 +1375,7 @@ function toPayment(r: PaymentRow): Payment {
     method: r.method,
     reference: r.reference,
     note: r.note,
+    tdsAmount: r.tds_amount,
   };
 }
 
@@ -1124,10 +1431,11 @@ interface BalanceRow {
   paid: string;
   credited: string;
   outstanding: string;
+  tds: string;
 }
 
 const BALANCE_COLUMNS =
-  "invoice_id, party_id, status, currency, due_on, invoiced, paid, credited, outstanding";
+  "invoice_id, party_id, status, currency, due_on, invoiced, paid, credited, outstanding, tds";
 
 function toBalance(r: BalanceRow): InvoiceBalance {
   return {
@@ -1140,5 +1448,77 @@ function toBalance(r: BalanceRow): InvoiceBalance {
     paid: r.paid,
     credited: r.credited,
     outstanding: r.outstanding,
+    tds: r.tds,
+  };
+}
+
+interface TotalsRow {
+  line_count: string;
+  gross: string;
+  discount: string;
+  net: string;
+  tax: string;
+  total: string;
+  cgst: string;
+  sgst: string;
+  utgst: string;
+  igst: string;
+  tds: string;
+  net_payable: string;
+}
+
+const TOTALS_COLUMNS =
+  "line_count::text, gross::text, discount::text, net::text, tax::text, total::text, cgst::text, " +
+  "sgst::text, utgst::text, igst::text, tds::text, net_payable::text";
+
+/**
+ * An invoice with no live lines has no row in the totals view at all: `sum()`
+ * over nothing is NULL and `GROUP BY` emits no group. Zeroes are the honest
+ * reading of "nothing on it yet", and the alternative is a screen that renders
+ * "null" where a figure belongs.
+ */
+function toTotals(t: TotalsRow | undefined, currency: string): InvoiceRecord["totals"] {
+  return {
+    lineCount: Number(t?.line_count ?? "0"),
+    gross: t?.gross ?? "0",
+    discount: t?.discount ?? "0",
+    net: t?.net ?? "0",
+    tax: t?.tax ?? "0",
+    total: t?.total ?? "0",
+    currency,
+    cgst: t?.cgst ?? "0",
+    sgst: t?.sgst ?? "0",
+    utgst: t?.utgst ?? "0",
+    igst: t?.igst ?? "0",
+    tds: t?.tds ?? "0",
+    netPayable: t?.net_payable ?? "0",
+  };
+}
+
+interface BankAccountRow {
+  id: string;
+  account_name: string;
+  account_number: string;
+  bank_name: string;
+  branch: string | null;
+  ifsc: string | null;
+  swift: string | null;
+  iban: string | null;
+  currency: string | null;
+}
+
+const BANK_COLUMNS = "id, account_name, account_number, bank_name, branch, ifsc, swift, iban, currency";
+
+function toBankAccount(r: BankAccountRow): BankAccountView {
+  return {
+    id: r.id,
+    accountName: r.account_name,
+    accountNumber: r.account_number,
+    bankName: r.bank_name,
+    branch: r.branch,
+    ifsc: r.ifsc,
+    swift: r.swift,
+    iban: r.iban,
+    currency: r.currency,
   };
 }

@@ -39,6 +39,7 @@ import type { Permission, RoleAudience } from "../authz/model";
 import { PERMISSIONS, ROLE_AUDIENCES, isPermission, isRoleAudience } from "../authz/model";
 import type { Amount, Money } from "../money/model";
 import { MAX_AMOUNT_SCALE, isAmount, isCurrencyCode, normalizeCurrency } from "../money/model";
+import { isSac } from "../invoice/gst";
 
 /** The configured things this pass knows about. `rule_pack` joins them when
  *  T4.3 actually reads it — designing a body against no consumer is how a
@@ -424,6 +425,24 @@ export interface ServiceBody {
   /** What is NOT included. Stated explicitly, because on a signed document
    *  silence reads as included. */
   readonly exclusions: string | null;
+  /**
+   * HOW THE SERVICE IS TAXED, per country it is invoiced from (Q056, S5):
+   * `{ "IN": { "sac": "998222", "ratePercent": "18" } }`. The firm states it;
+   * nothing defaults a code or assumes 18%. An invoice line billing this
+   * service takes its SAC from here, and its rate unless a person types one.
+   * Keyed by the ISSUING company's country, so a Gulf company's VAT rate can
+   * sit beside India's GST without a second service. `sac` is India's (chapter
+   * 99, six digits); elsewhere only the rate. Absent or `{}`: not stated.
+   */
+  readonly tax?: ServiceTaxes | undefined;
+}
+
+/** A service's tax per issuing country (Q056). */
+export type ServiceTaxes = Readonly<Record<string, ServiceTax>>;
+
+export interface ServiceTax {
+  readonly sac: string | null;
+  readonly ratePercent: string | null;
 }
 
 /**
@@ -439,8 +458,10 @@ export interface ServiceBody {
  * write, so `null` here says "this stored body does not have one" instead of
  * inventing `fixed` and printing a price basis the firm never chose.
  */
-export interface StoredServiceBody extends Omit<ServiceBody, "billingBasis"> {
+export interface StoredServiceBody extends Omit<ServiceBody, "billingBasis" | "tax"> {
   readonly billingBasis: BillingBasis | null;
+  /** `{}` when the body states none. */
+  readonly tax: ServiceTaxes;
 }
 
 /**
@@ -1160,8 +1181,10 @@ const SERVICE_FIELDS = [
   "volumeLimits",
   "exclusions",
   "workflowTemplateKey",
+  "tax",
 ];
 const LIST_PRICE_FIELDS = ["amount", "currency"];
+const SERVICE_TAX_FIELDS = ["sac", "ratePercent"];
 
 /** The two reporting axes, with what each one is FOR — the error has to say
  *  that, because "must match a pattern" tells a person nothing about whether
@@ -1313,7 +1336,74 @@ function validateServiceBody(body: Record<string, unknown>): string | null {
     }
   }
 
-  return validateListPrice(body["listPrice"]);
+  return validateServiceTax(body["tax"]) ?? validateListPrice(body["listPrice"]);
+}
+
+/** A tax rate as a service states it: 0 to 100, at most two places (0.25%,
+ *  0.1% and 7.5% are real GST rates). */
+function isServiceTaxRate(v: string): boolean {
+  if (!/^\d{1,3}(\.\d{1,2})?$/.test(v)) return false;
+  const [whole = "0", frac = ""] = v.split(".");
+  return Number(whole) < 100 || (Number(whole) === 100 && /^0*$/.test(frac));
+}
+
+/** The `tax` block (Q056): per issuing country, a SAC (India only) and a rate. */
+function validateServiceTax(raw: unknown): string | null {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    return (
+      `"tax" must be an object keyed by the issuing company's country, like ` +
+      `{ "IN": { "sac": "998222", "ratePercent": "18" } }, or null. Got ${describe(raw)}`
+    );
+  }
+  for (const [country, entry] of Object.entries(raw as Record<string, unknown>)) {
+    if (!/^[A-Z]{2}$/.test(country)) {
+      return `"tax" is keyed by a two-letter country code in capitals, like "IN"; got ${describe(country)}`;
+    }
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      return `"tax.${country}" must be an object like { "sac": "998222", "ratePercent": "18" }, got ${describe(entry)}`;
+    }
+    const e = entry as Record<string, unknown>;
+    const unknown = unknownFields(e, SERVICE_TAX_FIELDS);
+    if (unknown) return `"tax.${country}" has ${unknown}`;
+    const sac = e["sac"];
+    if (sac !== undefined && sac !== null) {
+      if (country !== "IN") {
+        return `"tax.${country}.sac": a SAC is India's service code, and only "tax.IN" carries one.`;
+      }
+      if (typeof sac !== "string" || !isSac(sac)) {
+        return (
+          `"tax.IN.sac" is the service's SAC: six digits starting 99, like "998222" for accounting ` +
+          `and bookkeeping. Got ${describe(sac)}`
+        );
+      }
+    }
+    const rate = e["ratePercent"];
+    if (rate !== undefined && rate !== null) {
+      if (typeof rate !== "string" || !isServiceTaxRate(rate)) {
+        return (
+          `"tax.${country}.ratePercent" is a percentage STRING from "0" to "100" with at most two ` +
+          `decimal places, like "18" or "0.25". Got ${describe(rate)}`
+        );
+      }
+    }
+  }
+  return null;
+}
+
+/** The `tax` block out of a stored body: entries that do not read are dropped,
+ *  never guessed at. */
+function readServiceTax(raw: unknown): ServiceTaxes {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
+  const out: Record<string, ServiceTax> = {};
+  for (const [country, entry] of Object.entries(raw as Record<string, unknown>)) {
+    if (!/^[A-Z]{2}$/.test(country) || typeof entry !== "object" || entry === null) continue;
+    const e = entry as Record<string, unknown>;
+    const sac = typeof e["sac"] === "string" && isSac(e["sac"]) ? e["sac"] : null;
+    const rate = typeof e["ratePercent"] === "string" && isServiceTaxRate(e["ratePercent"]) ? e["ratePercent"] : null;
+    if (sac !== null || rate !== null) out[country] = { sac, ratePercent: rate };
+  }
+  return out;
 }
 
 /** A day count the product will store: a whole, non-negative number of days
@@ -1486,6 +1576,7 @@ export function readServiceBody(body: Record<string, unknown>): StoredServiceBod
     volumeLimits: readText(body["volumeLimits"]),
     exclusions: readText(body["exclusions"]),
     workflowTemplateKey: readText(body["workflowTemplateKey"]),
+    tax: readServiceTax(body["tax"]),
   };
 }
 

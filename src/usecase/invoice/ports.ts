@@ -10,6 +10,7 @@ import type {
   InvoiceBalance,
   InvoiceLine,
   InvoiceStatus,
+  InvoiceTaxSnapshot,
   InvoiceTotals,
   NumberOutOfOrder,
   Payment,
@@ -58,7 +59,11 @@ export type CreditNoteOutcome =
  * would take back more than was received. Decided under the invoice's row
  * lock. A payment above what is owed is recorded (a credit; see the error).
  */
-export type PaymentOutcome = { readonly payment: Payment } | { readonly paid: string };
+export type PaymentOutcome =
+  | { readonly payment: Payment }
+  | { readonly paid: string }
+  /** Q057: a TDS reversal larger than the TDS recorded. */
+  | { readonly tds: string };
 
 /** A cancellation, or the money that stopped it (B05). */
 export type CancelOutcome = { readonly cancelled: Invoice } | { readonly paid: string };
@@ -76,7 +81,7 @@ export type IssueOutcome =
  *  message is the refusal's own, so the screen can show it where Issue is
  *  offered; the API still decides at issue. */
 export interface IssueBlocked {
-  readonly reason: "INVOICE_NUMBER_OUT_OF_ORDER";
+  readonly reason: "INVOICE_NUMBER_OUT_OF_ORDER" | "PLACE_OF_SUPPLY_UNKNOWN" | "INVOICE_LINE_NEEDS_SAC";
   readonly message: string;
 }
 
@@ -88,6 +93,59 @@ export interface IssueOn {
   readonly financialYear: number;
   readonly fiscalYearStartMonth: number;
   readonly dueOnIfUnset: string | null;
+  /** What it says about tax (Q056), decided for the issue date and frozen by
+   *  this same write. */
+  readonly tax: InvoiceTaxSnapshot;
+  /** Lines with no SAC that the catalogue now gives one, filled in this write. */
+  readonly fillSacs: readonly { readonly lineId: string; readonly sac: string }[];
+}
+
+/**
+ * What decides an invoice's tax (Q056), read for one day: the issuing
+ * company's and the client's GSTIN and country, the client's address state,
+ * the LUT the company holds for the year, the bank account the invoice prints,
+ * the TDS the client deducts, and each line's SAC beside the one the catalogue
+ * gives its service. Pure facts; `domain/invoice/gst.ts` decides.
+ */
+export interface InvoiceTaxFacts {
+  readonly supplierCountry: string | null;
+  readonly supplierGstin: string | null;
+  readonly recipientName: string;
+  readonly recipientCountry: string | null;
+  readonly recipientGstin: string | null;
+  readonly recipientRegion: string | null;
+  readonly recipientHasAddress: boolean;
+  /** The company's live LUT for the asked financial year, or null. */
+  readonly lutId: string | null;
+  /** The live account for the invoice's currency, else the company's general one. */
+  readonly bankAccountId: string | null;
+  readonly clientTds: ClientTds | null;
+  readonly lines: readonly {
+    readonly id: string;
+    readonly description: string;
+    readonly sac: string | null;
+    /** The catalogue's SAC for the line's service, from the issuing company's country. */
+    readonly serviceSac: string | null;
+  }[];
+}
+
+/** Q057: the TDS a client deducts on the firm's fees. */
+export interface ClientTds {
+  readonly section: string;
+  readonly percent: string;
+}
+
+/** A bank account as an invoice prints it (0369). */
+export interface BankAccountView {
+  readonly id: string;
+  readonly accountName: string;
+  readonly accountNumber: string;
+  readonly bankName: string;
+  readonly branch: string | null;
+  readonly ifsc: string | null;
+  readonly swift: string | null;
+  readonly iban: string | null;
+  readonly currency: string | null;
 }
 
 /**
@@ -115,6 +173,8 @@ export interface NewInvoiceLine {
   readonly currency: string;
   readonly discountPercent: string;
   readonly taxPercent: string;
+  /** The service's SAC (Q056): from the catalogue, or typed; null when none. */
+  readonly sac: string | null;
 }
 
 /** An invoice with everything a screen renders it from — the joined read model
@@ -144,6 +204,10 @@ export interface InvoiceRecord {
     readonly companyDefault: string | null;
     readonly byEngagement: readonly { readonly engagementId: string; readonly taxPercent: string }[];
   };
+  /** The LUT this invoice names (an export under one), or null. */
+  readonly lut: { readonly id: string; readonly reference: string; readonly financialYear: number } | null;
+  /** Where the client pays (0369), or null when the company has no account. */
+  readonly bankAccount: BankAccountView | null;
 }
 
 /** The invoice as the screen reads it: the record, and whether Issue would be
@@ -161,6 +225,11 @@ export interface InvoiceLineRecord {
    *  impossible here: an invoice line always has an amount. */
   readonly net: string;
   readonly tax: string;
+  /** The tax by component (0370): zero where it does not apply. */
+  readonly cgst: string;
+  readonly sgst: string;
+  readonly utgst: string;
+  readonly igst: string;
 }
 
 export interface InvoiceSummary {
@@ -190,6 +259,8 @@ export interface InvoiceSummary {
     readonly paid: string;
     readonly credited: string;
     readonly outstanding: string;
+    /** TDS the client deducted (Q057). */
+    readonly tds: string;
   } | null;
 }
 
@@ -274,6 +345,37 @@ export interface InvoiceRepository {
   /** Whose engagement this is and who signed for it. Null when there is no
    *  such engagement at this firm. */
   engagementOf(tenantId: string, engagementId: string): Promise<EngagementBilling | null>;
+
+  // ── The GST tax invoice (Q056, Q057) ─────────────────────────────────────
+
+  /** What decides the invoice's tax, as it stands on `onDay`, with the LUT for
+   *  `financialYear`. */
+  taxFacts(
+    tenantId: string,
+    invoiceId: string,
+    on: { readonly onDay: string; readonly financialYear: number },
+  ): Promise<InvoiceTaxFacts>;
+  /** A DRAFT's tax snapshot, and empty line SACs the catalogue now fills.
+   *  `status = 'draft'` in the write. */
+  setDraftTax(
+    tenantId: string,
+    invoiceId: string,
+    tax: InvoiceTaxSnapshot,
+    fillSacs: readonly { readonly lineId: string; readonly sac: string }[],
+  ): Promise<Invoice>;
+  /** A DRAFT line's SAC (null clears it). */
+  setLineSac(tenantId: string, invoiceId: string, lineId: string, sac: string | null): Promise<void>;
+  /** How the catalogue taxes the service an engagement delivers, for the
+   *  issuing company's country: its SAC (India) and rate, either null. Null
+   *  when the engagement names no catalogue service. */
+  serviceTaxFor(
+    tenantId: string,
+    engagementId: string,
+    issuerPartyId: string,
+  ): Promise<{ readonly sac: string | null; readonly ratePercent: string | null } | null>;
+  clientTds(tenantId: string, partyId: string): Promise<ClientTds | null>;
+  /** Set, change or (null) stop a client's TDS. */
+  setClientTds(tenantId: string, partyId: string, tds: ClientTds | null): Promise<void>;
 
   /**
    * Issue it AND take its number, in ONE transaction (0322; the number was
@@ -374,6 +476,8 @@ export interface NewPayment {
   readonly method: PaymentMethod;
   readonly reference: string | null;
   readonly note: string | null;
+  /** Q057: the TDS the client deducted, signed like the amount; "0" for none. */
+  readonly tdsAmount: string;
 }
 
 export interface NewCreditNote {

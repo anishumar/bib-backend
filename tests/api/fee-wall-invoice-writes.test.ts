@@ -23,7 +23,7 @@ import { AdvanceDesk } from "../../src/usecase/billing/advance";
 import { FinalBiller } from "../../src/usecase/billing/final";
 import { AuthzService } from "../../src/usecase/authz/service";
 import { withDefaultRoles } from "../../src/testfakes/config";
-import { FakeFirmEntities, makeInvoiceFakes } from "../../src/testfakes/invoice";
+import { FakeFirmEntities, makeInvoiceFakes, makeCompanyInvoicing } from "../../src/testfakes/invoice";
 import { FakeDunningLadder, FakeDunningRepo } from "../../src/testfakes/dunning";
 import { FakeTenantDirectory } from "../../src/testfakes/scheduler";
 import {
@@ -74,6 +74,7 @@ function world() {
   registerInvoiceRoutes(app, {
     authz,
     service: new InvoiceService(makeInvoiceFakes()),
+    companies: makeCompanyInvoicing(),
     dunning: new DunningService({
       timeZones: new FakeFirmTimeZone(),
       dunning: new FakeDunningRepo(),
