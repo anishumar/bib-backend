@@ -10,7 +10,7 @@ import {
   parseSheetDate,
   personRowsOf,
   rowsOf,
-  validateImport,
+  mainCurrency, validateImport,
   type ClientRow,
   type EngagementRow,
   type ImportSnapshot,
@@ -743,12 +743,21 @@ describe("an engagement row", () => {
     expect(report.letters[0]?.signatory).toBe(MIGRATED_SIGNATORY);
   });
 
-  it("splits two currencies on one client into two letters", () => {
+  it("puts two currencies on one client on ONE letter, its lines in their own (0345)", () => {
     const report = validateImport(
       { clients: [client()], people: [], engagements: [engagement(), engagement({ lineNo: 3, serviceCode: "H1", billed: "monthly", fee: "500", currency: "usd" })] },
       snapshot(),
     );
-    expect(report.letters.map((l) => l.currency).sort()).toEqual(["INR", "USD"]);
+    expect(report.letters).toHaveLength(1);
+    // The firm's own currency is the main one when any line is in it.
+    expect(report.letters[0]?.currency).toBe("INR");
+    expect(report.letters[0]?.lines.map((l) => l.currency).sort()).toEqual(["INR", "USD"]);
+  });
+
+  it("makes the most common currency the main one when none is the firm's", () => {
+    expect(mainCurrency(["USD", "AED", "USD"], "INR")).toBe("USD");
+    expect(mainCurrency(["USD", "AED"], "INR")).toBe("AED");
+    expect(mainCurrency(["AED", "INR"], "INR")).toBe("INR");
   });
 
   it("bills a group's company on the group's letter, under the group's own country", () => {

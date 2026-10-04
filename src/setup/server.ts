@@ -27,6 +27,7 @@ import {
 } from "../infrastructure/postgres/identity-repository";
 import { ScryptPasswordHasher } from "../infrastructure/crypto/scrypt-hasher";
 import { RandomTokenFactory, Sha256ContentHasher } from "../infrastructure/crypto/random-tokens";
+import { fxServiceFor } from "./fx";
 import { mailerFor } from "./mailer";
 import { PostgresFirmTimeZone } from "../infrastructure/postgres/firm-timezone-repository";
 
@@ -637,6 +638,10 @@ export function wire(cfg: Config, log: Logger): Wired {
     firmEntities: documents,
   });
 
+  // EXCHANGE RATES (0345): the day's rate from the feed, as a suggestion for a
+  // document's rate box and to value reports at today's rate.
+  const fx = fxServiceFor(cfg, pools.app, systemClock);
+
   // THE LEADERSHIP FIGURES (T3.7). No writes: every number is derived from
   // rows at read time. The clock and the firm's timezone are for the one
   // figure cut by month (billing by company, Wave 5): which month the FIRM is
@@ -646,6 +651,8 @@ export function wire(cfg: Config, log: Logger): Wired {
     timeZones: new PostgresFirmTimeZone(pools.app),
     fiscalYears: configRepository,
     clock: systemClock,
+    // Today's rate is asked before the by-currency report reads it (0345).
+    rates: fx,
   });
 
   // SETUP READINESS (V2.6). Read-only: eight lines computed from one read, on
@@ -1330,6 +1337,7 @@ export function wire(cfg: Config, log: Logger): Wired {
     parties: party,
     assignments: clientAssignments,
     letters: engagement,
+    rates: fx,
     timeZones: new PostgresFirmTimeZone(pools.app),
     portalInvites: portalInvite,
     portalAccess,
@@ -1413,6 +1421,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         filestore: { service: fileStore, authz },
         dashboard: { service: dashboards, authz },
         readiness: { service: readiness },
+        fx: { service: fx },
       },
       log,
       {

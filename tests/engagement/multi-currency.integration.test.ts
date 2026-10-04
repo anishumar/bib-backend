@@ -347,3 +347,54 @@ describe("a proposal in two currencies, in SQL (0344)", () => {
     expect(total?.kind === "paragraph" ? total.text : "").toBe("₹5,000 Monthly + AED 4,000 Monthly");
   });
 });
+
+// ── 0345: the feed's rates, and the report at today's rate ──────────────────
+// Days in 2098/2099, so no real "today" ever reads these rows.
+import { PostgresFxRateStore } from "../../src/infrastructure/postgres/fx-rate-repository";
+import { PostgresDashboardRepository } from "../../src/infrastructure/postgres/dashboard-repository";
+
+const fxStore = new PostgresFxRateStore(c.app);
+
+describe("the exchange-rate table (0345)", () => {
+  it("divides two rows of the same day exactly, keeps a day as first written, and falls back a day", async () => {
+    const day = "2098-12-30";
+    await fxStore.save({ day, source: "Currency API", perUsd: new Map([["USD", "1"], ["INR", "88.7512"], ["AED", "3.6725"]]) });
+    // A second feed for the same day changes nothing.
+    expect(await fxStore.save({ day, source: "ExchangeRate-API", perUsd: new Map([["INR", "1"], ["AED", "1"]]) })).toBe(0);
+    expect(await fxStore.rateOn("AED", "INR", day)).toEqual({
+      currency: "AED", reporting: "INR", fxRate: "24.1664261402", fxRateDate: day, source: "Currency API",
+    });
+    expect((await fxStore.rateOn("AED", "INR", "2098-12-31"))?.fxRateDate).toBe(day);
+    expect((await fxStore.rateAfter("AED", "INR", "2098-12-01"))?.fxRateDate).toBe(day);
+    // The app may add a day and nothing else.
+    await expect(
+      withTenant(c.app, tenant, (db) => db`UPDATE fx.daily_rate SET per_usd = 1 WHERE day = ${day}`),
+    ).rejects.toThrow(/permission denied/);
+  });
+});
+
+describe("recurring fees by currency (0345)", () => {
+  it("values each currency at the signed rate and at the day's rate, and the signed total is MRR", async () => {
+    const id = await twoCurrencyLetter();
+    await letters.addClause(tenant, id, scope);
+    await letters.send(tenant, id, SYSTEM_ACTOR);
+    await letters.sign({ tenantId: tenant, letterId: id, signedByName: "Rania Haddad", reference: `mc-fx-${id}` }, SYSTEM_ACTOR);
+    await fxStore.save({ day: "2099-01-01", source: "Currency API", perUsd: new Map([["USD", "1"], ["INR", "88"], ["AED", "4"]]) });
+
+    const dashboards = new PostgresDashboardRepository(c.app);
+    const report = await dashboards.mrrByCurrency(tenant, "2099-01-01");
+    expect(report.currencies.map((x) => x.currency)).toEqual(["INR", "AED"]);
+    const aed = report.currencies[1];
+    expect(aed?.todaysRate).toEqual({ fxRate: "22", fxRateDate: "2099-01-01", source: "Currency API" });
+    // AED a month x 22.75 signed, x 22 today, exactly.
+    const times = (amount: string, k: bigint) => {
+      const units = BigInt(amount.replace(".", "")) * k;
+      const s = units.toString().padStart(5, "0");
+      return `${s.slice(0, -4)}.${s.slice(-4)}`;
+    };
+    expect(aed?.atTodaysRate).toBe(times(aed?.monthly ?? "0", 22n));
+    expect(report.currencies[0]?.todaysRate?.source).toBe("Same currency");
+    expect(report.totalAtSignedRates).toBe((await dashboards.mrr(tenant)).monthly);
+    expect(report.clients.every((x) => x.name === "Dune Traders")).toBe(true);
+  });
+});

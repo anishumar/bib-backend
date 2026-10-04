@@ -895,8 +895,11 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // who may read every client is not automatically somebody who may see what the
   // firm earns. Putting it in this table would collapse the two into one, which
   // is the thing the fifth axis exists to prevent.
+  // A public market rate, as a suggestion for a rate box (0345).
+  [routeKey("GET", "/api/v1/fx/quote"), "party:read" as const],
   [routeKey("GET", "/api/v1/dashboard/overview"), "party:read" as const],
   [routeKey("GET", "/api/v1/dashboard/mrr/{axis}"), "party:read" as const],
+  [routeKey("GET", "/api/v1/dashboard/mrr-by-currency"), "party:read" as const],
   [routeKey("GET", "/api/v1/dashboard/receivables/by-client"), "party:read" as const],
   [routeKey("GET", "/api/v1/dashboard/revenue/by-company"), "party:read" as const],
   [routeKey("GET", "/api/v1/dashboard/revenue/by-manager"), "party:read" as const],

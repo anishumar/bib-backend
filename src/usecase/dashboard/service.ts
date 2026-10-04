@@ -11,13 +11,14 @@ import type {
   ManagerMonth,
   ManagerRevenue,
   MonthBilling,
+  MrrByCurrency,
   Slice,
 } from "../../domain/dashboard/model";
 import { billingWindow, daysSalesOutstanding } from "../../domain/dashboard/model";
 import { defaultCurrencyFor } from "../../domain/document/model";
 import { dayInZone } from "../../domain/scheduler/zone";
 import type { Clock } from "../../platform/clock";
-import type { DashboardRepository, FirmTimeZone, FiscalYearSource, ManagerMonthRow } from "./ports";
+import type { DashboardRepository, FirmTimeZone, FiscalYearSource, ManagerMonthRow, RateWarmer } from "./ports";
 
 export interface Deps {
   readonly dashboards: DashboardRepository;
@@ -27,6 +28,9 @@ export interface Deps {
    *  year" in any country (India April, the UK April, the US January). */
   readonly fiscalYears: FiscalYearSource;
   readonly clock: Clock;
+  /** Today's rates, asked before the by-currency report reads them (0345).
+   *  Absent: the report reads whatever rates are held. */
+  readonly rates?: RateWarmer | undefined;
 }
 
 /** What `revenueByCompany` answers. */
@@ -156,6 +160,27 @@ export class DashboardService {
   /** MRR split by client or by service, biggest first. */
   async mrrBy(tenantId: string, axis: "client" | "service"): Promise<readonly Slice[]> {
     return this.deps.dashboards.mrrBy(tenantId, axis);
+  }
+
+  /**
+   * Recurring fees by currency (0345, Q009): each currency in itself, at the
+   * rates the letters were signed at (what MRR counts, unchanged), and at
+   * today's rate, with that rate's date and source. Today's rate is asked of
+   * the exchange-rate service first, so a feed day not yet fetched is.
+   */
+  async mrrByCurrency(tenantId: string): Promise<MrrByCurrency> {
+    const today = await this.firmDay(tenantId);
+    const rates = this.deps.rates;
+    if (rates !== undefined) {
+      const [reporting, currencies] = await Promise.all([
+        this.deps.dashboards.reportingCurrency(tenantId),
+        this.deps.dashboards.mrrCurrencies(tenantId),
+      ]);
+      await Promise.all(
+        currencies.filter((c) => c !== reporting).map((c) => rates.quotePair(c, reporting, today)),
+      );
+    }
+    return this.deps.dashboards.mrrByCurrency(tenantId, today);
   }
 
   /** Who owes the firm money, biggest first. */

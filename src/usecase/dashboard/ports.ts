@@ -7,7 +7,7 @@
 // cached columns". A port that returned rows for this service to sum in
 // TypeScript would be a second implementation of arithmetic the database
 // already does, and the two would eventually disagree.
-import type { AgeingBand, MrrGap, Slice } from "../../domain/dashboard/model";
+import type { AgeingBand, MrrByCurrency, MrrGap, Slice } from "../../domain/dashboard/model";
 
 export interface MrrTotals {
   /** Decimal string in the firm's reporting currency. "0" when nothing counts. */
@@ -31,6 +31,14 @@ export interface DashboardRepository {
    *  ENTRY, so a service the firm has since republished does not fragment into
    *  one slice per version. */
   mrrBy(tenantId: string, axis: "client" | "service"): Promise<readonly Slice[]>;
+
+  /** The currencies the counted recurring fees are in (0345). */
+  mrrCurrencies(tenantId: string): Promise<readonly string[]>;
+
+  /** Recurring fees per currency and per client x currency, at the signed
+   *  rates and at the latest rate held on or before `day` (0345). Summed in
+   *  SQL. `asOf` in the answer is `day`. */
+  mrrByCurrency(tenantId: string, day: string): Promise<MrrByCurrency>;
 
   /** Bucketed as of `day`, the FIRM's calendar day (audit 2026-10-03, B29):
    *  the database's own day is UTC, which is yesterday in India until 05:30. */
@@ -86,6 +94,12 @@ export interface DashboardRepository {
 }
 
 /** A billing window as two days: `from` inclusive, `until` exclusive. */
+/** Makes sure today's rate for a currency is held before a report reads it:
+ *  the exchange-rate service's read-through (0345), structurally. */
+export interface RateWarmer {
+  quotePair(currency: string, reporting: string, on: string): Promise<unknown>;
+}
+
 export interface BillingWindowDays {
   readonly from: string;
   readonly until: string;

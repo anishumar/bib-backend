@@ -51,6 +51,7 @@ import {
 } from "../infrastructure/postgres/advance-reminders";
 import { invoiceIssuedCopies } from "./invoice-copies";
 import { logDunningSweep, logOrchestratorSweep, logSpawnSweep } from "./sweep-log";
+import { fxServiceFor } from "./fx";
 import { mailerFor } from "./mailer";
 import { PostgresAdvanceBillFacts, PostgresFinalBillFacts } from "../infrastructure/postgres/billing-facts";
 import { EscalationService } from "../usecase/escalation/service";
@@ -231,6 +232,10 @@ export const NUDGE_QUEUE = "delivery.nudge";
  * than a shared one.
  */
 export const CREDENTIAL_SWEEP_QUEUE = "platform.credential-sweep";
+
+/** The day's exchange rates (0345): PLATFORM-wide like the credential sweep,
+ *  because a rate is public data and one fetch serves every firm. */
+export const FX_REFRESH_QUEUE = "platform.fx-refresh";
 
 /**
  * The queue the signature sweep runs on (0080): asks the e-sign provider how
@@ -605,6 +610,8 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
   // adapters rather than stand-ins, because a stand-in that threw would be a
   // stub waiting for somebody to call it; they cost a constructor each.
   const esign = esignFor(cfg, log);
+  // THE DAY'S EXCHANGE RATES (0345), fetched once for every firm.
+  const fx = fxServiceFor(cfg, pools.app, systemClock);
   const documentRepository = new PostgresDocumentRepository(pools.app);
   const documents = new DocumentService({
     preferences: documentRepository,
@@ -1093,6 +1100,19 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
         }
       });
       await queue.schedule(NUDGE_QUEUE, cfg.worker.escalationCron);
+
+      // THE DAY'S EXCHANGE RATES. See FX_REFRESH_QUEUE. A feed that is down is
+      // logged and left: the rates already held answer meanwhile, and the
+      // read-through asks again when a rate box needs one.
+      await queue.register(FX_REFRESH_QUEUE, async () => {
+        const r = await fx.refresh();
+        if (r.failure !== undefined) {
+          log.error({ failure: r.failure }, "exchange-rate refresh failed");
+          return;
+        }
+        log.info({ day: r.day, source: r.source, saved: r.saved }, "exchange-rate refresh");
+      });
+      await queue.schedule(FX_REFRESH_QUEUE, cfg.worker.fxCron);
 
       // THE CREDENTIAL SWEEP. See CREDENTIAL_SWEEP_QUEUE: platform-wide rather
       // than per firm, because sessions and magic links are global.

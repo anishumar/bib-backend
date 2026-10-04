@@ -308,6 +308,17 @@ export interface AssignmentWriter {
   ): Promise<unknown>;
 }
 
+/** The exchange-rate feed's rate for a currency in the firm's own currency on
+ *  a day (0345): the exchange-rate service, structurally. Null when nobody
+ *  publishes one. */
+export interface ImportRates {
+  quote(
+    tenantId: string,
+    currency: string,
+    on: string,
+  ): Promise<{ readonly fxRate: string; readonly fxRateDate: string; readonly source: string } | null>;
+}
+
 export interface LetterWriter {
   draft(
     input: {
@@ -338,7 +349,21 @@ export interface LetterWriter {
     readonly jurisdiction?: string | undefined;
     readonly billingFrequency?: string | undefined;
     readonly pricingNote?: string | undefined;
+    /** The line's own currency (0344), rated on the letter first. */
+    readonly currency?: string | undefined;
   }): Promise<unknown>;
+  /** A rate for one of the letter's OTHER currencies (0344). */
+  setRate(
+    input: {
+      readonly tenantId: string;
+      readonly letterId: string;
+      readonly currency: string;
+      readonly fxRate: string;
+      readonly fxRateDate: string;
+      readonly source?: string | undefined;
+    },
+    actor: Actor,
+  ): Promise<unknown>;
   addClause(tenantId: string, letterId: string, clauseVersionId: string): Promise<void>;
   /** `migrated: true` always: the client signed on paper, so the provider
    *  must not raise an envelope and email them the contract a second time. */

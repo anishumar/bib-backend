@@ -20,6 +20,7 @@ import type {
   IdentifierHolder,
   ImportDirectory,
   ImportOutcome,
+  ImportRates,
   LetterWriter,
   NewStagedImport,
   OrganizationOnFile,
@@ -301,6 +302,22 @@ export class RecordingAssignmentWriter extends Recorder implements AssignmentWri
   }
 }
 
+/** The feed's rates for an import, as a test states them (0345): one for the
+ *  firm's own currency, `rates` for the rest, null for anything else. */
+export class FixedImportRates implements ImportRates {
+  constructor(
+    readonly rates: Record<string, string> = { USD: "84.1", AED: "22.75", SGD: "64.5", GBP: "112.3" },
+    readonly firmCurrency = "INR",
+  ) {}
+  readonly asked: { currency: string; on: string }[] = [];
+  quote(_tenantId: string, currency: string, on: string) {
+    this.asked.push({ currency, on });
+    if (currency === this.firmCurrency) return Promise.resolve({ fxRate: "1", fxRateDate: on, source: "Same currency" });
+    const rate = this.rates[currency];
+    return Promise.resolve(rate === undefined ? null : { fxRate: rate, fxRateDate: on, source: "Currency API" });
+  }
+}
+
 export class RecordingLetterWriter extends Recorder implements LetterWriter {
   constructor() {
     super("letter");
@@ -311,6 +328,10 @@ export class RecordingLetterWriter extends Recorder implements LetterWriter {
   }
   addLine(input: Parameters<LetterWriter["addLine"]>[0]) {
     this.record("addLine", input);
+    return Promise.resolve();
+  }
+  setRate(input: Parameters<LetterWriter["setRate"]>[0], _actor: Actor) {
+    this.record("setRate", input);
     return Promise.resolve();
   }
   addClause(tenantId: string, letterId: string, clauseVersionId: string): Promise<void> {

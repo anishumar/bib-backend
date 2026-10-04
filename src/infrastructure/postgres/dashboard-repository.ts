@@ -13,7 +13,7 @@
 // the whole arrangement at the last possible moment.
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
-import type { AgeingBucket, MrrExclusion, Slice } from "../../domain/dashboard/model";
+import type { AgeingBucket, MrrByCurrency, MrrExclusion, Slice } from "../../domain/dashboard/model";
 import { AGEING_BUCKETS } from "../../domain/dashboard/model";
 import type {
   BillingCompany,
@@ -116,6 +116,108 @@ export class PostgresDashboardRepository implements DashboardRepository {
         ORDER BY sum(m.monthly_reporting) DESC
       `;
       return rows.map((r) => this.toSlice(r));
+    });
+  }
+
+  async mrrCurrencies(tenantId: string): Promise<readonly string[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<{ currency: string }[]>`
+        SELECT DISTINCT currency FROM crm.engagement_mrr
+         WHERE status = 'active' AND excluded_because IS NULL
+      `;
+      return rows.map((r) => r.currency);
+    });
+  }
+
+  async mrrByCurrency(tenantId: string, day: string): Promise<MrrByCurrency> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [firm] = await db<{ code: string }[]>`
+        SELECT reporting_currency AS code FROM tenancy.tenant WHERE id = ${tenantId}
+      `;
+      const reporting = firm?.code ?? "INR";
+      // ONE pass, three groupings: per currency, per client x currency, and
+      // the firm. The same rows MRR counts (active, priced, recurring), so
+      // the signed-rate total IS the MRR card's figure. Today's value is each
+      // engagement's monthly amount at the latest rate held on or before the
+      // firm's day (`fx.rate_on`, 0345), rounded like the view rounds.
+      const rows = await db<
+        {
+          g_party: number;
+          g_currency: number;
+          party_id: string | null;
+          name: string | null;
+          currency: string | null;
+          monthly: string | null;
+          at_signed: string | null;
+          at_today: string | null;
+          n: number;
+          fx_rate: string | null;
+          rate_day: string | null;
+          source: string | null;
+        }[]
+      >`
+        WITH m AS (
+          SELECT party_id, currency, monthly_amount, monthly_reporting
+            FROM crm.engagement_mrr
+           WHERE status = 'active' AND excluded_because IS NULL
+        ),
+        r AS (
+          SELECT c.currency,
+                 CASE WHEN c.currency = ${reporting} THEN 1::numeric ELSE q.fx_rate END AS fx_rate,
+                 CASE WHEN c.currency = ${reporting} THEN ${day}::date ELSE q.rate_day END AS rate_day,
+                 CASE WHEN c.currency = ${reporting} THEN 'Same currency' ELSE q.source END AS source
+            FROM (SELECT DISTINCT currency FROM m) c
+            LEFT JOIN LATERAL fx.rate_on(c.currency, ${reporting}, ${day}::date) q ON true
+        )
+        SELECT GROUPING(m.party_id)::int AS g_party, GROUPING(m.currency)::int AS g_currency,
+               m.party_id, max(p.display_name) AS name, m.currency,
+               sum(m.monthly_amount)::text AS monthly,
+               sum(m.monthly_reporting)::text AS at_signed,
+               CASE WHEN bool_and(r.fx_rate IS NOT NULL)
+                    THEN sum(round(m.monthly_amount * r.fx_rate, 4))::text END AS at_today,
+               count(*)::int AS n,
+               max(r.fx_rate)::text AS fx_rate, max(r.rate_day)::text AS rate_day, max(r.source) AS source
+          FROM m
+          JOIN core.party p ON p.id = m.party_id
+          JOIN r ON r.currency = m.currency
+         GROUP BY GROUPING SETS ((m.currency), (m.party_id, m.currency), ())
+         ORDER BY sum(m.monthly_reporting) DESC NULLS LAST, m.currency
+      `;
+      const total = rows.find((x) => x.g_party === 1 && x.g_currency === 1);
+      const trim = (v: string): string => (v.includes(".") ? v.replace(/0+$/, "").replace(/\.$/, "") : v);
+      return {
+        reportingCurrency: reporting,
+        asOf: day,
+        currencies: rows
+          .filter((x) => x.g_party === 1 && x.g_currency === 0 && x.currency !== null)
+          .sort((a, b) =>
+            a.currency === reporting ? -1 : b.currency === reporting ? 1 : (a.currency ?? "").localeCompare(b.currency ?? ""),
+          )
+          .map((x) => ({
+            currency: x.currency ?? "",
+            monthly: x.monthly ?? "0",
+            atSignedRates: x.at_signed ?? "0",
+            atTodaysRate: x.at_today,
+            todaysRate:
+              x.fx_rate === null || x.rate_day === null || x.source === null
+                ? null
+                : { fxRate: trim(x.fx_rate), fxRateDate: x.rate_day, source: x.source },
+            engagements: x.n,
+          })),
+        clients: rows
+          .filter((x) => x.g_party === 0 && x.party_id !== null && x.currency !== null)
+          .map((x) => ({
+            partyId: x.party_id ?? "",
+            name: x.name ?? "",
+            currency: x.currency ?? "",
+            monthly: x.monthly ?? "0",
+            atSignedRates: x.at_signed ?? "0",
+            atTodaysRate: x.at_today,
+          })),
+        totalAtSignedRates: total?.at_signed ?? "0",
+        // No engagement at all: nothing is unvalued, so zero at any rate.
+        totalAtTodaysRate: total === undefined || total.n === 0 ? "0" : total.at_today,
+      };
     });
   }
 
