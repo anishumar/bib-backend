@@ -22,6 +22,7 @@ import type { Clock } from "../../platform/clock";
 import type { Actor } from "../../domain/ledger/model";
 import type { EventSink } from "../ledger/ports";
 import { dayInZone } from "../../domain/scheduler/zone";
+import { yearStartOfCompany, zoneOfCompany } from "../../domain/calendar/model";
 import { addDays, periodsFrom, recurrenceOfService } from "../../domain/scheduler/model";
 import { isCalendarDay } from "../../domain/engagement/model";
 import { scheduleNotice } from "../../domain/billing/model";
@@ -210,12 +211,17 @@ export class BillingDeskService {
 
   /** Recurring engagements with no schedule, each with the default to offer. */
   async unscheduled(tenantId: string): Promise<readonly UnscheduledRecord[]> {
-    const today = await this.today(tenantId);
-    const fiscalYear = await this.deps.fiscalYears.fiscalYearStartMonth(tenantId);
+    const now = this.deps.clock.now().toISOString();
+    const firmZone = await this.deps.timeZones.timeZoneFor(tenantId);
+    const firmYear = await this.deps.fiscalYears.fiscalYearStartMonth(tenantId);
+    const calendars = await this.deps.timeZones.companyCalendars(tenantId);
     const rows = await this.deps.schedules.unscheduled(tenantId);
     return rows
       .filter((r) => SCHEDULED_FREQUENCIES.includes(r.billingFrequency ?? ""))
       .map((r) => {
+        // The letter's company's year and day (0337), else the firm's.
+        const fiscalYear = yearStartOfCompany(calendars, r.issuingEntityPartyId, firmYear);
+        const today = dayInZone(now, zoneOfCompany(calendars, r.issuingEntityPartyId, firmZone));
         const recurrence = recurrenceOfService(r.billingFrequency);
         if (recurrence === null || (recurrence !== "monthly" && fiscalYear === null)) {
           return { ...r, suggestion: null };
@@ -719,7 +725,12 @@ export class BillingDeskService {
       }
       const recurrence = recurrenceOfService(current.billingFrequency);
       if (recurrence === null) throw new NotBilledOnASchedule(current.billingFrequency ?? "unset");
-      const fiscalYear = await this.deps.fiscalYears.fiscalYearStartMonth(input.tenantId);
+      // The letter's company's year (0337), else the firm's.
+      const fiscalYear = yearStartOfCompany(
+        await this.deps.timeZones.companyCalendars(input.tenantId),
+        current.issuingEntityPartyId,
+        await this.deps.fiscalYears.fiscalYearStartMonth(input.tenantId),
+      );
       if (recurrence !== "monthly" && fiscalYear === null) throw new FiscalYearNeeded();
       const [period] = periodsFrom(input.billingFrom, recurrence, 1, fiscalYear ?? 1);
       billingFrom = period?.start ?? input.billingFrom;

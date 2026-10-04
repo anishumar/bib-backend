@@ -744,6 +744,7 @@ async function takeFromPool(
 
 interface ScheduleRow {
   engagement_id: string;
+  issuing_entity_party_id: string;
   party_id: string;
   party_name: string;
   entity_name: string;
@@ -762,7 +763,7 @@ interface ScheduleRow {
 }
 
 const SCHEDULE_SELECT = `
-  SELECT e.id AS engagement_id, e.party_id, p.display_name AS party_name,
+  SELECT e.id AS engagement_id, l.issuing_entity_party_id, e.party_id, p.display_name AS party_name,
          ep.display_name AS entity_name,
          ll.description AS service_name,
          l.ref AS letter_ref, e.status,
@@ -785,6 +786,7 @@ const SCHEDULE_SELECT = `
 function toSchedule(r: ScheduleRow): ScheduleRecord {
   return {
     engagementId: r.engagement_id,
+    issuingEntityPartyId: r.issuing_entity_party_id,
     party: { id: r.party_id, displayName: r.party_name },
     entityName: r.entity_name,
     serviceName: r.service_name,

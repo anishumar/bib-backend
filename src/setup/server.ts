@@ -1242,6 +1242,7 @@ export function wire(cfg: Config, log: Logger): Wired {
       schedules: new PostgresBillingSchedules(pools.app),
       setting: new PostgresAutoBillingSetting(pools.app),
       fiscalYears: configRepository,
+      calendars: new PostgresFirmTimeZone(pools.app),
       events: ledger,
     }),
     letters: new PostgresEngagementRepository(pools.app),

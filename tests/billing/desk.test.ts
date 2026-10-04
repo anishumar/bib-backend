@@ -80,6 +80,7 @@ function due(over: Partial<BillingDueRecord> = {}): BillingDueRecord {
 function schedule(over: Partial<ScheduleRecord> = {}): ScheduleRecord {
   return {
     engagementId: ENG,
+    issuingEntityPartyId: ISSUER,
     party: { id: CLIENT, displayName: "Kaveri Foods" },
     entityName: "Kaveri Foods",
     serviceName: "Bookkeeping",
@@ -481,6 +482,7 @@ describe("the schedule an engagement starts with, from its letter", () => {
       schedules: w.schedules,
       setting: w.setting,
       fiscalYears: w.fiscalYears,
+      calendars: new FakeFirmTimeZone("Asia/Kolkata"),
       events: w.events,
     }).scheduleActivated({ tenantId: FIRM, engagementIds, liveOn }, ME);
 

@@ -5,6 +5,7 @@ import type { BillingTiming, ManagerHow, SpocWithManager } from "../../domain/bi
 import type { AdvancePolicy, AdvanceStage, BillKind } from "../../domain/billing/advance";
 import type { Actor } from "../../domain/ledger/model";
 import type { Invoice } from "../../domain/invoice/model";
+import type { CompanyCalendars } from "../../domain/calendar/model";
 import type { NewInvoice, NewInvoiceLine } from "../invoice/ports";
 
 /**
@@ -106,9 +107,12 @@ export interface FiscalYearSource {
   fiscalYearStartMonth(tenantId: string): Promise<number | null>;
 }
 
-/** Which calendar "today" is cut on, for a sweep with no caller (T6.14). */
+/** Which calendar "today" is cut on, for a sweep with no caller (T6.14), and
+ *  the companies that keep their own zone and year (0337): a company's bill
+ *  dates and periods are cut on ITS calendar. */
 export interface FirmTimeZone {
   timeZoneFor(tenantId: string): Promise<string>;
+  companyCalendars(tenantId: string): Promise<CompanyCalendars>;
 }
 
 // ── The desk: what a person does with a due ────────────────────────────────
@@ -610,6 +614,8 @@ export interface FinalBillFacts {
 /** One engagement's billing schedule, and what a screen needs to set it. */
 export interface ScheduleRecord {
   readonly engagementId: string;
+  /** The letter's issuing company (0337): its year cuts the periods. */
+  readonly issuingEntityPartyId: string;
   readonly party: { readonly id: string; readonly displayName: string };
   readonly entityName: string;
   readonly serviceName: string;
