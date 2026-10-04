@@ -321,6 +321,33 @@ describe("only active staff, on every rung", () => {
     expect(await owners.signingPartner(tenant)).toBeNull();
     expect(resolveOwner(facts)).toMatchObject({ userId: null, how: null });
   });
+
+  // LAST in this block: it signs a letter for the client, which every later
+  // owner question about this client would then read.
+  it("falls to the partner who signed THIS client's letter before the firm's default (0343)", async () => {
+    await owner`
+      INSERT INTO tenancy.firm_signatory (tenant_id, user_id, title)
+      VALUES (${tenant}, ${users.sid}, 'Partner') ON CONFLICT (tenant_id, user_id) DO NOTHING
+    `;
+    await owner`
+      UPDATE tenancy.tenant SET firm_signatory_user_id = ${users.sid}, firm_signatory_title = 'Partner'
+      WHERE id = ${tenant}
+    `;
+    refSeq += 1;
+    await owner`
+      INSERT INTO crm.engagement_letter
+        (id, tenant_id, party_id, jurisdiction, title, status, currency, fx_rate, fx_rate_date, ref,
+         issuing_entity_party_id, sent_at, signed_at, signed_by_name, signature_method,
+         signature_reference, signed_content_hash, firm_signatory_user_id, firm_signatory_title, firm_signed_at)
+      VALUES (${ref()}, ${tenant}, ${client}, 'IN', ${`owner-${refSeq}`}, 'signed', 'INR', 1, current_date,
+              ${`EL-2026-${refSeq}`}, ${issuer}, now(), now(), 'Client Director', 'attested', 'paper',
+              ${"a".repeat(64)}, ${users.kavya}, 'Partner', now())
+    `;
+    expect(await owners.signingPartner(tenant, client)).toMatchObject({ userId: users.kavya });
+    // Without a client, and for a client with no signed letter, the default.
+    expect(await owners.signingPartner(tenant)).toMatchObject({ userId: users.sid });
+    expect(await owners.signingPartner(tenant, ref())).toMatchObject({ userId: users.sid });
+  });
 });
 
 describe("who holds the job's task", () => {

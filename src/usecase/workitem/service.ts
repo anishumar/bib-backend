@@ -2327,7 +2327,7 @@ export class WorkItemService {
       ? await this.deps.owners.keyManagerFor(tenantId, clientPartyId, onDate)
       : null;
     const partner =
-      needFallback && keyManager === null ? await this.deps.owners.signingPartner(tenantId) : null;
+      needFallback && keyManager === null ? await this.deps.owners.signingPartner(tenantId, clientPartyId) : null;
     const outcome = resolveOwner({ deptName, noLookup, spocs, keyManager, partner });
     const spoc = outcome.how === "spoc" ? spocs.find((p) => p.userId === outcome.userId) : undefined;
     const ownerName =

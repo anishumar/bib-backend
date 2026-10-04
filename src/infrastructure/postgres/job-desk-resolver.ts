@@ -111,7 +111,7 @@ export class PostgresJobDeskResolver implements StepDeskResolver {
       // The later rungs only when the first is empty, as the task router does.
       const needFallback = noLookup !== null || spocs.length === 0;
       const keyManager = needFallback ? await keyManagerOn(db, clientPartyId, onDate) : null;
-      const partner = needFallback && keyManager === null ? await signingPartnerOf(db, tenantId) : null;
+      const partner = needFallback && keyManager === null ? await signingPartnerOf(db, tenantId, clientPartyId) : null;
       return { deptName: axis?.name ?? null, noLookup, spocs, keyManager, partner, taskHolder };
     });
   }

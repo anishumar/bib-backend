@@ -309,3 +309,34 @@ describe("copying and quoting carry every currency", () => {
     expect(view.lines.map((l) => l.line.currency)).toEqual(["AED", "INR"]);
   });
 });
+
+describe("copying carries who signs (0343)", () => {
+  async function withdrawnWith(s: ReturnType<typeof setup>, signatoryId: string): Promise<string> {
+    const id = await draft(s);
+    await gst(s, id);
+    await s.service.addClause(TENANT, id, SCOPE_CLAUSE);
+    await writeOpening(s.prose, TENANT, id);
+    await s.service.revise({ tenantId: TENANT, letterId: id, chosenSignatoryId: signatoryId }, ACTOR);
+    await s.service.send(TENANT, id, ACTOR);
+    await s.service.withdraw(TENANT, id, ACTOR);
+    return id;
+  }
+
+  it("keeps the chosen signatory while they are still on the list", async () => {
+    const s = setup();
+    s.firm.name("user-default", "Managing Partner");
+    const ravi = s.firm.add("sig-ravi", "user-ravi", "Partner");
+    const copy = await s.service.copyAsDraft(TENANT, await withdrawnWith(s, ravi), ACTOR);
+    expect(copy.letter.chosenSignatoryId ?? (await s.letters.findLetter(TENANT, copy.letter.id))?.chosenSignatoryId).toBe(ravi);
+  });
+
+  it("falls back to the firm's default when that person has been retired", async () => {
+    const s = setup();
+    s.firm.name("user-default", "Managing Partner");
+    const ravi = s.firm.add("sig-ravi", "user-ravi", "Partner");
+    const source = await withdrawnWith(s, ravi);
+    s.firm.retire(ravi);
+    const copy = await s.service.copyAsDraft(TENANT, source, ACTOR);
+    expect((await s.letters.findLetter(TENANT, copy.letter.id))?.chosenSignatoryId).toBeNull();
+  });
+});

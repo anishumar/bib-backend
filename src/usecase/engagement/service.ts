@@ -746,6 +746,16 @@ export class EngagementService {
       await this.deps.letters.setRate(tenantId, letter.id, rate);
     }
 
+    // WHO SIGNS (0343): the withdrawn letter's choice, while that person is
+    // still on the firm's list; a retired one leaves the copy on the default,
+    // which the Signed by box then shows.
+    if (source.chosenSignatoryId !== null) {
+      const still = await this.deps.firm.signatory(tenantId, source.chosenSignatoryId);
+      if (still !== null && still.isActive) {
+        await this.deps.letters.revise(tenantId, letter.id, { chosenSignatoryId: still.id }, null);
+      }
+    }
+
     // The fee sections first, in their order, so each line can name its new one.
     const groupIds = new Map<string, string>();
     for (const g of groups) {

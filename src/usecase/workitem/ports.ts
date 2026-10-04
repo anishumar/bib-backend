@@ -621,7 +621,9 @@ export interface SpocDirectory {
  */
 export interface WorkOwnerDirectory {
   keyManagerFor(tenantId: string, clientPartyId: string, onDate: string): Promise<OwnerPerson | null>;
-  signingPartner(tenantId: string): Promise<OwnerPerson | null>;
+  /** The partner who signed for the firm on this client's latest signed
+   *  letter, still on the staff; else the firm's default signatory. */
+  signingPartner(tenantId: string, clientPartyId?: string | null): Promise<OwnerPerson | null>;
 }
 
 /**
