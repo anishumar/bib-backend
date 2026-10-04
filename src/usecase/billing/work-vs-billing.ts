@@ -30,6 +30,8 @@
 // before the invoice is raised), a bill whose date has not come, and a period
 // before the client's billing began (billed the old way).
 import { addMonthsClamped, billingDues, serviceWindowOf } from "../../domain/billing/model";
+import { yearStartOfCompany } from "../../domain/calendar/model";
+import type { CompanyCalendars } from "../../domain/calendar/model";
 import { daysBetween } from "../../domain/obligation/model";
 import { compareAmounts } from "../../domain/money/model";
 import { dayInZone } from "../../domain/scheduler/zone";
@@ -194,7 +196,7 @@ export class WorkBillingService {
     const today = dayInZone(this.deps.clock.now().toISOString(), await this.deps.timeZones.timeZoneFor(tenantId));
     const to = query.to ?? today;
     const from = query.from ?? firstOfMonth(addMonthsClamped(today, -(DEFAULT_MONTHS - 1)));
-    const [facts, fiscalYearStartMonth] = await Promise.all([
+    const [facts, firmYearStart, calendars] = await Promise.all([
       this.deps.facts.read(tenantId, {
         from,
         to,
@@ -202,8 +204,9 @@ export class WorkBillingService {
         today,
       }),
       this.deps.fiscalYears.fiscalYearStartMonth(tenantId),
+      this.deps.timeZones.companyCalendars(tenantId),
     ]);
-    const all = assembleRows(facts, { today, from, to, fiscalYearStartMonth });
+    const all = assembleRows(facts, { today, from, to, firmYearStart, calendars });
     const forManager =
       query.managerUserId === undefined ? all : all.filter((r) => r.manager?.userId === query.managerUserId);
     const summary = summarise(forManager);
@@ -226,7 +229,15 @@ interface Ctx {
   readonly today: string;
   readonly from: string;
   readonly to: string;
-  readonly fiscalYearStartMonth: number | null;
+  /** The firm's year start; a company with its own year overrides it. */
+  readonly firmYearStart: number | null;
+  readonly calendars: CompanyCalendars;
+}
+
+/** The year a subject's periods are cut on: the sweep's own choice (0337,
+ *  0338), so an expected bill date is the date the sweep will use. */
+function yearStartOf(s: WbSubject, ctx: Ctx): number | null {
+  return s.yearStartMonth ?? yearStartOfCompany(ctx.calendars, s.issuingEntityPartyId, ctx.firmYearStart);
 }
 
 interface Draft {
@@ -332,7 +343,7 @@ export function assembleRows(facts: WbFacts, ctx: Ctx): WorkBillingRow[] {
         (r) => r.kind === "period" && r.period !== null && r.period.start <= start && start <= r.period.end,
       );
       if (draft === undefined) {
-        const expected = expectedBill(s, start, ctx.fiscalYearStartMonth);
+        const expected = expectedBill(s, start, yearStartOf(s, ctx));
         const period =
           expected !== null && expected !== "not_served"
             ? expected.period

@@ -2313,7 +2313,10 @@ with receivables beside it. Read model only: `usecase/billing/work-vs-billing.ts
   of the bill whose period holds the job's first day. A job with no bill yet gets the period and
   the bill date the SWEEP would give it: `expectedBill` calls `periodsFrom` + `billingDues` with
   every bill date treated as come, so nothing here assumes "the 1st of next month" (Q042 moves
-  that date). One-time work is one row (`o:`): its job and its final bill. An advance is its own
+  that date). The year it cuts on is the sweep's too: the year pinned on the engagement (0338),
+  else the issuing company's own (0337), else the firm's; with only the firm's, a company on its
+  own year would show a quarter the sweep never bills. One-time work is one row (`o:`): its job
+  and its final bill. An advance is its own
   row. A statutory filing (generated for the engagement, or of the same company with its rule
   linked to the service: CA#11's predicate) sits under the row whose period holds the filing's
   last day and is NEVER flagged: its service's bill covers it.

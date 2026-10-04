@@ -30,6 +30,8 @@ function subject(over: Partial<WbSubject> = {}): WbSubject {
     frequency: "monthly",
     billingFrom: "2026-07-01",
     firstInvoiceOn: "2026-08-01",
+    issuingEntityPartyId: "co-in",
+    yearStartMonth: null,
     engagements: [
       {
         engagementId: A,
@@ -275,6 +277,37 @@ describe("Work vs Billing: a done job with no bill", () => {
       null,
     );
     expect(r?.flags.map((f) => [f.code, f.cause])).toEqual([["no_bill", "no_fiscal_year"]]);
+  });
+
+  // The sweep cuts a subject's periods on its company's own year, or on the
+  // year pinned on the engagement (0337, 0338). Work vs Billing must cut the
+  // same periods, or its expected bill is a period the sweep never bills.
+  it("cuts a quarter on the issuing company's own year, as the sweep does", async () => {
+    const zones = new FakeFirmTimeZone("Asia/Kolkata");
+    zones.setCompany("co-in", { fiscalYearStartMonth: 2 });
+    const svc = new WorkBillingService({
+      facts: new FakeWorkBillingFacts(
+        facts({
+          subjects: [subject({ frequency: "quarterly" })],
+          jobs: [job({ periodStart: "2026-08-01", periodEnd: "2026-10-31", periodLabel: "Q3" })],
+        }),
+      ),
+      fiscalYears: new FakeFiscalYearSource(4),
+      timeZones: zones,
+      clock: new FakeClock(new Date("2026-10-04T06:00:00Z")),
+    });
+    const [r] = (await svc.list("t1", {})).rows;
+    expect(r?.period).toEqual(expect.objectContaining({ start: "2026-08-01", end: "2026-10-31" }));
+  });
+
+  it("keeps the year pinned on the engagement over the company's current one", async () => {
+    const [r] = await rows(
+      facts({
+        subjects: [subject({ frequency: "quarterly", yearStartMonth: 2 })],
+        jobs: [job({ periodStart: "2026-08-01", periodEnd: "2026-10-31", periodLabel: "Q3" })],
+      }),
+    );
+    expect(r?.period).toEqual(expect.objectContaining({ start: "2026-08-01", end: "2026-10-31" }));
   });
 
   it("raises nothing while the work is still going", async () => {

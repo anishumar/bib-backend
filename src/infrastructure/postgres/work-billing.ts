@@ -43,6 +43,8 @@ interface EngagementRow {
   frequency: string | null;
   billing_from: string | null;
   first_invoice_on: string | null;
+  issuing_entity_party_id: string;
+  year_start_month: number | null;
   status: string;
   effective_from: string;
   ends_on: string | null;
@@ -155,6 +157,7 @@ export class PostgresWorkBillingFacts implements WorkBillingFacts {
                g.id AS fee_group_id, g.title AS group_title,
                coalesce(g.billing_frequency, ll.billing_frequency) AS frequency,
                e.billing_from::text AS billing_from, e.first_invoice_on::text AS first_invoice_on,
+               l.issuing_entity_party_id, e.year_start_month,
                e.status, e.effective_from::text AS effective_from, e.ends_on::text AS ends_on,
                e.paused_on::text AS paused_on, e.resumed_on::text AS resumed_on,
                l.id AS letter_id, l.ref AS letter_ref
@@ -392,6 +395,7 @@ function assemble(
         entityName: seen.entityName === e.entity_name ? seen.entityName : null,
         billingFrom: earliest(seen.billingFrom, e.billing_from),
         firstInvoiceOn: earliest(seen.firstInvoiceOn, e.first_invoice_on),
+        yearStartMonth: seen.yearStartMonth ?? e.year_start_month,
         engagements: [...seen.engagements, engagement],
       });
       continue;
@@ -410,6 +414,8 @@ function assemble(
       frequency: e.frequency,
       billingFrom: e.billing_from,
       firstInvoiceOn: e.first_invoice_on,
+      issuingEntityPartyId: e.issuing_entity_party_id,
+      yearStartMonth: e.year_start_month,
       engagements: [engagement],
       keyManager: km.get(e.party_id) ?? null,
       handInvoices: { count: invoices.length, last: invoices[0] ?? null },

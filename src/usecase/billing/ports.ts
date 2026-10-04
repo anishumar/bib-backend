@@ -709,6 +709,12 @@ export interface WbSubject {
   readonly frequency: string | null;
   readonly billingFrom: string | null;
   readonly firstInvoiceOn: string | null;
+  /** The company that issues the letter: its own financial year cuts the
+   *  periods, else the firm's, exactly as the sweep cuts them (0337). */
+  readonly issuingEntityPartyId: string;
+  /** The year start pinned on the engagement when it was first cut (0338),
+   *  which wins over the company's current one, as in the sweep. */
+  readonly yearStartMonth: number | null;
   readonly engagements: readonly WbEngagement[];
   /** The client's Key Manager in force today, active staff. */
   readonly keyManager: WbPerson | null;
