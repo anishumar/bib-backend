@@ -49,18 +49,41 @@ describe("correcting a client's name and company facts (V2.5)", () => {
   it("corrects a registered company's country and kind", async () => {
     const w = await world();
     await w.service.registerLegalEntity(
-      { tenantId: TENANT, organizationPartyId: w.org.partyId, jurisdiction: "AE", entityType: "fzco" },
+      { tenantId: TENANT, organizationPartyId: w.org.partyId, jurisdiction: "AE", entityType: "fzco", financialYearEnd: "12-31" },
       PARTNER,
     );
     const fixed = await w.service.correctLegalEntity(
       { tenantId: TENANT, partyId: w.org.partyId, jurisdiction: "in", entityType: "private_limited" },
       PARTNER,
     );
-    expect(fixed).toMatchObject({ jurisdiction: "IN", entityType: "private_limited" });
-    expect(w.events.recorded.at(-1)?.payload).toMatchObject({ fields: ["jurisdiction", "entityType"] });
+    // Moved into India: the year end becomes India's fixed 31 March (Q076).
+    expect(fixed).toMatchObject({ jurisdiction: "IN", entityType: "private_limited", financialYearEnd: "03-31" });
+    expect(w.events.recorded.at(-1)?.payload).toMatchObject({ fields: ["jurisdiction", "entityType", "financialYearEnd"] });
     await expect(
       w.service.correctLegalEntity({ tenantId: TENANT, partyId: w.org.partyId, jurisdiction: "India" }, PARTNER),
     ).rejects.toMatchObject({ code: "INVALID_PARTY_DETAILS" });
+  });
+
+  it("asks for a year end when a company moves out of India, and records one on its own (Q076)", async () => {
+    const w = await world();
+    await w.service.registerLegalEntity(
+      { tenantId: TENANT, organizationPartyId: w.org.partyId, jurisdiction: "IN", entityType: "private_limited" },
+      PARTNER,
+    );
+    await expect(
+      w.service.correctLegalEntity({ tenantId: TENANT, partyId: w.org.partyId, jurisdiction: "AE" }, PARTNER),
+    ).rejects.toMatchObject({ code: "INVALID_PARTY_DETAILS" });
+    const moved = await w.service.correctLegalEntity(
+      { tenantId: TENANT, partyId: w.org.partyId, jurisdiction: "AE", financialYearEnd: "12-31" },
+      PARTNER,
+    );
+    expect(moved).toMatchObject({ jurisdiction: "AE", financialYearEnd: "12-31" });
+    const yearOnly = await w.service.correctLegalEntity(
+      { tenantId: TENANT, partyId: w.org.partyId, financialYearEnd: "06-30" },
+      PARTNER,
+    );
+    expect(yearOnly.financialYearEnd).toBe("06-30");
+    expect(w.events.recorded.at(-1)?.payload).toMatchObject({ fields: ["financialYearEnd"], financialYearEnd: "06-30" });
   });
 });
 

@@ -277,6 +277,24 @@ describe("the QA firm on 27 Sep 2026, read back", () => {
     expect((await read()).find((l) => l.key === "compliance_rules")?.done).toBe(true);
   });
 
+  it("names a client company the firm has engaged with no country, then no year end abroad (Q076)", async () => {
+    const line = async () => (await read()).find((l) => l.key === "client_details");
+    expect((await line())?.gaps.find((g) => g.id === client)?.missing).toEqual(["country", "company_type"]);
+    await owner`
+      INSERT INTO core.organization (party_id, tenant_id, legal_name) VALUES (${client}, ${tenant}, 'test company')
+      ON CONFLICT DO NOTHING
+    `;
+    await owner`
+      INSERT INTO core.legal_entity (party_id, tenant_id, jurisdiction, entity_type)
+      VALUES (${client}, ${tenant}, 'AE', 'fzco')
+    `;
+    expect((await line())?.gaps.find((g) => g.id === client)?.missing).toEqual(["year_end"]);
+    await owner`UPDATE core.legal_entity SET financial_year_end = '12-31' WHERE party_id = ${client}`;
+    expect((await line())?.gaps.find((g) => g.id === client)).toBeUndefined();
+    // Put back as the other cases found it: unregistered.
+    await owner`DELETE FROM core.legal_entity WHERE party_id = ${client}`;
+  });
+
   it("reads assignments and portal grants on the day asked, half-open", async () => {
     // The Key Manager above starts on the 27th: on the 26th the client had none.
     const before = await facts.factsFor(tenant, "2026-09-26");

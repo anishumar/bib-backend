@@ -59,6 +59,9 @@ export interface PartyStanding {
     /** "Prepared for" names a PERSON (0084), the letter's addressee rule. */
     readonly kind: "organization" | "person";
   } | null>;
+  /** The country its registration records (Q076); null when an organization
+   *  has none. A person is never asked. */
+  registeredCountry(tenantId: string, partyId: string): Promise<string | null>;
 }
 
 /**

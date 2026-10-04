@@ -423,13 +423,27 @@ describe("a client row", () => {
     expect(retired.blocking).toBe(1);
   });
 
-  it("warns, rather than refuses, about a missing Key Manager and a missing financial year end", () => {
+  it("warns, rather than refuses, about a missing Key Manager; an Indian company needs no year end", () => {
     const report = validateImport({ clients: [client({ keyManagerEmail: null, financialYearEnd: null })], people: [], engagements: [] }, snapshot());
     expect(report.blocking).toBe(0);
     expect(warningMessages(report)).toEqual([
-      "no Financial Year End. Legal deadlines cannot be worked out for it until one is recorded",
       "no Key Manager. Nobody at the firm will own this client until somebody is named",
     ]);
+  });
+
+  it("refuses a company outside India with no year end, and an Indian one with another year end (Q076)", () => {
+    const abroad = validateImport(
+      { clients: [client({ jurisdiction: "AE", entityType: "fzco", financialYearEnd: null })], people: [], engagements: [] },
+      snapshot(),
+    );
+    expect(blockingMessages(abroad).join(" ")).toContain("a company outside India needs its Financial Year End");
+    const ok = validateImport(
+      { clients: [client({ jurisdiction: "AE", entityType: "fzco", financialYearEnd: "12-31" })], people: [], engagements: [] },
+      snapshot(),
+    );
+    expect(blockingMessages(ok).join(" ")).not.toContain("Financial Year End");
+    const india = validateImport({ clients: [client({ financialYearEnd: "12-31" })], people: [], engagements: [] }, snapshot());
+    expect(blockingMessages(india).join(" ")).toContain("an Indian company's year ends on 31 March");
   });
 
   it("refuses a date it cannot read in Client Since or Incorporated On", () => {

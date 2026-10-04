@@ -34,7 +34,8 @@ const GapSchema = z
         "standard_terms; deadlines go_live_floor | " +
         "fiscal_year_start; reporting_lines manager; request_routing routing; processes process " +
         "| published_process; compliance_rules confirmed_linked_rule | confirmed; ladders " +
-        "escalation | chaser | nudge; account_team key_manager | spoc:<Dept code>; " +
+        "escalation | chaser | nudge; client_details country | company_type | year_end; " +
+        "account_team key_manager | spoc:<Dept code>; " +
         "portal_contacts portal_login. The screen words them.",
     }),
   })
@@ -64,7 +65,7 @@ const ReadinessResponse = z
     asOf: z.string().openapi({ description: "The firm's calendar day the lines were computed on." }),
     lines: z.array(LineSchema).openapi({
       description:
-        "The thirteen lines in the order a firm sets itself up. Computed on every read and never " +
+        "The fourteen lines in the order a firm sets itself up. Computed on every read and never " +
         "stored, so fixing a gap turns its line done on the next one. A ladder line asks that a " +
         "ladder is PUBLISHED, never which days are on it: the firm has not given its numbers (D3).",
     }),
@@ -77,10 +78,11 @@ const readinessRoute = createRoute({
   tags: ["tenancy"],
   summary: "Is this firm set up well enough to run its work?",
   description:
-    "Thirteen lines: the firm's companies' country and address, its time zone, colleagues " +
+    "Fourteen lines: the firm's companies' country and address, its time zone, colleagues " +
     "added, go-live floor and financial year, a service, standard terms, reporting lines where a check rule reads " +
     "them, client-request routing, a published process for every service, confirmed and linked " +
-    "compliance rules, the three ladders published, every active client's Key Manager and SPOCs, " +
+    "compliance rules, the three ladders published, every quoted or engaged client company's " +
+    "country, company type and (outside India) year end, every active client's Key Manager and SPOCs, " +
     "and a portal login per active client. Each lists what is missing, by name.",
   responses: {
     200: { description: "The lines", content: { "application/json": { schema: ReadinessResponse } } },

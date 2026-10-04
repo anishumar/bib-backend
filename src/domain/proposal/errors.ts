@@ -51,6 +51,7 @@ export type ProposalErrorCode =
   | "INVALID_FX_RATE"
   | "INVALID_CURRENCY"
   | "PARTY_ARCHIVED"
+  | "COMPANY_NOT_REGISTERED"
   | "CLIENT_IS_OWN_COMPANY"
   | "ISSUER_NOT_A_FIRM_ENTITY"
   | "ADDRESSEE_NOT_A_PERSON"
@@ -151,6 +152,15 @@ export class ProposalPartyArchived extends ProposalError {
         `restoring is its own step, so that putting a client away is never undone without ` +
         `somebody seeing it.`,
     );
+  }
+}
+
+/** A client company with no country (Q076): no new proposal names it, and no
+ *  line is for it, until its registration is recorded. */
+export class ProposalCompanyNotRegistered extends ProposalError {
+  constructor(displayName: string, as: "client" | "entity") {
+    const what = as === "client" ? "a proposal cannot be drafted for it" : "a proposal line cannot be for it";
+    super("COMPANY_NOT_REGISTERED", `${displayName} has no country recorded, so ${what}. Record its country and company type on its client page first: without them no filing can be worked out for it and none of the firm's companies can be chosen to bill it.`);
   }
 }
 

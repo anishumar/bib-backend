@@ -142,7 +142,7 @@ beforeAll(async () => {
   signatoryUserId = user.id;
 
   const org = async (legalName: string): Promise<string> =>
-    (await party.createOrganization({ tenantId: tenant, legalName }, SYSTEM_ACTOR)).partyId;
+    (await party.createClientCompany({ tenantId: tenant, legalName, jurisdiction: "IN", entityType: "private_limited" }, SYSTEM_ACTOR)).partyId;
   mydojo = await org("MyDojo, Inc.");
   prepworks = await org("PrepWorks");
   mathsGenie = await org("Maths Genie");

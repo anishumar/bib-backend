@@ -92,6 +92,7 @@ import {
   LetterNotFound,
   LetterNotSupersedable,
   LetterPartyArchived,
+  LetterCompanyNotRegistered,
   LetterClientIsOwnCompany,
   NoClauses,
   NotAClause,
@@ -934,6 +935,7 @@ export class EngagementService {
     // An archived client gets no new letter (0305) - refused before the
     // reference number is drawn.
     await this.refuseArchived(input.tenantId, input.partyId, "client");
+    await this.refuseUnregistered(input.tenantId, input.partyId, "client");
     // Nor one of the firm's own companies: every letter, drafted or written
     // up from a quote, comes through here, as every invoice meets BILLS_THE_FIRM.
     if (await this.deps.documents.isFirmEntity(input.tenantId, input.partyId)) {
@@ -1137,7 +1139,10 @@ export class EngagementService {
     const entities = new Set(
       usable.map((line) => this.entityFor(line, input.defaultEntityPartyId)).filter((e) => e !== null),
     );
-    for (const entity of entities) await this.refuseArchived(input.tenantId, entity, "entity");
+    for (const entity of entities) {
+      await this.refuseArchived(input.tenantId, entity, "entity");
+      await this.refuseUnregistered(input.tenantId, entity, "entity");
+    }
     // And every one of them the CLIENT'S (F-10-1), for the same reason: a quote
     // line may name any company of the firm, and finding that out at the
     // fourth line would leave a half-written letter holding a spent number.
@@ -1359,6 +1364,16 @@ export class EngagementService {
     );
   }
 
+  /** A client company with no country recorded (Q076) is not written onto a
+   *  new document: it would get no filings and no billing company. A person is
+   *  not asked; a party that does not exist is left to the foreign key. */
+  private async refuseUnregistered(tenantId: string, partyId: string, as: "client" | "entity"): Promise<void> {
+    const party = await this.deps.parties.findParty(tenantId, partyId);
+    if (party === null || party.kind !== "organization") return;
+    if ((await this.deps.parties.registeredCountry(tenantId, partyId)) !== null) return;
+    throw new LetterCompanyNotRegistered(party.displayName, as);
+  }
+
   /** A client or an entity the firm put away is not written onto a new
    *  document (0305). A party that does not exist at all is left to the
    *  foreign key, as it always was. */
@@ -1376,6 +1391,7 @@ export class EngagementService {
   async addLine(input: AddLetterLineInput): Promise<LetterLine> {
     const letter = await this.editableOrThrow(input.tenantId, input.letterId);
     await this.refuseArchived(input.tenantId, input.entityPartyId, "entity");
+    await this.refuseUnregistered(input.tenantId, input.entityPartyId, "entity");
     // The company the work is FOR must be the client's (F-10-1). Signing fans
     // this line out into an engagement, and the engagement's work lands in the
     // LETTER's client's portal, so another client's company here shows one
@@ -1997,6 +2013,7 @@ export class EngagementService {
     const entityPartyId = input.entityPartyId ?? current.entityPartyId;
     if (entityPartyId !== current.entityPartyId) {
       await this.refuseArchived(input.tenantId, entityPartyId, "entity");
+      await this.refuseUnregistered(input.tenantId, entityPartyId, "entity");
       await this.requireInStructure(input.tenantId, letter.partyId, entityPartyId);
     }
 

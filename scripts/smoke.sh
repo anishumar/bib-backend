@@ -164,13 +164,15 @@ chk "client: own memberships"         200 "$(code -b $J/client.txt $API/api/v1/t
 
 echo; echo "── 4. Gate 3 — role decides what staff may do ──────────────────────"
 chk "associate may read parties"      200 "$(code -b $J/associate.txt $API/api/v1/parties)"
-chk "associate may create a party"    201 "$(code -b $J/associate.txt -XPOST $API/api/v1/parties/organizations -H "$H" -d '{"legalName":"Acme Ltd"}')"
+chk "associate may create a party"    201 "$(code -b $J/associate.txt -XPOST $API/api/v1/parties/organizations -H "$H" -d '{"legalName":"Acme Ltd","jurisdiction":"IN","entityType":"private_limited"}')"
 chk "associate may NOT sweep the log" 403 "$(code -b $J/associate.txt $API/api/v1/events)"
 chk "partner may sweep the log"       200 "$(code -b $J/partner.txt $API/api/v1/events)"
 
 echo; echo "── 5. The party model + the audit trail ────────────────────────────"
-ORG=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/parties/organizations -H "$H" -d '{"legalName":"Meridian Textiles Private Limited","tradeName":"Meridian"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["partyId"])')
-chk "register a legal entity"  201 "$(code -b $J/partner.txt -XPOST $API/api/v1/parties/organizations/$ORG/legal-entities -H "$H" -d '{"jurisdiction":"IN","entityType":"private_limited"}')"
+ORG=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/parties/organizations -H "$H" -d '{"legalName":"Meridian Textiles Private Limited","tradeName":"Meridian","jurisdiction":"IN","entityType":"private_limited"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["partyId"])')
+# Q076: a client company comes with its country and type, in one act; one
+# without them, or abroad with no year end, is refused.
+chk "a client company needs its country" 400 "$(code -b $J/partner.txt -XPOST $API/api/v1/parties/organizations -H "$H" -d '{"legalName":"Nowhere Ltd","jurisdiction":"AE","entityType":"fzco"}')"
 chk "attach a PAN"             201 "$(code -b $J/partner.txt -XPOST $API/api/v1/parties/$ORG/identifiers -H "$H" -d '{"type":"pan","value":"AABCM1234K","validFrom":"2019-06-01"}')"
 chk "reject an invalid PAN"    400 "$(code -b $J/partner.txt -XPOST $API/api/v1/parties/$ORG/identifiers -H "$H" -d '{"type":"pan","value":"NOTAPAN","validFrom":"2019-06-01"}')"
 chk "two GSTINs, one entity"   201 "$(code -b $J/partner.txt -XPOST $API/api/v1/parties/$ORG/identifiers -H "$H" -d '{"type":"gstin","value":"27AABCM1234K1Z5","jurisdiction":"IN-MH","validFrom":"2019-06-01"}')"
@@ -315,7 +317,7 @@ chk "the firm revises the SLA to 90 days"   200 "$(code -b $J/partner.txt -XPOST
 BKV1=$(curl -s -b $J/partner.txt $API/api/v1/config/service/bookkeeping | python3 -c '
 import sys, json
 print(next(v["id"] for v in json.load(sys.stdin)["versions"] if v["version"] == 1))')
-SLAORG=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/parties/organizations -H "$H" -d '{"legalName":"Pinecrest Retail Private Limited"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["partyId"])')
+SLAORG=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/parties/organizations -H "$H" -d '{"legalName":"Pinecrest Retail Private Limited","jurisdiction":"IN","entityType":"private_limited"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["partyId"])')
 SLADRAFT='{"partyId":"'$SLAORG'","title":"Pinecrest - bookkeeping","currency":"INR","fxRate":"1","fxRateDate":"2026-06-01","validUntil":"2027-01-31"}'
 SLAPR=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/proposals -H "$H" -d "$SLADRAFT" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
 SLALINE='{"serviceVersionId":"'$BKV1'","description":"Monthly bookkeeping, 12 months","quantity":"12","unitAmount":"18000.00"}'
@@ -422,7 +424,7 @@ print(next(v["id"] for v in json.load(sys.stdin)["versions"] if v["version"] == 
 PLAINV=$(curl -s -b $J/partner.txt $API/api/v1/config/clause/confidentiality | python3 -c '
 import sys, json
 print(next(v["id"] for v in json.load(sys.stdin)["versions"] if v["version"] == 1))')
-LAWORG=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/parties/organizations -H "$H" -d '{"legalName":"Harbour Ridge Advisory Private Limited"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["partyId"])')
+LAWORG=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/parties/organizations -H "$H" -d '{"legalName":"Harbour Ridge Advisory Private Limited","jurisdiction":"IN","entityType":"private_limited"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["partyId"])')
 LAWELDRAFT='{"partyId":"'$LAWORG'","jurisdiction":"IN","title":"Harbour Ridge - terms","currency":"INR","fxRate":"1","fxRateDate":"2026-08-28"}'
 LAWEL=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/engagement-letters -H "$H" -d "$LAWELDRAFT" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
 
@@ -471,8 +473,8 @@ chk "…and hands over the terms structured"  "IN/the courts at Bengaluru/True" 
 # firm opens a US entity, routes US clients to it, and the SAME Indian clause is
 # refused on the letter that entity issues — note the clause is scoped to IN
 # and the letter is written for US, so the message has to say which check bit.
-USORG=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/parties/organizations -H "$H" -d '{"legalName":"10x Global Inc."}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["partyId"])')
-chk "the firm opens a US entity"            201 "$(code -b $J/partner.txt -XPOST $API/api/v1/parties/organizations/$USORG/legal-entities -H "$H" -d '{"jurisdiction":"US","entityType":"other"}')"
+USORG=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/parties/organizations -H "$H" -d '{"legalName":"10x Global Inc.","jurisdiction":"US","entityType":"other","financialYearEnd":"12-31"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["partyId"])')
+chk "the firm opens a US entity"            200 "$(code -b $J/partner.txt $API/api/v1/parties/$USORG)"
 chk "…and routes US clients to it"          200 "$(code -b $J/partner.txt -XPOST $API/api/v1/firm-entities/preferences -H "$H" -d '{"clientJurisdiction":"US","firmEntityPartyId":"'$USORG'","note":"US clients contract with the US entity."}')"
 USLAW='{"key":"governing-law-us","body":{"title":"Governing law and jurisdiction","text":"This engagement is governed by the laws of the State of Delaware.","jurisdictions":[],"governingLaw":{"jurisdiction":"US","text":"the laws of the State of Delaware"},"courts":{"jurisdiction":"US","text":"the state and federal courts of Delaware"}}}'
 curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/config/clause -H "$H" -d "$USLAW"
@@ -847,8 +849,8 @@ print(next(v["id"] for v in json.load(sys.stdin)["versions"] if v["version"] == 
 # into two engagements that differ in exactly that field. Before G0.1 every
 # engagement carried the CLIENT and the group's companies were indistinguishable
 # on the one object the compliance calendar generates against.
-ENT1=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/parties/organizations -H "$H" -d '{"legalName":"Lakeview Foods Private Limited"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["partyId"])')
-ENT2=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/parties/organizations -H "$H" -d '{"legalName":"Lakeview Logistics Private Limited"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["partyId"])')
+ENT1=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/parties/organizations -H "$H" -d '{"legalName":"Lakeview Foods Private Limited","jurisdiction":"IN","entityType":"private_limited"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["partyId"])')
+ENT2=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/parties/organizations -H "$H" -d '{"legalName":"Lakeview Logistics Private Limited","jurisdiction":"IN","entityType":"private_limited"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["partyId"])')
 
 # An advance is required, so the fee gate is live for this walk.
 ELDRAFT='{"partyId":"'$PID'","jurisdiction":"IN","title":"Lakeview - FY26 engagement","currency":"INR","fxRate":"1","fxRateDate":"2026-08-28","advanceRequired":true,"advanceAmount":"10000"}'
@@ -1350,7 +1352,7 @@ echo; echo "── 16d. Invoicing — the one number that may not gap ───�
 # against real Postgres in tests/invoice/numbering.integration.test.ts,
 # including six simultaneous issues; what this section walks is the surface and
 # the freeze.
-INVC=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/parties/organizations -H "$H" -d '{"legalName":"Cobalt Foods Private Limited"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["partyId"])')
+INVC=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/parties/organizations -H "$H" -d '{"legalName":"Cobalt Foods Private Limited","jurisdiction":"IN","entityType":"private_limited"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["partyId"])')
 INV1=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/invoices -H "$H" -d '{"partyId":"'$INVC'","entityPartyId":"'$FIRMENT'","currency":"INR","fxRate":"1","fxRateDate":"2026-08-29","seriesDate":"2026-08-29"}')
 chk "a draft has no number yet (0322)"    "None" "$(python3 -c 'import sys,json;print(json.load(sys.stdin)["number"])' <<< "$INV1")"
 INV1ID=$(python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])' <<< "$INV1")

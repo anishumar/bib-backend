@@ -191,6 +191,24 @@ export class PostgresReadinessFacts implements ReadinessFactSource {
                               AND m.retired_at IS NULL))
          ORDER BY o.is_firm_self DESC, p.display_name
       `;
+      // ── Client companies quoted or engaged (Q076) ──────────────────────
+      const clientCompanies = await db<{ party_id: string; name: string; country: string | null; year_end: string | null }[]>`
+        SELECT p.id AS party_id, p.display_name AS name, le.jurisdiction AS country,
+               le.financial_year_end AS year_end
+          FROM core.party p
+          LEFT JOIN core.organization o ON o.party_id = p.id AND o.tenant_id = p.tenant_id
+          LEFT JOIN core.legal_entity le ON le.party_id = p.id AND le.tenant_id = p.tenant_id
+         WHERE p.archived_at IS NULL
+           AND p.kind = 'organization'
+           AND NOT COALESCE(o.is_firm_self, false)
+           AND NOT EXISTS (SELECT 1 FROM crm.firm_entity m WHERE m.party_id = p.id AND m.tenant_id = p.tenant_id)
+           AND (EXISTS (SELECT 1 FROM crm.proposal q WHERE q.party_id = p.id AND q.tenant_id = p.tenant_id AND q.deleted_at IS NULL)
+                OR EXISTS (SELECT 1 FROM crm.engagement_letter l WHERE l.party_id = p.id AND l.tenant_id = p.tenant_id AND l.deleted_at IS NULL)
+                OR EXISTS (SELECT 1 FROM crm.engagement_letter_line ll WHERE ll.entity_party_id = p.id AND ll.tenant_id = p.tenant_id)
+                OR EXISTS (SELECT 1 FROM crm.engagement e
+                            WHERE (e.party_id = p.id OR e.entity_party_id = p.id) AND e.tenant_id = p.tenant_id))
+         ORDER BY p.display_name, p.id
+      `;
       const [people] = await db<{ n: number }[]>`
         SELECT count(*)::int AS n FROM tenancy.membership
          WHERE audience = 'STAFF' AND is_active
@@ -209,6 +227,12 @@ export class PostgresReadinessFacts implements ReadinessFactSource {
           name: c.name,
           country: c.country,
           hasAddress: c.has_address,
+        })),
+        clientCompanies: clientCompanies.map((c) => ({
+          partyId: c.party_id,
+          name: c.name,
+          country: c.country,
+          yearEnd: c.year_end,
         })),
         timeZone: tenant?.time_zone ?? DEFAULT_TIME_ZONE,
         activeStaff: people?.n ?? 0,

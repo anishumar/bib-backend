@@ -41,7 +41,7 @@ const byKey = (lines: readonly ReadinessLine[], key: ReadinessLine["key"]): Read
 };
 
 describe("the lines", () => {
-  it("are the thirteen, in the order a firm sets itself up", () => {
+  it("are the fourteen, in the order a firm sets itself up", () => {
     expect(readinessLines(qaFirm()).map((l) => l.key)).toEqual([...READINESS_KEYS]);
     expect(READINESS_KEYS).toEqual([
       "company_details",
@@ -55,6 +55,7 @@ describe("the lines", () => {
       "processes",
       "compliance_rules",
       "ladders",
+      "client_details",
       "account_team",
       "portal_contacts",
     ]);
@@ -69,6 +70,7 @@ describe("the lines", () => {
     expect(lines.filter((l) => l.state === "nothing_to_check").map((l) => l.key)).toEqual([
       "reporting_lines",
       "processes",
+      "client_details",
       "account_team",
       "portal_contacts",
     ]);
@@ -235,6 +237,32 @@ describe("the first-week lines (audit 2026-10-03)", () => {
   });
 });
 
+describe("client company details (Q076)", () => {
+  it("names a quoted company with no country, and one outside India with no year end; India needs none", () => {
+    const lines = readinessLines({
+      ...qaFirm(),
+      clientCompanies: [
+        { partyId: "p-none", name: "No Country Ltd", country: null, yearEnd: null },
+        { partyId: "p-ae", name: "Gulf FZCO", country: "AE", yearEnd: null },
+        { partyId: "p-sg", name: "Lion Pte", country: "SG", yearEnd: "12-31" },
+        { partyId: "p-in", name: "Delhi Pvt", country: "IN", yearEnd: null },
+      ],
+    });
+    const line = byKey(lines, "client_details");
+    expect(line.state).toBe("to_do");
+    expect(line.gaps).toEqual([
+      { id: "p-none", ref: null, name: "No Country Ltd", missing: ["country", "company_type"] },
+      { id: "p-ae", ref: null, name: "Gulf FZCO", missing: ["year_end"] },
+    ]);
+  });
+
+  it("is done when every one is complete, and has nothing to check with none", () => {
+    const done = readinessLines({ ...qaFirm(), clientCompanies: [{ partyId: "p", name: "Ok", country: "IN", yearEnd: "03-31" }] });
+    expect(byKey(done, "client_details").state).toBe("done");
+    expect(byKey(readinessLines(qaFirm()), "client_details").state).toBe("nothing_to_check");
+  });
+});
+
 describe("the service", () => {
   it("reads the facts on the FIRM's day, not the server's", async () => {
     // 20:00 UTC on the 27th is 01:30 on the 28th in India.
@@ -247,6 +275,6 @@ describe("the service", () => {
     const r = await service.readiness("00000000-0000-4000-8000-000000000001");
     expect(r.asOf).toBe("2026-09-28");
     expect(facts.askedOn).toEqual(["2026-09-28"]);
-    expect(r.lines).toHaveLength(13);
+    expect(r.lines).toHaveLength(14);
   });
 });

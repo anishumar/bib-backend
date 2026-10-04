@@ -64,10 +64,23 @@ export interface PartyRepository {
   correctLegalEntity(
     tenantId: string,
     partyId: string,
-    patch: { readonly jurisdiction?: string | undefined; readonly entityType?: string | undefined },
+    patch: {
+      readonly jurisdiction?: string | undefined;
+      readonly entityType?: string | undefined;
+      readonly financialYearEnd?: string | null | undefined;
+    },
   ): Promise<LegalEntity | null>;
   /** Creates the party row and its organization subtype in one transaction. */
   createOrganization(o: NewOrganization): Promise<Organization>;
+  /**
+   * A client company with its registration (Q076): the party, the
+   * organization and the legal entity in ONE transaction, so a company is
+   * never left created with no country.
+   */
+  createRegisteredOrganization(
+    o: NewOrganization,
+    registration: Omit<NewLegalEntity, "partyId" | "tenantId">,
+  ): Promise<{ readonly organization: Organization; readonly entity: LegalEntity }>;
   /** Creates the party row and its person subtype in one transaction. */
   createPerson(p: NewPerson): Promise<Person>;
   addLegalEntity(e: NewLegalEntity): Promise<LegalEntity>;

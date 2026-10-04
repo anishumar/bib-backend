@@ -22,7 +22,7 @@ let gulf = "";
 async function firmCompany(name: string, jurisdiction: string): Promise<string> {
   const id = (await c.party.createOrganization({ tenantId: tenant, legalName: name }, SYSTEM_ACTOR)).partyId;
   await c.party.registerLegalEntity(
-    { tenantId: tenant, organizationPartyId: id, jurisdiction, entityType: "company" },
+    { tenantId: tenant, organizationPartyId: id, jurisdiction, entityType: "company", ...(jurisdiction === "IN" ? {} : { financialYearEnd: "12-31" }) },
     SYSTEM_ACTOR,
   );
   await c.documents.setPreference({ tenantId: tenant, clientJurisdiction: jurisdiction, firmEntityPartyId: id }, SYSTEM_ACTOR);
@@ -37,7 +37,7 @@ beforeAll(async () => {
   if (!t) throw new Error("could not create the test tenant");
   tenant = t.id;
   await c.documentRepository.seedFirmEntity(tenant, "Entity Prose Test Group");
-  client = (await c.party.createOrganization({ tenantId: tenant, legalName: "Harbour Foods" }, SYSTEM_ACTOR)).partyId;
+  client = (await c.party.createClientCompany({ tenantId: tenant, legalName: "Harbour Foods", jurisdiction: "IN", entityType: "private_limited" }, SYSTEM_ACTOR)).partyId;
   india = await firmCompany("Prose India Pvt Ltd", "IN");
   gulf = await firmCompany("Prose Gulf FZE", "AE");
 

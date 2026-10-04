@@ -160,7 +160,7 @@ export const CLIENT_COLUMNS: readonly SheetColumn[] = [
   { header: "Country", required: true, hint: "2 letters: IN, AE, SG, GB, US", about: "Two-letter code. Required with Entity Type, unless this row is a group that other rows name." },
   { header: "Entity Type", required: true, hint: "private_limited, llp, partnership, pte_ltd, fzco, c_corp", about: "private_limited, llp, pte_ltd, fzco, c_corp… the firm's own word. Required with Country." },
   { header: "Incorporated On", required: false, hint: "YYYY-MM-DD", about: "2019-06-11 or 11-Jun-2019. Never 11/06/2019." },
-  { header: "Financial Year End", required: false, hint: "MM-DD, e.g. 03-31", about: "MM-DD. Every statutory deadline is computed from it." },
+  { header: "Financial Year End", required: false, hint: "MM-DD, e.g. 12-31. Required outside India", about: "MM-DD. Required for a company outside India; an Indian company's is 31 March, so leave it blank. Every statutory deadline is computed from it." },
   { header: "Registered Address", required: false, hint: "one cell, as on the certificate", about: "" },
   ...IDENTIFIER_COLUMNS.map((c) => ({ header: c.header, required: false, hint: c.hint, about: "" })),
   { header: "Key Manager", required: false, hint: "login email of the colleague who owns this client", about: "The email of the staff member who owns the relationship." },
@@ -888,11 +888,15 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
     if (!hasCountry && !hasType && row.group !== null) {
       bad("a company inside a group needs a Country and an Entity Type. Without a registration it cannot be issued a letter or given a deadline");
     }
-    if (registered && row.financialYearEnd === null) {
-      warn("clients", row.lineNo, name, "no Financial Year End. Legal deadlines cannot be worked out for it until one is recorded");
-    }
+    // Q076: the year end is REQUIRED outside India and fixed at 31 March in it
+    // (Q077), the same rule the client form keeps.
+    const country = (row.jurisdiction ?? "").trim().toUpperCase();
     if (row.financialYearEnd !== null && !isMonthDay(row.financialYearEnd)) {
-      bad(`Financial Year End "${row.financialYearEnd}" is not MM-DD`);
+      bad(`Financial Year End "${row.financialYearEnd}" is not a month and day. Give it as MM-DD, e.g. 12-31`);
+    } else if (registered && country === "IN" && row.financialYearEnd !== null && row.financialYearEnd.trim() !== "03-31") {
+      bad(`an Indian company's year ends on 31 March. Leave Financial Year End blank or put 03-31, not ${row.financialYearEnd}`);
+    } else if (registered && country !== "IN" && row.financialYearEnd === null) {
+      bad("a company outside India needs its Financial Year End (MM-DD, e.g. 12-31)");
     }
     if (row.clientSince !== null && parseSheetDate(row.clientSince) === null) {
       bad(`Client Since "${row.clientSince}" is not a date this can read. Use 2026-08-23 or 13-Feb-1995`);

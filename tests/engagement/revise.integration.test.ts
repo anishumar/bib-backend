@@ -74,7 +74,7 @@ beforeAll(async () => {
   const self = await c.documentRepository.seedFirmEntity(tenant, "Letter Revise Test Pvt Ltd");
   await companies.edit({ tenantId: tenant, partyId: self, jurisdiction: "IN", entityType: "Private Limited" }, SYSTEM_ACTOR);
   gulf = (await companies.create({ tenantId: tenant, name: "Revise Gulf FZE", jurisdiction: "AE", entityType: "FZE" }, SYSTEM_ACTOR)).partyId;
-  client = (await c.party.createOrganization({ tenantId: tenant, legalName: "Orbit Traders" }, SYSTEM_ACTOR)).partyId;
+  client = (await c.party.createClientCompany({ tenantId: tenant, legalName: "Orbit Traders", jurisdiction: "IN", entityType: "private_limited" }, SYSTEM_ACTOR)).partyId;
 
   // The default set, and the Gulf company's OWN commercials (D5).
   let order = 0;
