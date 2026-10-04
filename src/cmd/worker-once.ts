@@ -335,6 +335,25 @@ async function main(): Promise<void> {
     const copiesNow = settled.reduce((n, r) => n + r.copiesFiled, 0);
     if (copiesNow > 0) console.log(`  filed the signed copy and certificate for ${String(copiesNow)} letter(s)`);
     console.log();
+
+    // NOTIFICATIONS (0323), LAST: every sweep above writes events, and the
+    // outbox should read this run's too. A firm's first run only starts its
+    // cursor, so a firm's history is never replayed into anybody's bell.
+    const fanned = await wired.notifyFanout.sweep();
+    const reminded = await wired.advanceReminders.sweep();
+    for (const r of [...fanned, ...reminded].filter((x) => x.failure !== undefined)) {
+      console.log(`  ! firm ${r.tenantId}: notifications FAILED: ${r.failure ?? ""}`);
+    }
+    const written = [...fanned, ...reminded].reduce((n, r) => n + r.created, 0);
+    const closed = [...fanned, ...reminded].reduce((n, r) => n + r.resolved, 0);
+    console.log(`  ${String(written)} notification(s) written, ${String(closed)} resolved`);
+    const emailed = [...(await wired.notifyEmails.sweepInstant()), ...(await wired.notifyEmails.sweepDigests())];
+    for (const r of emailed.filter((x) => x.failure !== undefined)) {
+      console.log(`  ! firm ${r.tenantId}: notification emails FAILED: ${r.failure ?? ""}`);
+    }
+    const letters = emailed.reduce((n, r) => n + r.letters, 0);
+    if (letters > 0) console.log(`  ${String(letters)} notification email(s) sent`);
+    console.log();
   } finally {
     await wired.pools.close();
   }

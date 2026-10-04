@@ -29,7 +29,9 @@ import type {
   ProposalMailer,
 } from "../../usecase/proposal/ports";
 import type { AdvanceDigestLetter, AdvanceDigestRow, BillingMailer } from "../../usecase/billing/ports";
+import type { NotificationLetter, NotificationMailer } from "../../usecase/notify/ports";
 import { longDay } from "../../domain/day";
+import { displayMoney } from "../../domain/money/model";
 
 /**
  * A rendered letter, ready to hand over.
@@ -75,7 +77,7 @@ export interface MailTransport {
  *  tenant, and the FIRM is named in the invite's own text. */
 const PRODUCT = "BiB";
 
-export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer {
+export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer, NotificationMailer {
   constructor(private readonly transport: MailTransport) {}
 
   sendMagicLink(to: string, url: string, expiresAt: string): Promise<void> {
@@ -617,6 +619,81 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer {
       ]),
     });
   }
+
+  sendNotifications(letter: NotificationLetter): Promise<void> {
+    const { subject, text, html } = notificationLetter(letter);
+    return this.transport.send({ to: letter.to, subject, text, html });
+  }
+}
+
+/**
+ * Notifications by email (0324): the urgent ones at once, everything else in
+ * one email a day. The words are the bell's, already rendered for this reader
+ * (no amount for somebody who may not see fees), so this letter adds only the
+ * frame: who it is for, which firm, a link per notification, and where to
+ * switch these emails off. Every one of those is required: an email a person
+ * cannot stop is an email they learn to filter.
+ */
+function notificationLetter(letter: NotificationLetter): { subject: string; text: string; html: string } {
+  const firm = headerSafe(letter.firmName);
+  const hello = headerSafe(letter.recipientName);
+  const n = letter.items.length;
+  const first = letter.items[0];
+  const subjectCore =
+    letter.mode === "instant"
+      ? n === 1 && first !== undefined
+        ? headerSafe(first.title) ?? "Urgent"
+        : `${String(n)} urgent notifications`
+      : n === 1
+        ? "1 unread notification"
+        : `${String(n)} unread notifications`;
+  const intro =
+    letter.mode === "instant"
+      ? n === 1
+        ? "This needs your attention:"
+        : "These need your attention:"
+      : n === 1
+        ? "You have 1 unread notification:"
+        : `You have ${String(n)} unread notifications:`;
+  const footer =
+    letter.mode === "instant"
+      ? `You get these at once because they are urgent${firm === null ? "" : ` at ${firm}`}.`
+      : `You get this once a day${firm === null ? "" : ` from ${firm}`} on ${PRODUCT}.`;
+
+  const text = [
+    hello === null ? "Hello," : `Hello ${hello},`,
+    ``,
+    intro,
+    ``,
+    ...letter.items.flatMap((i) => [`- ${i.title}${i.detail === null ? "" : ` (${i.detail})`}`, `  ${i.url}`]),
+    ``,
+    `All your notifications: ${letter.inboxUrl}`,
+    ``,
+    footer,
+    `Choose which emails you get: ${letter.settingsUrl}`,
+  ].join("\n");
+
+  const html = page([
+    paragraph(esc(hello === null ? "Hello," : `Hello ${hello},`)),
+    paragraph(esc(intro)),
+    `<ul style="margin:0 0 16px;padding-left:20px">` +
+      letter.items
+        .map(
+          (i) =>
+            `<li style="margin:0 0 10px"><a href="${esc(i.url)}" style="color:#7a1c2e;font-weight:600">${esc(i.title)}</a>` +
+            (i.detail === null ? "" : `<br><span style="color:#555">${esc(i.detail)}</span>`) +
+            `</li>`,
+        )
+        .join("") +
+      `</ul>`,
+    button(letter.inboxUrl, "Open your notifications"),
+    paragraph(
+      `<span style="font-size:13px;color:#666">${esc(footer)} ` +
+        `<a href="${esc(letter.settingsUrl)}" style="color:#666">Choose which emails you get</a>.</span>`,
+    ),
+  ]);
+
+  return { subject: `${subjectCore}${firm === null ? "" : ` · ${firm}`}`, text, html };
 }
 
 /** One advance as a line: whose, which letter, where it stands, for how long. */
@@ -631,32 +708,9 @@ function digestLine(r: AdvanceDigestRow): string {
           : r.stage === "not_raised"
             ? "no invoice yet"
             : "paid";
-  const owed = r.amount === null ? "" : `, ${digestMoney(r.amount, r.currency)} ${r.stage === "on_draft" || r.stage === "not_raised" ? "before tax" : "still owed"}`;
+  const owed = r.amount === null ? "" : `, ${displayMoney(r.amount, r.currency)} ${r.stage === "on_draft" || r.stage === "not_raised" ? "before tax" : "still owed"}`;
   const days = r.daysSinceSigned === 1 ? "1 day" : `${String(r.daysSinceSigned)} days`;
   return `${r.clientName}, ${r.letterRef} (${r.serviceName}): ${stage}${owed}. Signed ${days} ago.`;
-}
-
-/**
- * Money as the screens write it: rupees in lakhs ("INR 1,18,000"), every other
- * currency in its own thousands, no ".00" on a whole amount. Grouped from the
- * western string rather than asked of `en-IN`, which a Node built with small
- * ICU silently answers as en-US. Never a JavaScript number: Intl formats the
- * decimal string exactly.
- */
-function digestMoney(amount: string, currency: string): string {
-  const whole = /^-?\d+(\.0+)?$/.test(amount);
-  const western = new Intl.NumberFormat("en-US", {
-    minimumFractionDigits: whole ? 0 : 2,
-    maximumFractionDigits: whole ? 0 : 2,
-  }).format(amount as unknown as number);
-  if (currency !== "INR") return `${currency} ${western}`;
-  const negative = western.startsWith("-");
-  const [integer = "", fraction] = (negative ? western.slice(1) : western).split(".");
-  const digits = integer.replace(/,/g, "");
-  const last = digits.slice(-3);
-  const rest = digits.slice(0, -3);
-  const pairs = rest.length === 0 ? [] : (rest.match(/(\d{1,2})(?=(\d{2})*$)/g) ?? []);
-  return `INR ${negative ? "-" : ""}${[...pairs, last].join(",")}${fraction === undefined ? "" : `.${fraction}`}`;
 }
 
 /**
