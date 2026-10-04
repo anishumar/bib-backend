@@ -32,6 +32,8 @@ import type { AdvanceDigestLetter, AdvanceDigestRow, BillingMailer } from "../..
 import type { NotificationLetter, NotificationMailer } from "../../usecase/notify/ports";
 import { longDay } from "../../domain/day";
 import { displayMoney } from "../../domain/money/model";
+import { senderDisplayName } from "../../domain/mail/model";
+import type { ClientSender } from "../../domain/mail/model";
 
 /**
  * A rendered letter, ready to hand over.
@@ -52,9 +54,15 @@ export interface Letter {
    * and a letter claiming another would be refused or, worse, delivered.
    */
   readonly fromName?: string | undefined;
-  /** Where a reply goes, when not to the sender — the colleague who prepared
-   *  a proposal, so the client's question reaches a person. */
-  readonly replyTo?: string | undefined;
+  /**
+   * The address to send FROM in place of the deployment's (Q059): only a
+   * client email whose SPOC's domain the firm has listed as one the relay may
+   * send for (SPF/DKIM set up). Any other letter leaves it absent.
+   */
+  readonly fromAddress?: string | undefined;
+  /** Where a reply goes, when not to the sender — the client's SPOC (Q059) or
+   *  the colleague who prepared a proposal, so the answer reaches a person. */
+  readonly replyTo?: string | { readonly name: string; readonly address: string } | undefined;
   readonly attachments?: readonly Attachment[] | undefined;
 }
 
@@ -117,6 +125,7 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer, Notifi
     expiresAt: string,
     firmName: string | null,
     timeZone?: string | null,
+    sender?: ClientSender | null,
   ): Promise<void> {
     // Null is a real state — `PortalInviteService` passes it when the tenant row
     // does not resolve, and its comment is explicit that the letter should go
@@ -144,19 +153,16 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer, Notifi
       ``,
       `The link works ONCE and stops working at ${when}.`,
       ``,
-      `If you were not expecting this, please check with your contact at`,
-      `${who} before opening it, rather than replying to this message.`,
+      ...checkWithText(who, sender ?? null),
     ].join("\n");
 
     return this.transport.send({
       to,
-      // FROM THE FIRM, by name (CA#12): only the display name; the address is
-      // the one the relay authenticates. No firm known, the deployment's name.
-      ...(firm === null ? {} : { fromName: firm }),
+      // FROM THE FIRM, by name (CA#12, CA#40), and since Q059 from the
+      // client's Key Manager at the firm: "Priya Sharma, 10x Global", a reply
+      // reaching her. Her own address only when the firm listed its domain.
+      ...clientHeaders(firm, sender ?? null),
       subject,
-      // Sent AS the firm (CA#40), the way a proposal is (0085): the client
-      // knows the firm, not this product. The address stays the deployment's.
-      fromName: firm ?? undefined,
       text,
       html: page([
         paragraph(
@@ -170,10 +176,7 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer, Notifi
             `invoiced.`,
         ),
         paragraph(`The link works <strong>once</strong> and stops working at ${esc(when)}.`),
-        paragraph(
-          `If you were not expecting this, please check with your contact at ` +
-            `${esc(who)} before opening it, rather than replying to this message.`,
-        ),
+        paragraph(checkWithHtml(who, sender ?? null)),
         fallback(url),
       ]),
     });
@@ -298,6 +301,7 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer, Notifi
     expiresAt: string,
     firmName: string | null,
     timeZone?: string | null,
+    sender?: ClientSender | null,
   ): Promise<void> {
     const firm = headerSafe(firmName);
     const who = firm ?? "The firm you work with";
@@ -323,17 +327,14 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer, Notifi
       `The link works ONCE and stops working at ${when}. If it has expired by the`,
       `time you read this, nothing is lost: sign in as you normally do.`,
       ``,
-      `If you were not expecting this, please check with your contact at`,
-      `${who} before opening it, rather than replying to this message.`,
+      ...checkWithText(who, sender ?? null),
     ].join("\n");
 
     return this.transport.send({
       to,
-      // FROM THE FIRM, by name (CA#12): only the display name; the address is
-      // the one the relay authenticates. No firm known, the deployment's name.
-      ...(firm === null ? {} : { fromName: firm }),
+      // As the invitation (CA#12, Q059).
+      ...clientHeaders(firm, sender ?? null),
       subject,
-      fromName: firm ?? undefined,
       text,
       html: page([
         paragraph(
@@ -354,10 +355,7 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer, Notifi
           `The link works <strong>once</strong> and stops working at ${esc(when)}. If it has ` +
             `expired by the time you read this, nothing is lost: sign in as you normally do.`,
         ),
-        paragraph(
-          `If you were not expecting this, please check with your contact at ` +
-            `${esc(who)} before opening it, rather than replying to this message.`,
-        ),
+        paragraph(checkWithHtml(who, sender ?? null)),
         fallback(url),
       ]),
     });
@@ -449,7 +447,10 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer, Notifi
     const greeting = letter.greetingName === null ? "Hello," : `Dear ${letter.greetingName},`;
     const validity =
       letter.validUntil === null ? null : `It is valid until ${longDay(letter.validUntil)}.`;
-    const replyTo = letter.preparedBy ?? firm;
+    // Q059: from the SPOC (else the Key Manager) by name, replies to them.
+    // Without one, replies go to the colleague who prepared it, as before.
+    const sender = letter.sender;
+    const replyTo = sender !== null ? (headerSafe(sender.name) ?? sender.email) : (letter.preparedBy ?? firm);
     const intro =
       `${firm} has sent you a proposal for ${letter.clientName}: ${letter.title} (${letter.ref}). ` +
       `The PDF is attached.`;
@@ -477,8 +478,9 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer, Notifi
 
     return this.transport.send({
       to: letter.to,
-      fromName: firm,
-      ...(letter.replyTo === null ? {} : { replyTo: letter.replyTo }),
+      ...(sender !== null
+        ? clientHeaders(firm, sender)
+        : { fromName: firm, ...(letter.replyTo === null ? {} : { replyTo: letter.replyTo }) }),
       subject: `Proposal ${ref} from ${firm}`,
       text,
       html: page([
@@ -769,6 +771,58 @@ function readableInstant(iso: string, timeZone?: string | null): string {
  * the tenant, which is not the same as being trustworthy input, and the cost of
  * assuming otherwise is silent. Blank after stripping is the same as absent.
  */
+/**
+ * The From name, From address and Reply-To of a letter to a CLIENT (Q059).
+ * With a sender: "Priya Sharma, 10x Global", Reply-To Priya, and Priya's own
+ * address as the From only when her domain is on the firm's list. Without
+ * one: the firm's name, as before. Every name made header-safe here.
+ */
+function clientHeaders(
+  firm: string | null,
+  sender: ClientSender | null,
+): Pick<Letter, "fromName" | "fromAddress" | "replyTo"> {
+  if (sender === null) return firm === null ? {} : { fromName: firm };
+  const person = headerSafe(sender.name);
+  const name = headerSafe(senderDisplayName({ ...sender, name: person }, firm));
+  return {
+    ...(name === null ? {} : { fromName: name }),
+    ...(sender.ownAddress ? { fromAddress: sender.email } : {}),
+    replyTo: { name: person ?? sender.email, address: sender.email },
+  };
+}
+
+/**
+ * The phishing guard at the foot of an unasked-for letter. It used to say
+ * "rather than replying to this message", because a reply went to a no-reply
+ * box. With a named person at the firm (Q059) the reader is told to check with
+ * THEM, on a number or address they already have: the guard still never
+ * trusts the letter itself.
+ */
+function checkWithText(who: string, sender: ClientSender | null): string[] {
+  if (sender === null) {
+    return [`If you were not expecting this, please check with your contact at`, `${who} before opening it, rather than replying to this message.`];
+  }
+  const person = headerSafe(sender.name) ?? sender.email;
+  return [
+    `If you were not expecting this, please check with ${person} at ${who},`,
+    `on a number or address you already have, before opening it.`,
+  ];
+}
+
+function checkWithHtml(who: string, sender: ClientSender | null): string {
+  if (sender === null) {
+    return (
+      `If you were not expecting this, please check with your contact at ` +
+      `${esc(who)} before opening it, rather than replying to this message.`
+    );
+  }
+  const person = headerSafe(sender.name) ?? sender.email;
+  return (
+    `If you were not expecting this, please check with ${esc(person)} at ${esc(who)}, ` +
+    `on a number or address you already have, before opening it.`
+  );
+}
+
 function headerSafe(name: string | null): string | null {
   if (name === null) return null;
   const flat = name.replace(/[\r\n]+/g, " ").trim();

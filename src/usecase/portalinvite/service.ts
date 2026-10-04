@@ -46,6 +46,7 @@ import type {
   PortalContactMemberships,
   PortalFirmDirectory,
   PortalFirmTimeZone,
+  PortalInviteSenders,
 } from "./ports";
 
 /** The audience a portal invitation is for, spelled once. A typo in the one
@@ -58,6 +59,8 @@ interface Deps {
   readonly memberships: PortalContactMemberships;
   readonly access: PortalContactAccess;
   readonly firms: PortalFirmDirectory;
+  /** Who the letter is from (Q059). Absent: from the firm, as before. */
+  readonly senders?: PortalInviteSenders;
   /** Optional: without it the letter says UTC, as before (CA#50). */
   readonly timeZones?: PortalFirmTimeZone;
   /** `invite` records nothing of its own — the three writes under it each emit
@@ -169,6 +172,7 @@ export class PortalInviteService {
       membership.userId,
       names.get(input.tenantId) ?? null,
       await this.firmZone(input.tenantId),
+      (await this.deps.senders?.senderForClient(input.tenantId, input.clientPartyId)) ?? null,
     );
 
     return {
@@ -234,6 +238,7 @@ export class PortalInviteService {
       membership.userId,
       names.get(input.tenantId) ?? null,
       await this.firmZone(input.tenantId),
+      (await this.deps.senders?.senderForContact(input.tenantId, membership.id)) ?? null,
     );
 
     await this.deps.events.recordEvent({

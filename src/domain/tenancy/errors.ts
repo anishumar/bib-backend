@@ -20,6 +20,7 @@ export type TenancyErrorCode =
   | "INVALID_AUDIENCE"
   | "INVALID_TIME_ZONE"
   | "INVALID_COUNTRY"
+  | "INVALID_SEND_DOMAIN"
   | "SLUG_TAKEN"
   | "EMAIL_TAKEN"
   | "TENANT_NOT_FOUND"
@@ -74,6 +75,13 @@ export class InvalidCountry extends TenancyError {
       "INVALID_COUNTRY",
       `Country ${JSON.stringify(country)} is not a two-letter ISO 3166-1 code, like "IN" or "AE".`,
     );
+  }
+}
+
+/** A domain the firm's client mail may not be sent from (Q059), in words. */
+export class InvalidSendDomain extends TenancyError {
+  constructor(problem: string) {
+    super("INVALID_SEND_DOMAIN", problem);
   }
 }
 

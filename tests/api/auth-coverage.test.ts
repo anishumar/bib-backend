@@ -19,6 +19,7 @@
 // any future plain-Hono route would have been. The middleware guards still
 // covered them, but a test that claims "every route is accounted for" must be
 // able to SEE every route.
+import { ClientMailService } from "../../src/usecase/clientmail/service";
 import { makeFxFakes } from "../../src/testfakes/fx";
 import { NotificationService } from "../../src/usecase/notify/service";
 import { FakeNotificationInbox, FakeNotificationSettings, FakeNotifyFirmSetting } from "../../src/testfakes/notify";
@@ -614,6 +615,12 @@ function deps(): RouterDeps {
       firmEntities: makeFirmEntityFakes().service,
     },
     fx: { service: makeFxFakes().service },
+    clientMail: {
+      service: new ClientMailService({
+        store: { sendFromDomains: () => Promise.resolve([]), setSendFromDomains: () => Promise.resolve() },
+        events: new RecordingEventSink(),
+      }),
+    },
     readiness: {
       service: new ReadinessService({
         facts: new FakeReadinessFacts(),

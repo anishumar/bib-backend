@@ -24,6 +24,7 @@ import type {
 import type { ClientStructure } from "../../domain/party/model";
 import type { ProposalDept, ProposalPlan } from "../../domain/proposal/document";
 import type { Actor } from "../../domain/ledger/model";
+import type { ClientSender } from "../../domain/mail/model";
 
 
 /**
@@ -477,8 +478,11 @@ export interface ClientDecisionRecord {
 export interface ProposalLetter {
   readonly to: string;
   /** The colleague who prepared it, so a reply reaches a person. Null sends
-   *  replies to the From address. */
+   *  replies to the From address. The SENDER below wins when there is one. */
   readonly replyTo: string | null;
+  /** Who the email is from (Q059): the SPOC of the proposal's one Dept, else
+   *  the client's Key Manager. Null: from the firm, replies to the preparer. */
+  readonly sender: ClientSender | null;
   /** Who the email is FROM, by name, and who signs it. */
   readonly firmName: string;
   readonly preparedBy: string | null;
@@ -520,6 +524,11 @@ export interface DecisionNotice {
  * Sending the two letters. `SmtpMailer` satisfies it structurally beside the
  * identity letters, so one adapter still owns everything an email says.
  */
+/** Who a proposal email is from (Q059). Satisfied by `PostgresClientSenders`. */
+export interface ProposalSenders {
+  senderForProposal(tenantId: string, proposalId: string): Promise<ClientSender | null>;
+}
+
 export interface ProposalMailer {
   /** Rejects if the mail server did not take it. */
   sendProposal(letter: ProposalLetter): Promise<void>;

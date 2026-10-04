@@ -120,6 +120,7 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_AUDIENCE":
       case "INVALID_TIME_ZONE":
       case "INVALID_COUNTRY":
+      case "INVALID_SEND_DOMAIN":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       case "SLUG_TAKEN":
       case "EMAIL_TAKEN":

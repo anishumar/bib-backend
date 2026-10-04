@@ -28,6 +28,7 @@ const VIEW = "https://app.example.com/p/tenant.secret";
 const LETTER: ProposalLetter = {
   to: "priya@nexusfintech.in",
   replyTo: "sahil@10xglobal.in",
+  sender: null,
   firmName: "10X Global Inc.",
   preparedBy: "Sahil Kohli",
   greetingName: "Priya Sharma",
@@ -55,6 +56,19 @@ describe("the proposal email", () => {
     expect(letter.subject).toBe("Proposal PR-2026-0001 from 10X Global Inc.");
     expect(letter.replyTo).toBe("sahil@10xglobal.in");
     expect(letter.text).toContain("Questions? Reply to this email and it reaches Sahil Kohli.");
+  });
+
+  it("is from the client's SPOC by name and replies to them, over the preparer (Q059)", () => {
+    const t = new Captured();
+    void new SmtpMailer(t).sendProposal({
+      ...LETTER,
+      sender: { name: "Priya Sharma", email: "priya@10xglobal.in", ownAddress: true },
+    });
+    const letter = only(t);
+    expect(letter.fromName).toBe("Priya Sharma, 10X Global Inc.");
+    expect(letter.fromAddress).toBe("priya@10xglobal.in");
+    expect(letter.replyTo).toEqual({ name: "Priya Sharma", address: "priya@10xglobal.in" });
+    expect(letter.text).toContain("Reply to this email and it reaches Priya Sharma.");
   });
 
   it("attaches the PDF, as a PDF", () => {

@@ -104,6 +104,8 @@ import { PostgresDashboardRepository } from "../infrastructure/postgres/dashboar
 import { DashboardService } from "../usecase/dashboard/service";
 import { PostgresReadinessFacts } from "../infrastructure/postgres/readiness-facts";
 import { ReadinessService } from "../usecase/readiness/service";
+import { ClientMailService } from "../usecase/clientmail/service";
+import { PostgresClientSenders } from "../infrastructure/postgres/client-senders";
 import { InvoiceService } from "../usecase/invoice/service";
 import { BillingDeskService } from "../usecase/billing/desk";
 import { WorkBillingService } from "../usecase/billing/work-vs-billing";
@@ -955,12 +957,16 @@ export function wire(cfg: Config, log: Logger): Wired {
   // silent: a membership with no grant is a portal that shows nothing, and a
   // grant with no membership is unreachable. Each port is satisfied
   // structurally, so no use case imports another.
+  // Q059: who a client email is from (the SPOC, else the Key Manager) and
+  // whether it may go from their own address (the firm's send domains, 0350).
+  const clientSenders = new PostgresClientSenders(pools.app);
   const portalAccessForInvite = (): PortalInviteService =>
     new PortalInviteService({
       identity,
       memberships: tenancy,
       access: portalAccess,
       firms: tenancy,
+      senders: clientSenders,
       // CA#50: the invitation's expiry on the firm's clock.
       timeZones: new PostgresFirmTimeZone(pools.app),
       // `invite` records nothing itself — its three writes each emit their own
@@ -1203,6 +1209,7 @@ export function wire(cfg: Config, log: Logger): Wired {
   // config adapter satisfies both structurally, so neither module imports the
   // other. Same seam, same reason, as leads meeting parties above.
   const proposal = new ProposalService({
+    senders: clientSenders,
     proposals: new PostgresProposalRepository(pools.app),
     catalogue: configRepository,
     policies: configRepository,
@@ -1434,6 +1441,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         filestore: { service: fileStore, authz },
         dashboard: { service: dashboards, authz },
         readiness: { service: readiness },
+        clientMail: { service: new ClientMailService({ store: clientSenders, events: ledger }) },
         fx: { service: fx },
       },
       log,

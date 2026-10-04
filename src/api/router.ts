@@ -95,6 +95,8 @@ import { registerFileStoreRoutes } from "./handler/filestore";
 import { registerDashboardRoutes } from "./handler/dashboard";
 import type { DashboardDeps } from "./handler/dashboard";
 import { registerReadinessRoutes } from "./handler/readiness";
+import { registerClientMailRoutes } from "./handler/clientmail";
+import type { ClientMailDeps } from "./handler/clientmail";
 import { registerFxRoutes } from "./handler/fx";
 import type { FxDeps } from "./handler/fx";
 import type { ReadinessDeps } from "./handler/readiness";
@@ -215,6 +217,7 @@ export interface RouterDeps {
   readonly filestore: FileStoreDeps;
   readonly dashboard: DashboardDeps;
   readonly readiness: ReadinessDeps;
+  readonly clientMail: ClientMailDeps;
   /** The day's exchange rate, as a suggestion (0345). */
   readonly fx: FxDeps;
   readonly auth: AuthDeps;
@@ -500,6 +503,7 @@ export function buildRouter(
   registerFileStoreRoutes(app, deps.filestore);
   registerDashboardRoutes(app, deps.dashboard);
   registerReadinessRoutes(app, deps.readiness);
+  registerClientMailRoutes(app, deps.clientMail);
   registerFxRoutes(app, deps.fx);
 
   // Docs are generated FROM the routes above, so this must come after them.

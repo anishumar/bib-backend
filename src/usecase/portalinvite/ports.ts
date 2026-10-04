@@ -7,6 +7,7 @@
 // three services, so no use case imports another — the arrangement
 // `usecase/lead` has with `PartyService` through `ProspectDirectory`.
 import type { Actor } from "../../domain/ledger/model";
+import type { ClientSender } from "../../domain/mail/model";
 
 /** The account and the letter. Satisfied by `IdentityService`. */
 export interface PortalContactIdentity {
@@ -18,7 +19,12 @@ export interface PortalContactIdentity {
    * a member of the firm, and a firm that can read its client's invite link can
    * sign in as that client. The link exists in the mail and nowhere else.
    */
-  invitePortalContact(userId: string, firmName: string | null, timeZone?: string | null): Promise<string>;
+  invitePortalContact(
+    userId: string,
+    firmName: string | null,
+    timeZone?: string | null,
+    sender?: ClientSender | null,
+  ): Promise<string>;
 
   /**
    * Send that same letter AGAIN, to the address already on the account.
@@ -33,7 +39,19 @@ export interface PortalContactIdentity {
     userId: string,
     firmName: string | null,
     timeZone?: string | null,
+    sender?: ClientSender | null,
   ): Promise<{ readonly expiresAt: string; readonly supersededLinks: number }>;
+}
+
+/**
+ * Who the invitation is from (Q059): the client's Key Manager, by name, with
+ * a reply reaching them. Satisfied by `PostgresClientSenders`. Null: nobody in
+ * that seat, and the letter is from the firm as before.
+ */
+export interface PortalInviteSenders {
+  senderForClient(tenantId: string, clientPartyId: string): Promise<ClientSender | null>;
+  /** For a letter sent again: the first client the contact may see today. */
+  senderForContact(tenantId: string, membershipId: string): Promise<ClientSender | null>;
 }
 
 /** The membership. Satisfied by `TenancyService`. */

@@ -130,6 +130,7 @@ import type {
   ProposalFilters,
   ProposalLinks,
   ProposalMailer,
+  ProposalSenders,
   ProposalPdfs,
   ProposalRecord,
   ProposalRepository,
@@ -176,6 +177,8 @@ export interface Deps {
    * rather than logged as sent.
    */
   readonly mailer: ProposalMailer | null;
+  /** Who a proposal email is from (Q059). Absent: from the firm, as before. */
+  readonly senders?: ProposalSenders;
   /** The proposal as a PDF, rendered and filed through the document store. */
   readonly pdfs: ProposalPdfs;
   /** Where a letter's links point. */
@@ -1907,6 +1910,7 @@ export class ProposalService {
       await mailer.sendProposal({
         to: request.to,
         replyTo: record.preparedBy?.email ?? null,
+        sender: (await this.deps.senders?.senderForProposal(proposal.tenantId, proposal.id)) ?? null,
         firmName: record.firmName,
         preparedBy: record.preparedBy?.displayName ?? null,
         greetingName: record.addressee?.displayName ?? null,

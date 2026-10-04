@@ -308,6 +308,10 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // Setup readiness (V2.6): what the firm has not set up yet, by name. Behind
   // the permission every line's fix already needs.
   [routeKey("GET", "/api/v1/tenancy/readiness"), "tenant:admin" as const],
+  // Which domains the firm's client mail may claim to come from (Q059): an
+  // administrator's call, made once the mail provider authorises the relay.
+  [routeKey("GET", "/api/v1/tenancy/mail-senders"), "tenant:admin" as const],
+  [routeKey("PUT", "/api/v1/tenancy/mail-senders"), "tenant:admin" as const],
   // The PICKER, not the roster: names and rungs of active staff, no emails.
   // `party:read`: whoever may look at a client may see which colleague to
   // hand its work to. Decided 2026-09-25; see `TenancyService.listColleagues`.
