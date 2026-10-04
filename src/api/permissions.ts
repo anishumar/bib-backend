@@ -119,6 +119,7 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // Correcting a client's master data (V2.5): the gate that created it.
   [routeKey("PATCH", "/api/v1/parties/{partyId}"), "party:write" as const],
   [routeKey("PATCH", "/api/v1/parties/{partyId}/legal-entity"), "party:write" as const],
+  [routeKey("PUT", "/api/v1/parties/{partyId}/legal-entity/time-zone"), "party:write" as const],
   [routeKey("POST", "/api/v1/parties/{partyId}/identifiers/{identifierId}/end"), "party:write" as const],
   [routeKey("POST", "/api/v1/parties/{partyId}/identifiers/{identifierId}/void"), "party:write" as const],
   [routeKey("POST", "/api/v1/parties/relationships"), "party:write" as const],

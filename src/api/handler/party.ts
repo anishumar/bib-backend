@@ -123,6 +123,11 @@ const LegalEntitySchema = z
     entityType: z.string(),
     incorporatedOn: z.string().nullable(),
     financialYearEnd: z.string().nullable(),
+    timeZone: z.string().nullable().openapi({
+      description:
+        "The company's own IANA zone, or null for its country's. For a client company it is " +
+        "the clock its filings are judged missed on (Q070 Part B).",
+    }),
     registeredAddress: z.record(z.unknown()).nullable(),
     status: z.enum(["active", "dormant", "under_strike_off", "struck_off", "dissolved"]),
   })
@@ -410,6 +415,34 @@ const correctLegalEntityRoute = createRoute({
   },
 });
 
+const SetEntityTimeZoneBody = z
+  .object({
+    timeZone: z.string().max(64).nullable().openapi({ example: "America/Los_Angeles" }),
+  })
+  .openapi("SetLegalEntityTimeZone");
+
+const setEntityTimeZoneRoute = createRoute({
+  method: "put",
+  path: "/api/v1/parties/{partyId}/legal-entity/time-zone",
+  tags: ["party"],
+  summary: "Set a registered company's own time zone, or null for its country's",
+  description:
+    "For a client company, the clock its filings are judged MISSED on (Q070 Part B): its own " +
+    "zone first, else its country's (New York for the US), else the firm's company there, " +
+    "else the firm's. Only needed where the country keeps several zones.",
+  request: {
+    params: PartyParam,
+    body: { content: { "application/json": { schema: SetEntityTimeZoneBody } }, required: true },
+  },
+  responses: {
+    200: { description: "Set", content: { "application/json": { schema: LegalEntitySchema } } },
+    400: errorResponse("Not a time zone this system knows, an offset, or nothing changed"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not do this"),
+    409: errorResponse("The client is not registered as a company"),
+  },
+});
+
 const IdentifierParam = z.object({
   partyId: z.string().uuid(),
   identifierId: z.string().uuid(),
@@ -678,6 +711,7 @@ function legalEntityWire(e: LegalEntity): z.infer<typeof LegalEntitySchema> {
     entityType: e.entityType,
     incorporatedOn: e.incorporatedOn,
     financialYearEnd: e.financialYearEnd,
+    timeZone: e.timeZone,
     registeredAddress: e.registeredAddress === null ? null : { ...e.registeredAddress },
     status: e.status,
   };
@@ -769,6 +803,15 @@ export function registerPartyRoutes(app: OpenAPIHono<AppEnv>, deps: PartyDeps): 
     const { partyId } = c.req.valid("param");
     const body = c.req.valid("json");
     const entity = await deps.service.correctLegalEntity({ tenantId: s.tenantId, partyId, ...body }, s.actor);
+    return c.json(legalEntityWire(entity), 200);
+  });
+
+  app.openapi(setEntityTimeZoneRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { partyId } = c.req.valid("param");
+    const { timeZone } = c.req.valid("json");
+    const entity = await deps.service.setLegalEntityTimeZone({ tenantId: s.tenantId, partyId, timeZone }, s.actor);
     return c.json(legalEntityWire(entity), 200);
   });
 

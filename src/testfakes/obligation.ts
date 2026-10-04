@@ -14,6 +14,8 @@ import {
   type ResolutionOption,
 } from "../domain/obligation/model";
 import type { Actor } from "../domain/ledger/model";
+import { filingDay } from "../domain/obligation/filing-zone";
+import { dayInZone } from "../domain/scheduler/zone";
 import type {
   CalendarQuery,
   CalendarRow,
@@ -102,7 +104,7 @@ export class FakeObligationTemplateRepo implements ObligationTemplateRepository 
         new Error("FakeObligationTemplateRepo was handed links but has no link store: wire `links`"),
       );
     }
-    const row: ObligationTemplate = { ...t, lineageId, isActive: true };
+    const row: ObligationTemplate = { ...t, periodBasis: t.periodBasis ?? "rule_calendar", lineageId, isActive: true };
     this.rows.push(row);
     // The links in the SAME act, as the adapter writes them in one transaction.
     for (const link of links) {
@@ -148,6 +150,7 @@ export class FakeObligationTemplateRepo implements ObligationTemplateRepository 
 
     const successor: ObligationTemplate = {
       ...t,
+      periodBasis: t.periodBasis ?? "rule_calendar",
       supersedesId: predecessorId,
       // The chain carries over, and with it every service link (0309).
       lineageId: predecessor.lineageId,
@@ -517,8 +520,26 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
         }
         continue;
       }
+      // A period cut on the client's year never overlaps one already held
+      // (0358), the adapter's NOT EXISTS, modelled.
+      if (
+        (r.periodBasis ?? "rule_calendar") !== "rule_calendar" &&
+        this.rows.some(
+          (x) =>
+            x.tenantId === r.tenantId &&
+            this.lineage(x.templateId) === lineage &&
+            x.entityPartyId === r.entityPartyId &&
+            x.periodStart !== r.periodStart &&
+            x.periodStart <= r.periodEnd &&
+            x.periodEnd >= r.periodStart &&
+            x.withdrawnAt === null,
+        )
+      ) {
+        continue;
+      }
       this.rows.push({
         ...r,
+        periodBasis: r.periodBasis ?? "rule_calendar",
         workItemId: null,
         filedOn: null,
         filedByWorkItemId: null,
@@ -573,6 +594,10 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
             filedOn: r.filedOn,
             filedByWorkItemId: r.filedByWorkItemId,
             filedByTitle: null,
+            periodBasis: r.periodBasis,
+            ruleYearStartMonth: this.templates?.rows.find((t) => t.id === r.templateId)?.fiscalYearStartMonth ?? 4,
+            filingZone: this.filingZones.get(r.id) ?? this.firmZone,
+            filingToday: dayInZone(query.now ?? new Date().toISOString(), this.filingZones.get(r.id) ?? this.firmZone),
             resolutionOptionId: r.resolutionOptionId,
             resolutionName: null,
             resolutionReason: r.resolutionReason,
@@ -721,17 +746,23 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
    * what decide, never a code.
    */
   states: ObligationState[] = [];
+  /** A filing's zone, by row id, as the adapter resolves it (Q070 Part B);
+   *  a row not named is on the firm's zone. */
+  readonly filingZones = new Map<string, string>();
+  firmZone = "UTC";
 
   listMissable(
     tenantId: string,
     asOf: string,
     floor: string | null,
     limit: number,
+    now: string,
   ): Promise<readonly MissableObligation[]> {
+    const dayOf = (id: string) => filingDay(asOf, now, this.filingZones.get(id) ?? this.firmZone, this.firmZone);
     const out = this.rows
       .filter((r) => {
         if (r.tenantId !== tenantId) return false;
-        if (r.statutoryDueOn >= asOf) return false;
+        if (r.statutoryDueOn >= dayOf(r.id)) return false;
         if (r.filedOn !== null) return false;
         if (r.resolvedAt !== null) return false;
         if (r.withdrawnAt !== null) return false;
@@ -749,6 +780,8 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
           templateName: r.templateId,
           periodLabel: r.periodLabel,
           workItemId: r.workItemId,
+          filingDay: dayOf(r.id),
+          filingZone: this.filingZones.get(r.id) ?? this.firmZone,
         }),
       );
     return Promise.resolve(out);
@@ -923,6 +956,7 @@ export class FakeCalendarSource implements CalendarSource {
           effectiveFrom: s.effectiveFrom,
           serviceEntryId: s.serviceEntryId,
           endsOn: s.endsOn ?? null,
+          financialYearEnd: s.financialYearEnd ?? null,
         })),
     );
   }

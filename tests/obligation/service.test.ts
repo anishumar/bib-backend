@@ -2382,3 +2382,119 @@ describe("filling the calendar the moment work goes live (audit 2026-10-03, CA#2
     expect(sweep.created).toBe(0);
   });
 });
+
+describe("a rule may cut its periods on the CLIENT's year end (Q070 Part B, 0358)", () => {
+  const SG_A = "00000000-0000-4000-8000-0000000005a1";
+  const SG_B = "00000000-0000-4000-8000-0000000005b1";
+  let h: H;
+  beforeEach(() => {
+    h = harness();
+  });
+
+  /** Singapore's annual return on the client's year end: due 7 months after
+   *  it ends (the last day of the 7th month), on the firm's SG service. */
+  async function annualOnClientYear(periodBasis: "client_year_end" | "rule_calendar" = "client_year_end") {
+    await h.service.seedDefaultStates(FIRM, ACTOR);
+    h.services.keys.set(SERVICE, "sg-annual");
+    const { rule } = await h.service.createRule(
+      {
+        tenantId: FIRM,
+        jurisdiction: "SG",
+        serviceEntryIds: [SERVICE],
+        name: "Annual return (ACRA)",
+        recurrence: "annual",
+        fiscalYearStartMonth: 4,
+        periodBasis,
+        dueRule: { kind: "day_of_month", dueMonthOffset: 7, dueDayOfMonth: 31 },
+        leadTimeDays: 0,
+        rulePack: "sg@test",
+      },
+      ACTOR,
+    );
+    return rule;
+  }
+  function subject(entityPartyId: string, financialYearEnd: string | null, n: number) {
+    h.calendarSource.subjects.push({
+      entityPartyId,
+      engagementId: `00000000-0000-4000-8000-00000000e${String(n).padStart(3, "0")}`,
+      effectiveFrom: "2025-01-01",
+      jurisdiction: "SG",
+      entityType: null,
+      serviceEntryId: SERVICE,
+      financialYearEnd,
+    });
+  }
+  const rowsOf = (entity: string) =>
+    h.instances.rows
+      .filter((r) => r.entityPartyId === entity)
+      .sort((a, b) => a.periodStart.localeCompare(b.periodStart));
+
+  it("a December year-end client gets January-December years, due 31 July", async () => {
+    await annualOnClientYear();
+    subject(SG_A, "12-31", 1);
+    await h.service.generate(FIRM, { from: "2026-01-01", to: "2026-12-31" }, ACTOR);
+
+    expect(rowsOf(SG_A).map((r) => [r.periodStart, r.periodEnd, r.periodLabel, r.statutoryDueOn, r.periodBasis])).toEqual([
+      ["2026-01-01", "2026-12-31", "2026", "2027-07-31", "client_year_end"],
+    ]);
+  });
+
+  it("a client with no year end recorded takes the rule's own month, and the row says so", async () => {
+    await annualOnClientYear();
+    subject(SG_B, null, 2);
+    await h.service.generate(FIRM, { from: "2026-04-01", to: "2026-04-30" }, ACTOR);
+
+    expect(rowsOf(SG_B).map((r) => [r.periodStart, r.periodEnd, r.periodBasis])).toEqual([
+      ["2026-04-01", "2027-03-31", "rule_fallback"],
+    ]);
+    const [row] = await h.service.calendar(FIRM, {});
+    expect(row).toMatchObject({ periodBasis: "rule_fallback", ruleYearStartMonth: 4 });
+  });
+
+  it("two clients with different year ends get their own years from one rule", async () => {
+    await annualOnClientYear();
+    subject(SG_A, "12-31", 1);
+    subject(SG_B, "06-30", 2);
+    await h.service.generate(FIRM, { from: "2026-07-01", to: "2026-07-31" }, ACTOR);
+    expect(rowsOf(SG_A).map((r) => r.periodStart)).toEqual(["2026-01-01"]);
+    expect(rowsOf(SG_B).map((r) => [r.periodStart, r.periodEnd, r.periodLabel])).toEqual([
+      ["2026-07-01", "2027-06-30", "FY2026-27"],
+    ]);
+  });
+
+  it("a rule on its own year ignores the client's year end, as every rule did before", async () => {
+    await annualOnClientYear("rule_calendar");
+    subject(SG_A, "12-31", 1);
+    await h.service.generate(FIRM, { from: "2026-04-01", to: "2026-04-30" }, ACTOR);
+    expect(rowsOf(SG_A).map((r) => [r.periodStart, r.periodBasis])).toEqual([["2026-04-01", "rule_calendar"]]);
+  });
+
+  it("a year end that changes keeps what was generated, and never overlaps it (Q078's default)", async () => {
+    await annualOnClientYear();
+    subject(SG_A, "12-31", 1);
+    await h.service.generate(FIRM, { from: "2026-01-01", to: "2026-12-31" }, ACTOR);
+    // The client moves to a June year end.
+    h.calendarSource.subjects.length = 0;
+    subject(SG_A, "06-30", 1);
+    await h.service.generate(FIRM, { from: "2026-01-01", to: "2027-12-31" }, ACTOR);
+
+    // Jan-Dec 2026 stays; Jul 2026-Jun 2027 overlaps it and is not produced;
+    // Jul 2027-Jun 2028 is the first period on the new end.
+    expect(rowsOf(SG_A).map((r) => [r.periodStart, r.periodEnd])).toEqual([
+      ["2026-01-01", "2026-12-31"],
+      ["2027-07-01", "2028-06-30"],
+    ]);
+  });
+
+  it("whose year the periods follow is part of the period shape, locked once rows exist", async () => {
+    const rule = await annualOnClientYear();
+    subject(SG_A, "12-31", 1);
+    await h.service.generate(FIRM, { from: "2026-01-01", to: "2026-12-31" }, ACTOR);
+    await expect(
+      h.service.updateRule(FIRM, rule.id, { periodBasis: "rule_calendar" }, ACTOR),
+    ).rejects.toMatchObject({ code: "PERIOD_SHAPE_LOCKED" });
+    await expect(
+      h.service.updateRule(FIRM, rule.id, { periodBasis: "the_moon" }, ACTOR),
+    ).rejects.toMatchObject({ code: "INVALID_PERIOD_BASIS" });
+  });
+});

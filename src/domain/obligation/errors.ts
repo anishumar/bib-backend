@@ -33,6 +33,7 @@ export type ObligationErrorCode =
   | "INVALID_JURISDICTION"
   | "INVALID_RECURRENCE"
   | "INVALID_FISCAL_YEAR_START"
+  | "INVALID_PERIOD_BASIS"
   | "INVALID_DUE_RULE"
   | "INCOMPLETE_DUE_RULE"
   | "UNRESOLVED_REASON_REQUIRED"
@@ -108,6 +109,16 @@ export class InvalidRecurrence extends ObligationError {
         `annual or event. "event" means the filing is triggered by something happening (a ` +
         `share allotment, a director change) and produces no calendar entries, because ` +
         `nothing in this system yet knows the event occurred.`,
+    );
+  }
+}
+
+export class InvalidPeriodBasis extends ObligationError {
+  constructor(value: string) {
+    super(
+      "INVALID_PERIOD_BASIS",
+      `A filing's periods follow the rule's own year ("rule_calendar") or the client's year end ` +
+        `("client_year_end"), not ${JSON.stringify(value)}.`,
     );
   }
 }

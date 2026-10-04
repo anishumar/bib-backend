@@ -32,6 +32,7 @@ import {
   isIsoDate,
   isObligationRecurrence,
   isRuleStatus,
+  isPeriodBasis,
   missedState,
   periodsBetween,
   resolutionState,
@@ -40,6 +41,7 @@ import {
   type DueRuleException,
   type IsoDate,
   type ObligationState,
+  type InstancePeriodBasis,
   type ObligationTemplate,
 } from "../../domain/obligation/model.js";
 import {
@@ -49,6 +51,7 @@ import {
   ExceptionOnEventRule,
   IncompleteDueRule,
   InvalidFiscalYearStart,
+  InvalidPeriodBasis,
   InvalidJurisdiction,
   InvalidLeadTime,
   InvalidPeriodEndMonth,
@@ -90,6 +93,7 @@ import type { IdGen } from "../../platform/ids.js";
 import type { EventSink } from "../ledger/ports.js";
 import type {
   CalendarQuery,
+  CalendarSubject,
   CalendarRow,
   CalendarSource,
   CompliancePolicySource,
@@ -113,6 +117,7 @@ import type {
 } from "./ports.js";
 import type { FirmTimeZone } from "./ports.js";
 import { dayInZone } from "../../domain/scheduler/zone.js";
+import { periodYearFor } from "../../domain/obligation/period-basis";
 import { isCountryCode } from "../../domain/country";
 
 const SYSTEM_ACTOR: Actor = { type: "system", id: null };
@@ -221,6 +226,8 @@ export interface CreateRuleInput {
   readonly authority?: string | null | undefined;
   readonly recurrence: string;
   readonly fiscalYearStartMonth: number;
+  /** Whose year the periods follow (0358). Absent is the rule's own. */
+  readonly periodBasis?: string | undefined;
   readonly dueRule: {
     readonly kind: string;
     readonly dueMonthOffset?: number | null | undefined;
@@ -754,6 +761,8 @@ export class ObligationService {
     if (!Number.isInteger(input.leadTimeDays) || input.leadTimeDays < 0) {
       throw new InvalidLeadTime(input.leadTimeDays);
     }
+    const periodBasis = input.periodBasis ?? "rule_calendar";
+    if (!isPeriodBasis(periodBasis)) throw new InvalidPeriodBasis(periodBasis);
     const rulePack = input.rulePack.trim();
     if (rulePack.length === 0) throw new InvalidRulePack(input.rulePack);
 
@@ -787,6 +796,7 @@ export class ObligationService {
       authority: (input.authority ?? "").trim() || null,
       recurrence: input.recurrence,
       fiscalYearStartMonth: input.fiscalYearStartMonth,
+      periodBasis,
       dueRule,
       unresolvedReason,
       leadTimeDays: input.leadTimeDays,
@@ -1001,6 +1011,8 @@ export class ObligationService {
       authority: input.authority === undefined ? current.authority : trimToNull(input.authority),
       recurrence: current.recurrence,
       fiscalYearStartMonth: current.fiscalYearStartMonth,
+      // The period shape carries over, its basis with it (0358).
+      periodBasis: current.periodBasis,
       dueRule,
       unresolvedReason,
       leadTimeDays,
@@ -1033,7 +1045,12 @@ export class ObligationService {
     const future = (await this.deps.instances.listUnstarted(tenantId, predecessorId)).filter(
       (r) => r.periodStart >= input.effectiveFrom,
     );
-    const asTemplate: ObligationTemplate = { ...next, lineageId: current.lineageId, isActive: true };
+    const asTemplate: ObligationTemplate = {
+      ...next,
+      periodBasis: current.periodBasis,
+      lineageId: current.lineageId,
+      isActive: true,
+    };
     const redated = new Set<string>();
     const handover: RestatedInstance[] = future.map((row) => {
       const schedule = scheduleFor(asTemplate, [], {
@@ -1139,6 +1156,8 @@ export class ObligationService {
     }
     const status = edit.status ?? current.status;
     if (!isRuleStatus(String(status))) throw new InvalidRuleStatus(String(status));
+    const periodBasis = edit.periodBasis ?? current.periodBasis;
+    if (!isPeriodBasis(periodBasis)) throw new InvalidPeriodBasis(periodBasis);
 
     // ── THE PERIOD SHAPE IS PART OF THE IDENTITY ONCE ROWS EXIST ───────────
     //
@@ -1153,13 +1172,21 @@ export class ObligationService {
     // is the state of all forty-seven rules a partner actually has to answer
     // for. A rule that IS generating and needs a different shape is a new rule;
     // the old one retires and goes on explaining the filings it made.
+    // And whose year the periods follow (0358): moving a rule onto the
+    // client's year end re-cuts every quarter it has produced.
     const shapeChanged =
-      recurrence !== current.recurrence || fiscalYearStartMonth !== current.fiscalYearStartMonth;
+      recurrence !== current.recurrence ||
+      fiscalYearStartMonth !== current.fiscalYearStartMonth ||
+      periodBasis !== current.periodBasis;
     if (shapeChanged) {
       const produced = await this.deps.instances.countFor(tenantId, templateId);
       if (produced > 0) {
         throw new PeriodShapeLocked(
-          recurrence !== current.recurrence ? "How often the filing comes round" : "The financial year start",
+          recurrence !== current.recurrence
+            ? "How often the filing comes round"
+            : fiscalYearStartMonth !== current.fiscalYearStartMonth
+              ? "The financial year start"
+              : "Whose year the periods follow",
           produced,
         );
       }
@@ -1184,6 +1211,7 @@ export class ObligationService {
       authority: edit.authority === undefined ? current.authority : trimToNull(edit.authority),
       recurrence,
       fiscalYearStartMonth,
+      periodBasis,
       dueRule,
       unresolvedReason,
       leadTimeDays,
@@ -1803,70 +1831,92 @@ export class ObligationService {
       }
       for (const s of subjects) serviceOf.set(s.engagementId, s.serviceEntryId);
 
-      const periods = periodsBetween(
-        template.recurrence,
-        template.fiscalYearStartMonth,
-        window.from,
-        window.to,
-      );
+      // WHOSE YEAR THE PERIODS ARE CUT ON (0358). A rule on its own year cuts
+      // one set for everybody; a rule on the client's year end cuts one set
+      // per year start its subjects hold, and a subject with no year end
+      // recorded takes the rule's own month, marked `rule_fallback`. Subjects
+      // keep their order inside each group, so the first-subject-per-entity
+      // promise below holds: one entity has one year end, so it is in one
+      // group.
+      const byYear = new Map<number, { basis: InstancePeriodBasis; subjects: CalendarSubject[] }>();
+      for (const s of subjects) {
+        const y = periodYearFor(template, s.financialYearEnd ?? null);
+        // The month, and whether it is a fallback: a client on the rule's own
+        // month by its OWN year end is not a client with none recorded.
+        const key = y.startMonth * 10 + (y.basis === "rule_fallback" ? 1 : 0);
+        const group = byYear.get(key) ?? { basis: y.basis, subjects: [] };
+        group.subjects.push(s);
+        byYear.set(key, group);
+      }
 
-      for (const period of periods) {
+      for (const [yearKey, group] of byYear) {
         if (full) break;
-        // THE RULE THAT GOVERNS A PERIOD IS THE ONE IN FORCE FOR IT (0057).
-        // Without this a superseding rule regenerates every period its
-        // predecessor already produced — a different `template_id`, so the
-        // re-run key cannot catch it, and the calendar shows each filing twice
-        // with nothing reporting an error.
-        if (!governsPeriod(template, period.start)) continue;
-        const schedule = scheduleFor(template, exceptions, period);
-        if (!schedule) continue;
+        const periods = periodsBetween(
+          template.recurrence,
+          Math.floor(yearKey / 10),
+          window.from,
+          window.to,
+        );
 
-        for (const subject of subjects) {
-          // THE FLOOR. A filing that fell due before the firm was engaged is
-          // not the firm's — see `CalendarSubject.effectiveFrom`. The test is
-          // the STATUTORY DATE and not the period: a firm engaged on 1 August
-          // still files July's return, which falls due on the 20th while it is
-          // engaged; it cannot have filed June's, which fell due before it was
-          // appointed. Arithmetic rather than judgement — the firm was not
-          // there.
-          //
-          // What is still a QUESTION, and is the firm's rather than ours: the
-          // period that straddles the start. An engagement beginning 26 August
-          // produces August's return, covering three weeks before the firm was
-          // appointed. It is generated here because somebody has to file it.
-          if (schedule.statutoryDueOn < subject.effectiveFrom) continue;
-          // THE CEILING (V2.3): a period that begins after the engagement's
-          // last day is not the firm's. The PERIOD, not the due date, and
-          // that is the other half of the floor's reasoning: a firm that
-          // served September files September's return, due in October.
-          if (subject.endsOn !== null && period.start > subject.endsOn) continue;
-          // THE FIRM'S OWN FLOOR, the same test: a filing due before the day
-          // the firm started keeping this calendar is not the firm's either.
-          if (floor !== null && schedule.statutoryDueOn < floor) continue;
-          // The FIRST subject for this entity that passes the floors is the
-          // one: subjects are in order, and the earliest engagement is also
-          // the one whose floor lets the most periods through.
-          const key = `${template.lineageId}|${subject.entityPartyId}|${period.start}`;
-          if (proposed.has(key)) continue;
-          if (pending.length >= GENERATE_BATCH) {
-            full = true;
-            break;
+        for (const period of periods) {
+          if (full) break;
+          // THE RULE THAT GOVERNS A PERIOD IS THE ONE IN FORCE FOR IT (0057).
+          // Without this a superseding rule regenerates every period its
+          // predecessor already produced — a different `template_id`, so the
+          // re-run key cannot catch it, and the calendar shows each filing twice
+          // with nothing reporting an error.
+          if (!governsPeriod(template, period.start)) continue;
+          const schedule = scheduleFor(template, exceptions, period);
+          if (!schedule) continue;
+
+          for (const subject of group.subjects) {
+            // THE FLOOR. A filing that fell due before the firm was engaged is
+            // not the firm's — see `CalendarSubject.effectiveFrom`. The test is
+            // the STATUTORY DATE and not the period: a firm engaged on 1 August
+            // still files July's return, which falls due on the 20th while it is
+            // engaged; it cannot have filed June's, which fell due before it was
+            // appointed. Arithmetic rather than judgement — the firm was not
+            // there.
+            //
+            // What is still a QUESTION, and is the firm's rather than ours: the
+            // period that straddles the start. An engagement beginning 26 August
+            // produces August's return, covering three weeks before the firm was
+            // appointed. It is generated here because somebody has to file it.
+            if (schedule.statutoryDueOn < subject.effectiveFrom) continue;
+            // THE CEILING (V2.3): a period that begins after the engagement's
+            // last day is not the firm's. The PERIOD, not the due date, and
+            // that is the other half of the floor's reasoning: a firm that
+            // served September files September's return, due in October.
+            if (subject.endsOn !== null && period.start > subject.endsOn) continue;
+            // THE FIRM'S OWN FLOOR, the same test: a filing due before the day
+            // the firm started keeping this calendar is not the firm's either.
+            if (floor !== null && schedule.statutoryDueOn < floor) continue;
+            // The FIRST subject for this entity that passes the floors is the
+            // one: subjects are in order, and the earliest engagement is also
+            // the one whose floor lets the most periods through.
+            const key = `${template.lineageId}|${subject.entityPartyId}|${period.start}`;
+            if (proposed.has(key)) continue;
+            if (pending.length >= GENERATE_BATCH) {
+              full = true;
+              break;
+            }
+            proposed.add(key);
+
+            pending.push({
+              id: this.deps.ids.newId(),
+              tenantId,
+              templateId: template.id,
+              entityPartyId: subject.entityPartyId,
+              engagementId: subject.engagementId,
+              periodStart: period.start,
+              periodEnd: period.end,
+              periodLabel: period.label,
+              statutoryDueOn: schedule.statutoryDueOn,
+              internalTargetOn: schedule.internalTargetOn,
+              stateId: start.id,
+              periodBasis: group.basis,
+            });
           }
-          proposed.add(key);
-
-          pending.push({
-            id: this.deps.ids.newId(),
-            tenantId,
-            templateId: template.id,
-            entityPartyId: subject.entityPartyId,
-            engagementId: subject.engagementId,
-            periodStart: period.start,
-            periodEnd: period.end,
-            periodLabel: period.label,
-            statutoryDueOn: schedule.statutoryDueOn,
-            internalTargetOn: schedule.internalTargetOn,
-            stateId: start.id,
-          });
         }
       }
     }
@@ -2035,7 +2085,15 @@ export class ObligationService {
     actor: Actor = SYSTEM_ACTOR,
   ): Promise<number> {
     const floor = await this.deps.compliancePolicy.missedFromOn(tenantId);
-    const candidates = await this.deps.instances.listMissable(tenantId, asOf, floor, MISS_BATCH);
+    // Each row is judged on ITS filing's day (Q070 Part B): `asOf` is the
+    // firm's day, moved to the filing's zone at this instant.
+    const candidates = await this.deps.instances.listMissable(
+      tenantId,
+      asOf,
+      floor,
+      MISS_BATCH,
+      this.deps.clock.now().toISOString(),
+    );
     // Asked AFTER the candidates, so a firm with nothing overdue never pays for
     // the state list — which is every firm on most nights.
     if (candidates.length === 0) return 0;
@@ -2056,11 +2114,14 @@ export class ObligationService {
         actor,
         payload: {
           statutoryDueOn: o.statutoryDueOn,
-          asOf,
+          // The FILING's day it was judged on, and that day's zone (Q070
+          // Part B); the firm's own day when they agree.
+          asOf: o.filingDay,
+          filingZone: o.filingZone,
           // Positive, always: this only ever runs after the date has passed.
           // Computed once here rather than by whoever reads the log, the same
           // arrangement `obligation.filed` makes with the same number.
-          daysLate: daysBetween(o.statutoryDueOn, asOf),
+          daysLate: daysBetween(o.statutoryDueOn, o.filingDay),
           workItemId: o.workItemId,
         },
       });
@@ -2471,7 +2532,8 @@ export class ObligationService {
     if (query.to !== undefined && !isIsoDate(query.to)) {
       throw new InvalidWindow(query.from ?? "", query.to);
     }
-    return this.deps.instances.calendar(tenantId, query);
+    // The instant each row's `filingToday` is read at, from the injected clock.
+    return this.deps.instances.calendar(tenantId, { ...query, now: this.deps.clock.now().toISOString() });
   }
 
   async obligation(tenantId: string, obligationId: string) {

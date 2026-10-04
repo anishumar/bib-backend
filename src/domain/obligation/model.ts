@@ -96,6 +96,25 @@ export function isDueRuleKind(v: string): v is DueRuleKind {
   return (DUE_RULE_KINDS as readonly string[]).includes(v);
 }
 
+/**
+ * Whose year a rule's quarters, half-years and years are cut on (Q070 Part B,
+ * 0358): its own (`rule_calendar`, every rule before 0358) or the CLIENT's
+ * financial year end (`client_year_end`), which is how UAE corporate tax and
+ * Singapore's annual filings run. See `period-basis.ts`.
+ */
+export type PeriodBasis = "rule_calendar" | "client_year_end";
+
+export const PERIOD_BASES: readonly PeriodBasis[] = ["rule_calendar", "client_year_end"];
+
+export function isPeriodBasis(v: string): v is PeriodBasis {
+  return (PERIOD_BASES as readonly string[]).includes(v);
+}
+
+/** What a generated row's period actually followed: a rule's basis, or
+ *  `rule_fallback` when the rule asked for the client's year end and the
+ *  client had none recorded (the rule's own month was used, and said so). */
+export type InstancePeriodBasis = PeriodBasis | "rule_fallback";
+
 /** Whether the FIRM has checked this rule against the statute. Everything seeds
  *  `unconfirmed`, India included — the shipped dates came from a previous
  *  vendor's document, and the firm's own practice may be earlier. */
@@ -159,6 +178,9 @@ export interface ObligationTemplate {
    *  is Apr–Jun, and computing quarters on the calendar would put every Indian
    *  quarterly filing in the wrong period. */
   readonly fiscalYearStartMonth: number;
+  /** Whose year the periods are cut on (0358). Part of the period SHAPE with
+   *  `recurrence` and `fiscalYearStartMonth`: locked once rows exist. */
+  readonly periodBasis: PeriodBasis;
   /** Null when the rule is real and its date cannot be computed. */
   readonly dueRule: DueRule | null;
   /** Why not, in the firm's own words. Present exactly when `dueRule` is null. */
@@ -972,6 +994,9 @@ export interface ObligationInstance {
   readonly withdrawnAt: string | null;
   readonly withdrawnByUserId: string | null;
   readonly withdrawnReason: WithdrawnReason | null;
+  /** What this row's period followed (0358): the rule's year, the client's
+   *  year end, or the rule's month because the client had none recorded. */
+  readonly periodBasis: InstancePeriodBasis;
 }
 
 /** Why a filing was taken off the calendar. A closed set, so "why" can be

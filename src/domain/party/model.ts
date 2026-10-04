@@ -79,6 +79,13 @@ export interface LegalEntity {
   readonly incorporatedOn: string | null;
   /** MM-DD. */
   readonly financialYearEnd: string | null;
+  /**
+   * The company's own IANA zone, or null (0337). For a CLIENT company it is
+   * the clock its filings are judged on, ahead of its country's (Q070 Part B):
+   * only needed where the country keeps several zones, e.g. a Californian
+   * company's US returns on Los Angeles time.
+   */
+  readonly timeZone: string | null;
   readonly registeredAddress: Record<string, unknown> | null;
   readonly status: LegalEntityStatus;
 }

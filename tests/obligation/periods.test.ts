@@ -47,6 +47,7 @@ function rule(over: Partial<ObligationTemplate> = {}): ObligationTemplate {
     authority: null,
     recurrence: "monthly",
     fiscalYearStartMonth: IN_FY,
+    periodBasis: "rule_calendar",
     dueRule: { kind: "day_of_month", dueMonthOffset: 1, dueDayOfMonth: 20, dueDaysAfter: null },
     unresolvedReason: null,
     leadTimeDays: 0,

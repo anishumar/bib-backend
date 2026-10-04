@@ -54,6 +54,7 @@ import type {
   RelationshipRepository,
 } from "./ports";
 import { countryCodeProblem, isCountryCode } from "../../domain/country";
+import { isTimeZone } from "../../domain/tenancy/model";
 
 export interface Deps {
   readonly parties: PartyRepository;
@@ -666,6 +667,41 @@ export class PartyService {
       payload: { fields, jurisdiction: corrected.jurisdiction, entityType: corrected.entityType },
     });
     return corrected;
+  }
+
+  /**
+   * A client company's own clock (Q070 Part B): the zone its filings are
+   * judged MISSED on, ahead of its country's. Only needed where the country
+   * keeps several zones (a Californian company's US returns on Los Angeles
+   * time); null goes back to the country's. An offset is refused, as on the
+   * firm card: it cannot express daylight saving.
+   */
+  async setLegalEntityTimeZone(
+    input: { readonly tenantId: string; readonly partyId: string; readonly timeZone: string | null },
+    actor: Actor,
+  ): Promise<LegalEntity> {
+    const [current] = await this.deps.parties.listLegalEntities(input.tenantId, input.partyId);
+    if (!current) throw new NotALegalEntity();
+    const timeZone = input.timeZone === null ? null : input.timeZone.trim();
+    if (timeZone !== null && !isTimeZone(timeZone)) {
+      throw new InvalidPartyDetails(
+        `${JSON.stringify(input.timeZone)} is not a time zone this system knows. Use a place name ` +
+          `such as "America/Los_Angeles" or "America/New_York". It decides the day this company's ` +
+          `filings are judged missed on.`,
+      );
+    }
+    if (timeZone === current.timeZone) throw new NothingToChange();
+    const updated = await this.deps.parties.setLegalEntityTimeZone(input.tenantId, input.partyId, timeZone);
+    if (!updated) throw new NotALegalEntity();
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "legal_entity.corrected",
+      objectId: input.partyId,
+      actor,
+      // The FIELD, as a firm company's edit names its fields (0337).
+      payload: { fields: ["timeZone"], jurisdiction: updated.jurisdiction, entityType: updated.entityType },
+    });
+    return updated;
   }
 
   /** An identifier stopped being in force on `validTo` (a GSTIN cancelled). */

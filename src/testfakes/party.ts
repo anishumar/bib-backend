@@ -114,6 +114,15 @@ export class FakePartyRepo implements PartyRepository {
     return Promise.resolve(next);
   }
 
+  setLegalEntityTimeZone(tenantId: string, partyId: string, timeZone: string | null): Promise<LegalEntity | null> {
+    const i = this.legalEntities.findIndex((e) => e.tenantId === tenantId && e.partyId === partyId);
+    const entity = this.legalEntities[i];
+    if (entity === undefined) return Promise.resolve(null);
+    const next = { ...entity, timeZone };
+    this.legalEntities[i] = next;
+    return Promise.resolve(next);
+  }
+
   /**
    * What refers to a party, by party id — the thing migration 0035's trigger
    * knows and no in-memory fake can: the crm tables are a different module and
@@ -183,6 +192,7 @@ export class FakePartyRepo implements PartyRepository {
       entityType: e.entityType,
       incorporatedOn: e.incorporatedOn,
       financialYearEnd: e.financialYearEnd,
+      timeZone: null,
       registeredAddress: e.registeredAddress,
       status: "active",
     };

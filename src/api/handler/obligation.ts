@@ -33,6 +33,15 @@ export interface ObligationDeps {
 
 // ── Shared vocabulary ───────────────────────────────────────────────────────
 
+const PeriodBasisSchema = z.enum(["rule_calendar", "client_year_end"]).openapi("ObligationPeriodBasis", {
+  description:
+    "Whose year a quarter, half-year or year is cut on (0358): the rule's own " +
+    "(fiscalYearStartMonth, every rule before this) or the CLIENT's financial year end, which " +
+    "is how UAE corporate tax and Singapore's annual filings run. A client with no year end " +
+    "recorded falls back to the rule's month, and the calendar says so. Part of the period " +
+    "shape: editable only while the rule has produced nothing. Monthly is a month either way.",
+});
+
 const Recurrence = z
   .enum(["monthly", "quarterly", "half_yearly", "annual", "event"])
   .openapi({
@@ -223,6 +232,7 @@ const RuleSchema = z
       description: "4 for India. An Indian quarter runs Apr-Jun, so leaving this at 1 would " +
         "put every quarterly filing in the wrong period.",
     }),
+    periodBasis: PeriodBasisSchema,
     dueRule: DueRuleSchema.nullable(),
     unresolvedReason: z.string().nullable().openapi({
       description:
@@ -391,6 +401,22 @@ const CalendarRowSchema = z
         "it. Null while unfiled.",
     }),
     filedByTitle: z.string().nullable().openapi({ description: "That task's title, e.g. 'GST · Sep 2026'." }),
+    filingZone: z.string().openapi({
+      description:
+        "The zone this filing's day is read in (Q070 Part B): the client entity's own, else its " +
+        "country's (New York for the US), else the firm's company there, else the firm's.",
+    }),
+    filingToday: z.string().openapi({
+      description:
+        "Today in that zone. The statutory date has passed when it is before this; the " +
+        "internal target stays on the firm's day.",
+    }),
+    periodBasis: z.enum(["rule_calendar", "client_year_end", "rule_fallback"]).openapi({
+      description:
+        "What this row's period followed (0358). rule_fallback: the rule follows the client's " +
+        "year end and none was recorded, so the rule's own month (ruleYearStartMonth) was used.",
+    }),
+    ruleYearStartMonth: z.number().int().min(1).max(12),
     resolutionOptionId: z.string().uuid().nullable(),
     resolutionName: z.string().nullable().openapi({
       description:
@@ -518,6 +544,7 @@ function ruleToWire(r: RuleView): z.infer<typeof RuleSchema> {
     authority: t.authority,
     recurrence: t.recurrence,
     fiscalYearStartMonth: t.fiscalYearStartMonth,
+    periodBasis: t.periodBasis,
     dueRule: dueRuleToWire(t),
     unresolvedReason: t.unresolvedReason,
     leadTimeDays: t.leadTimeDays,
@@ -572,6 +599,7 @@ const CreateRuleRequest = z
     authority: z.string().nullable().optional(),
     recurrence: Recurrence,
     fiscalYearStartMonth: z.number().int().min(1).max(12).default(4),
+    periodBasis: PeriodBasisSchema.optional(),
     dueRule: DueRuleSchema.nullable(),
     unresolvedReason: z.string().nullable().optional(),
     leadTimeDays: z.number().int().min(0).default(0),
@@ -587,6 +615,7 @@ const UpdateRuleRequest = z
     authority: z.string().nullable().optional(),
     recurrence: Recurrence.optional(),
     fiscalYearStartMonth: z.number().int().min(1).max(12).optional(),
+    periodBasis: PeriodBasisSchema.optional(),
     dueRule: DueRuleSchema.nullable().optional(),
     unresolvedReason: z.string().nullable().optional(),
     leadTimeDays: z.number().int().min(0).optional(),
@@ -1604,6 +1633,10 @@ export function registerObligationRoutes(app: OpenAPIHono<AppEnv>, deps: Obligat
           filedOn: r.filedOn,
           filedByWorkItemId: r.filedByWorkItemId,
           filedByTitle: r.filedByTitle,
+          filingZone: r.filingZone,
+          filingToday: r.filingToday,
+          periodBasis: r.periodBasis,
+          ruleYearStartMonth: r.ruleYearStartMonth,
           resolutionOptionId: r.resolutionOptionId,
           resolutionName: r.resolutionName,
           resolutionReason: r.resolutionReason,

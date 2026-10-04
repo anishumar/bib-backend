@@ -66,6 +66,13 @@ export interface PartyRepository {
     partyId: string,
     patch: { readonly jurisdiction?: string | undefined; readonly entityType?: string | undefined },
   ): Promise<LegalEntity | null>;
+  /** Set a registered company's own zone, or null for its country's (Q070
+   *  Part B). Null when it has no registration. */
+  setLegalEntityTimeZone(
+    tenantId: string,
+    partyId: string,
+    timeZone: string | null,
+  ): Promise<LegalEntity | null>;
   /** Creates the party row and its organization subtype in one transaction. */
   createOrganization(o: NewOrganization): Promise<Organization>;
   /** Creates the party row and its person subtype in one transaction. */

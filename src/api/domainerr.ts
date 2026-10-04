@@ -323,6 +323,7 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_JURISDICTION":
       case "INVALID_RECURRENCE":
       case "INVALID_FISCAL_YEAR_START":
+      case "INVALID_PERIOD_BASIS":
       case "INVALID_DUE_RULE":
       case "INCOMPLETE_DUE_RULE":
       case "UNRESOLVED_REASON_REQUIRED":
