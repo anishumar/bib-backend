@@ -38,25 +38,30 @@ export class PostgresClientSenders {
 
   /**
    * A portal contact's letter sent AGAIN: the Key Manager of the first client
-   * the login may see today (one grant per client; a group contact's grants
-   * name the same account team as often as not, and the earliest is stable).
+   * the login may see today that has one (one grant per client; a group's
+   * contact holds several, and not every company of a group has its own).
    */
   async senderForContact(tenantId: string, membershipId: string): Promise<ClientSender | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const firm = await this.firm(db, tenantId);
       if (firm === null) return null;
-      const [grant] = await db<{ client_party_id: string }[]>`
+      // Every client the contact may see today, earliest grant first. A
+      // group's contact holds several; the first one WITH a Key Manager in
+      // its seat names the sender (found by the walk: the first by id was a
+      // sister company nobody had been named for).
+      const grants = await db<{ client_party_id: string }[]>`
         SELECT client_party_id
           FROM crm.portal_access
          WHERE tenant_id = ${tenantId} AND membership_id = ${membershipId}
            AND valid_from <= ${firm.day}::date
            AND (valid_to IS NULL OR valid_to > ${firm.day}::date)
          ORDER BY valid_from, id
-         LIMIT 1
       `;
-      if (grant === undefined) return null;
-      const km = await this.keyManager(db, tenantId, grant.client_party_id, firm.day);
-      return km === null ? null : this.toSender(km, firm.domains);
+      for (const g of grants) {
+        const km = await this.keyManager(db, tenantId, g.client_party_id, firm.day);
+        if (km !== null) return this.toSender(km, firm.domains);
+      }
+      return null;
     });
   }
 

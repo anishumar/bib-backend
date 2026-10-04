@@ -164,6 +164,16 @@ describe("who a client email is from", () => {
     expect((await senders.senderForContact(tenantId, contact))?.name).toBe("Ravi");
   });
 
+  it("sent again to a group's contact, skips a company with no Key Manager", async () => {
+    // An EARLIER grant on a company nobody was named for, as a group's contact has.
+    await owner`
+      INSERT INTO crm.portal_access (tenant_id, membership_id, client_party_id, valid_from, granted_by)
+      VALUES (${tenantId}, ${contact}, ${bare}, '2025-06-01', ${ravi})
+    `;
+    expect((await senders.senderForContact(tenantId, contact))?.name).toBe("Ravi");
+    await owner`DELETE FROM crm.portal_access WHERE tenant_id = ${tenantId} AND client_party_id = ${bare}`;
+  });
+
   it("goes from the person's own address only once the firm lists the domain", async () => {
     expect(await senders.sendFromDomains(tenantId)).toEqual([]);
     expect((await senders.senderForProposal(tenantId, proposalFrc))?.ownAddress).toBe(false);
