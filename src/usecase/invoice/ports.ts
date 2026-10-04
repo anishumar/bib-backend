@@ -150,6 +150,9 @@ export interface InvoiceRecord {
  *  refused right now (B51). Null when nothing on the record stops it. */
 export interface InvoiceView extends InvoiceRecord {
   readonly issueBlocked: IssueBlocked | null;
+  /** The day Issue would date a draft today: its company's day (0337). Null
+   *  once it is out of draft. */
+  readonly issuesOn: string | null;
 }
 
 export interface InvoiceLineRecord {

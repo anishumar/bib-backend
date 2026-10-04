@@ -189,6 +189,11 @@ const InvoiceRecordSchema = z
           "sentence, for the screen to show where Issue is offered. Null when nothing on the record " +
           "stops it; the issue call still decides.",
       }),
+    issuesOn: z.string().nullable().openapi({
+      description:
+        "The day Issue would date this draft today: today on its issuing company's calendar, else " +
+        "the firm's (0337). What a confirmation says before Issue. Null once it is out of draft.",
+    }),
   })
   .openapi("InvoiceRecord");
 
@@ -1320,5 +1325,6 @@ function toRecordBody(record: InvoiceView, fees: boolean): z.infer<typeof Invoic
       record.issueBlocked === null
         ? null
         : { reason: record.issueBlocked.reason, message: record.issueBlocked.message },
+    issuesOn: record.issuesOn,
   };
 }

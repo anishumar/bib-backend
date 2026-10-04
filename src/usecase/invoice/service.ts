@@ -568,7 +568,12 @@ export class InvoiceService {
   async describe(tenantId: string, invoiceId: string): Promise<InvoiceView> {
     const record = await this.deps.invoices.describe(tenantId, invoiceId);
     if (record === null) throw new InvoiceNotFound(invoiceId);
-    return { ...record, issueBlocked: await this.issueBlocked(tenantId, record.invoice) };
+    const draft = record.invoice.status === "draft";
+    return {
+      ...record,
+      issueBlocked: await this.issueBlocked(tenantId, record.invoice),
+      issuesOn: draft ? await this.today(tenantId, record.invoice.entityPartyId) : null,
+    };
   }
 
   /**

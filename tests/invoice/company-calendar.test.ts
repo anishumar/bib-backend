@@ -70,6 +70,16 @@ describe("the date on an invoice is its company's day (0337)", () => {
     const two = await drafted(s, US_CO);
     await expect(s.service.issue(TENANT, two.id, ACTOR, "2026-11-02")).rejects.toBeInstanceOf(NotCallersToday);
   });
+
+  it("tells the screen the day Issue would date a draft, and nothing once it is issued", async () => {
+    const s = setup(AT);
+    const us = await drafted(s, US_CO);
+    const ind = await drafted(s, IN_CO);
+    expect((await s.service.describe(TENANT, us.id)).issuesOn).toBe("2026-10-31");
+    expect((await s.service.describe(TENANT, ind.id)).issuesOn).toBe("2026-11-01");
+    await s.service.issue(TENANT, us.id, ACTOR);
+    expect((await s.service.describe(TENANT, us.id)).issuesOn).toBeNull();
+  });
 });
 
 describe("an invoice's number is in its company's own year (0337)", () => {
