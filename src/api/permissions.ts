@@ -869,6 +869,19 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // an advance are `invoice:issue`, as credit notes are (0335). (Approve start
   // went with 0322: the advance no longer holds the work.)
   [routeKey("GET", "/api/v1/billing/advances"), "party:read" as const],
+  // Advances raised before the letter (0363, Q046: "Managers and above"):
+  // reading is a colleague's; raising and mapping are advance:manage; giving
+  // one back is a credit note, invoice:issue as every credit note is.
+  [routeKey("GET", "/api/v1/advances"), "party:read" as const],
+  [routeKey("GET", "/api/v1/advances/{advanceId}"), "party:read" as const],
+  [routeKey("GET", "/api/v1/advances/{advanceId}/targets"), "party:read" as const],
+  [routeKey("POST", "/api/v1/advances"), "advance:manage" as const],
+  [routeKey("POST", "/api/v1/advances/{advanceId}/allocations"), "advance:manage" as const],
+  [routeKey("POST", "/api/v1/advances/{advanceId}/allocations/{allocationId}/end"), "advance:manage" as const],
+  [routeKey("POST", "/api/v1/advances/{advanceId}/give-back"), "invoice:issue" as const],
+  // A letter names an advance received as it names its other terms.
+  [routeKey("GET", "/api/v1/engagement-letters/{letterId}/advances-received"), "party:read" as const],
+  [routeKey("PUT", "/api/v1/engagement-letters/{letterId}/advances-received"), "party:write" as const],
   [routeKey("GET", "/api/v1/billing/refunds"), "party:read" as const],
   [routeKey("POST", "/api/v1/billing/refunds/{dueId}/credit-note"), "invoice:issue" as const],
   [routeKey("POST", "/api/v1/billing/refunds/{dueId}/keep"), "invoice:issue" as const],

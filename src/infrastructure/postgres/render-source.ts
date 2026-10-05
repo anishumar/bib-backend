@@ -905,6 +905,19 @@ export class PostgresRenderSource implements RenderSource {
       ORDER BY position
     `;
 
+    // ADVANCES ALREADY RECEIVED that the letter names (0363, Q048): the
+    // advance invoice's number and date, and the amount named.
+    const received = await db<{ invoice_number: string | null; issued_on: string | null; amount: string; currency: string }[]>`
+      SELECT i.number AS invoice_number, i.issued_on::text AS issued_on, na.amount::text AS amount, na.currency
+        FROM crm.engagement_letter_advance na
+        JOIN crm.adhoc_advance aa ON aa.id = na.adhoc_advance_id AND aa.tenant_id = na.tenant_id
+        JOIN crm.invoice i ON i.id = aa.invoice_id AND i.tenant_id = aa.tenant_id
+       WHERE na.engagement_letter_id = ${letterId}
+       ORDER BY i.issued_on NULLS LAST, i.number
+    `.then((rows) =>
+      rows.map((r) => ({ invoiceNumber: r.invoice_number, issuedOn: r.issued_on, amount: r.amount, currency: r.currency })),
+    );
+
     // THE FEES PER CURRENCY AND FREQUENCY (0344), summed by the database the
     // way the letter's own read sums them: a line priced on its own at its
     // frequency, a section's fee once at the section's. Printed only on a
@@ -1095,6 +1108,7 @@ export class PostgresRenderSource implements RenderSource {
                 ),
                 fmt,
                 current,
+                received,
               ),
               ...currencyTotalsFlow(totals, fmt),
               ...titledBlocks("Commercials", byKind("commercial"), "commercial"),
@@ -1651,6 +1665,8 @@ function feesFlow(
   /** Kept on one page when it fits (CA#60): only on a letter drawn since
    *  0334, so a letter already out keeps its pages. */
   keepTogether: boolean,
+  /** Advances already received that the letter names (0363, Q048). */
+  received: readonly ReceivedAdvance[] = [],
 ): Flow[] {
   const out: Flow[] = [heading(1, "Summary of Fees")];
   if (plan.fees.length === 0) {
@@ -1717,7 +1733,29 @@ function feesFlow(
       })),
     });
   }
+  // ADVANCES ALREADY RECEIVED (0363, Q048 scenario 1): a term like the rest,
+  // in the content hash. Printed only when the letter names one, so every
+  // other letter renders exactly as before.
+  // A paragraph each, not a figures row: the invoice and its date are words a
+  // totals column has no room for (the walk found the label clipped).
+  for (const a of received) {
+    out.push({
+      kind: "paragraph",
+      lead: "Advance received",
+      text:
+        `${fmt(a.amount, a.currency)}` +
+        `${a.invoiceNumber === null ? "" : `, invoice ${a.invoiceNumber}`}` +
+        `${a.issuedOn === null ? "" : ` dated ${longDate(a.issuedOn)}`}, to be adjusted against the fees above.`,
+    });
+  }
   return out;
+}
+
+interface ReceivedAdvance {
+  readonly invoiceNumber: string | null;
+  readonly issuedOn: string | null;
+  readonly amount: string;
+  readonly currency: string;
 }
 
 /**

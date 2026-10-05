@@ -151,6 +151,7 @@ import type {
   FirmTimeZone,
   GoLiveBilling,
   AdvanceBilling,
+  NamedAdvanceMapping,
   CalendarFiller,
   EngagementRecord,
   EngagementRepository,
@@ -239,6 +240,9 @@ export interface Deps {
    *  Optional for the same reason: a composition without billing writes none,
    *  and the daily sweep writes it later. */
   readonly advanceBilling?: AdvanceBilling | null;
+  /** The billing desk, to map the advances a signed letter named as received
+   *  (0363). Optional for the same reason: the daily catch-up maps them. */
+  readonly namedAdvances?: NamedAdvanceMapping | null;
   /** The compliance calendar, filled when a letter is signed (CA#24).
    *  Optional for the billing ports' reason: a composition without it leaves
    *  the filling to the nightly sweep. */
@@ -2878,7 +2882,10 @@ export class EngagementService {
       letter.tenantId,
       letter.id,
     );
-    return this.deps.hasher.hash(canonicalContent({ letter, lines, feeGroups, clauses }));
+    // The advances it names as received (0363) are terms too; a composition
+    // without billing names none.
+    const advancesReceived = (await this.deps.namedAdvances?.namedOn(letter.tenantId, letter.id)) ?? [];
+    return this.deps.hasher.hash(canonicalContent({ letter, lines, feeGroups, clauses, advancesReceived }));
   }
 
   /**
@@ -3099,6 +3106,9 @@ export class EngagementService {
     if (letter.advanceRequired || lines.some((l) => l.advanceAmount !== null)) {
       await this.billAdvances(input.tenantId, letter.id, actor);
     }
+    // The advances it named as received (0363): mapped to it now, coming off
+    // its earliest bills as its own advance does.
+    await this.mapNamedAdvances(input.tenantId, letter.id, actor);
     // The filings the work owes, on the calendar now rather than tonight
     // (CA#24): "Nothing is on the calendar" right after signing was untrue.
     if (result.engagements.some((e) => e.status === "active")) {
@@ -3121,6 +3131,21 @@ export class EngagementService {
     if (billing === null) return;
     try {
       await billing.billAdvances({ tenantId, letterId }, actor);
+    } catch {
+      // Deliberately swallowed: see above.
+    }
+  }
+
+  /**
+   * Map the advances a signed letter named as received (0363). After the
+   * signature is committed and never undoing it, for `billAdvances`' reason:
+   * if it fails, the daily billing queue maps them.
+   */
+  private async mapNamedAdvances(tenantId: string, letterId: string, actor: Actor): Promise<void> {
+    const named = this.deps.namedAdvances ?? null;
+    if (named === null) return;
+    try {
+      await named.mapNamedOnSigning({ tenantId, letterId }, actor);
     } catch {
       // Deliberately swallowed: see above.
     }

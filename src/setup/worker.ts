@@ -13,6 +13,10 @@ import type { Logger } from "../platform/log";
 import { systemIds } from "../platform/ids";
 import { systemClock } from "../platform/clock";
 import { AdvanceReminders, NotificationFanout } from "../usecase/notify/fanout";
+import { SYSTEM_ACTOR } from "../domain/ledger/model";
+import { AdhocAdvanceReminders } from "../usecase/notify/adhoc-reminders";
+import { AdhocAdvanceService } from "../usecase/billing/adhoc";
+import { PostgresAdhocAdvanceStore } from "../infrastructure/postgres/adhoc-advance";
 import { NotificationEmails } from "../usecase/notify/email";
 import { PostgresNotificationEmailStore } from "../infrastructure/postgres/notification-email";
 import { PostgresNotificationOutbox, PostgresNotifyDirectory } from "../infrastructure/postgres/notification-outbox";
@@ -263,6 +267,10 @@ export interface WiredWorker {
   /** The notification outbox and the advance reminders in the bell (0323). */
   readonly notifyFanout: NotificationFanout;
   readonly advanceReminders: AdvanceReminders;
+  /** Advances raised before the letter (0363): the letter-signed catch-up,
+   *  and the monthly reminder of what is still to be adjusted (Q047). */
+  readonly adhocAdvances: AdhocAdvanceService;
+  readonly adhocReminders: AdhocAdvanceReminders;
   /** Notifications by email: urgent at once, the rest daily (0324). */
   readonly notifyEmails: NotificationEmails;
   readonly orchestrator: OrchestratorService;
@@ -743,10 +751,44 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     permissions: configRepository,
     settings: notifySettings,
   });
+  // ADVANCES RAISED BEFORE THE LETTER (0363). This process settles e-signed
+  // letters, so it maps what they named; and it reminds monthly (Q047).
+  const adhocAdvances = new AdhocAdvanceService({
+    store: new PostgresAdhocAdvanceStore(pools.app),
+    invoices: {
+      prepareDraft: (input) => invoices.prepareDraft(input),
+      prepareLine: (draft, input) => invoices.prepareLine(draft, input),
+      recordRaised: (invoice, actor) => invoices.recordRaised(invoice, actor),
+      find: (tenantId, invoiceId) => invoiceRepository.find(tenantId, invoiceId),
+      issueCreditNote: (input, actor) => invoices.issueCreditNote(input, actor),
+    },
+    taxDefaults,
+    managers: new PostgresBillingManagerFacts(pools.app),
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    ids: systemIds,
+    clock: systemClock,
+    events: ledger,
+  });
+  const notifyEmailStore = new PostgresNotificationEmailStore(pools.app);
+  const adhocReminders = new AdhocAdvanceReminders({
+    outbox: notifyOutbox,
+    advances: { list: (tenantId, filters) => adhocAdvances.list(tenantId, filters) },
+    directory: notifyDirectory,
+    permissions: configRepository,
+    settings: notifySettings,
+    timing: {
+      dayFor: (tenantId) => advancePolicy.unmappedDayFor(tenantId),
+      timeZoneFor: (tenantId) => new PostgresFirmTimeZone(pools.app).timeZoneFor(tenantId),
+      digestHour: (tenantId) => notifyEmailStore.digestHour(tenantId),
+    },
+    clock: systemClock,
+  });
 
   const engagement: EngagementService = new EngagementService({
     // 0320: and writes the advance bill it owes.
     advanceBilling: advanceBills,
+    // 0363: and maps the advances it named as received.
+    namedAdvances: adhocAdvances,
     // CA#24: a signed letter's filings reach the calendar at once, through the
     // nightly sweep's own generator, not tonight.
     calendar: obligations,
@@ -856,6 +898,8 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     advanceDigest,
     notifyFanout,
     advanceReminders,
+    adhocAdvances,
+    adhocReminders,
     notifyEmails,
     orchestrator,
     obligations,
@@ -901,6 +945,16 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
               { tenantId: r.tenantId, created: r.created, drafted: r.drafted, started: r.started },
               "advance catch-up",
             );
+          }
+        }
+        // Letters signed with advances named as received (0363), mapped if
+        // signing could not: every firm, whatever its switch.
+        for (const tenantId of await notifyOutbox.activeTenantIds()) {
+          try {
+            const r = await adhocAdvances.mapNamedOnSigning({ tenantId }, SYSTEM_ACTOR);
+            if (r.mapped > 0) log.info({ tenantId, mapped: r.mapped }, "named advances mapped");
+          } catch (err) {
+            log.error({ tenantId, failure: err instanceof Error ? err.message : String(err) }, "named advances could not be mapped");
           }
         }
         for (const r of await finalBills.sweep()) {
@@ -949,6 +1003,14 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
             log.error({ tenantId: r.tenantId, failure: r.failure }, "advance reminders could not visit firm");
           } else {
             log.info({ tenantId: r.tenantId, created: r.created, resolved: r.resolved }, "advance reminders");
+          }
+        }
+        // Advances still to be adjusted, monthly (0363, Q047), on the same cron.
+        for (const r of await adhocReminders.sweep()) {
+          if (r.failure !== undefined) {
+            log.error({ tenantId: r.tenantId, failure: r.failure }, "unmapped advance reminders could not visit firm");
+          } else {
+            log.info({ tenantId: r.tenantId, month: r.month, created: r.created, resolved: r.resolved }, "unmapped advance reminders");
           }
         }
       });

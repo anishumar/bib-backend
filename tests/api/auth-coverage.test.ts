@@ -22,6 +22,7 @@
 import { ClientMailService } from "../../src/usecase/clientmail/service";
 import { OriginatorService } from "../../src/usecase/originator/service";
 import { FakeOriginatorStore } from "../../src/testfakes/originator";
+import { fakeAdhocService } from "../../src/testfakes/adhoc";
 import { makeFxFakes } from "../../src/testfakes/fx";
 import { NotificationService } from "../../src/usecase/notify/service";
 import { FakeNotificationInbox, FakeNotificationSettings, FakeNotifyFirmSetting } from "../../src/testfakes/notify";
@@ -700,6 +701,7 @@ function deps(): RouterDeps {
         timeZones: new FakeFirmTimeZone(),
         clock: new FakeClock(),
       }),
+      adhoc: fakeAdhocService(),
       finals: new FinalBiller({
         facts: new FakeFinalBillFacts(),
         dues: new FakeBillingDueWriter(),

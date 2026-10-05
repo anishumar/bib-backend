@@ -20,6 +20,8 @@ import type { AuthzService } from "../../usecase/authz/service";
 import type { Principal } from "../../platform/callctx";
 import type { WorkBillingService } from "../../usecase/billing/work-vs-billing";
 import { registerWorkBillingRoutes } from "./work-billing";
+import { registerAdvanceRoutes } from "./advance";
+import type { AdhocAdvanceService } from "../../usecase/billing/adhoc";
 
 export interface BillingDeps {
   readonly service: BillingDeskService;
@@ -33,6 +35,8 @@ export interface BillingDeps {
   readonly workBilling: WorkBillingService;
   /** Billing a period early once its work is done (Q071 b). */
   readonly early: EarlyBiller;
+  /** Advances raised before the letter (0363): their own handler file. */
+  readonly adhoc: AdhocAdvanceService;
 }
 
 const Decimal = z.string().regex(/^\d+(\.\d+)?$/);
@@ -747,6 +751,11 @@ const SettingsSchema = z
         "The firm's own payment terms (0327): an invoice issued with no due date is due this many " +
         "days after its date. Null (the default) means none: no due date unless a person types one.",
     }),
+    unmappedReminderDay: z.number().int().openapi({
+      description:
+        "The day of the month (1 to 28) each advance still to be adjusted is reminded to whoever raised " +
+        "it and to the firm's administrators (0363, Q047), from the daily email's hour.",
+    }),
   })
   .openapi("BillingSettings");
 
@@ -788,6 +797,9 @@ const putSettingsRoute = createRoute({
               taxDefaults: z.array(TaxDefaultSchema).max(50).optional(),
               invoiceDueDays: z.number().int().min(0).max(365).nullable().optional().openapi({
                 description: "Payment terms in days (0 = due on receipt); null clears them.",
+              }),
+              unmappedReminderDay: z.number().int().min(1).max(28).optional().openapi({
+                description: "The day of the month advances still to be adjusted are reminded.",
               }),
             })
             .openapi("SetBillingSettings"),
@@ -918,6 +930,7 @@ function settingsBody(s: BillingSettings) {
     },
     taxDefaults: s.taxDefaults.map((t) => ({ entityPartyId: t.entityPartyId, taxPercent: t.taxPercent })),
     invoiceDueDays: s.invoiceDueDays,
+    unmappedReminderDay: s.unmappedReminderDay,
   };
 }
 
@@ -1011,6 +1024,7 @@ function unscheduledBody(u: UnscheduledRecord) {
 export function registerBillingRoutes(app: OpenAPIHono<AppEnv>, deps: BillingDeps): void {
   const seesFees = (principal: Principal | null): boolean => principal !== null && deps.authz.seesFees(principal);
   registerWorkBillingRoutes(app, { service: deps.workBilling, authz: deps.authz });
+  registerAdvanceRoutes(app, { adhoc: deps.adhoc, authz: deps.authz });
 
   app.openapi(listRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
@@ -1207,6 +1221,9 @@ export function registerBillingRoutes(app: OpenAPIHono<AppEnv>, deps: BillingDep
     if (body.advancePolicy !== undefined) await deps.service.setAdvancePolicy(s.tenantId, body.advancePolicy, s.actor);
     if (body.invoiceDueDays !== undefined) {
       await deps.service.setInvoiceDueDays(s.tenantId, body.invoiceDueDays, s.actor);
+    }
+    if (body.unmappedReminderDay !== undefined) {
+      await deps.service.setUnmappedReminderDay(s.tenantId, body.unmappedReminderDay, s.actor);
     }
     for (const t of body.taxDefaults ?? []) {
       await deps.service.setTaxDefault(

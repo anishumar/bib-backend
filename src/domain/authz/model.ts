@@ -35,6 +35,7 @@ export type Permission =
   | "acceptance:record"
   | "billing:skip"
   | "invoice:issue"
+  | "advance:manage"
   | "tenant:admin";
 
 export const PERMISSIONS: readonly Permission[] = [
@@ -51,6 +52,7 @@ export const PERMISSIONS: readonly Permission[] = [
   "acceptance:record",
   "billing:skip",
   "invoice:issue",
+  "advance:manage",
   "tenant:admin",
 ];
 
@@ -108,6 +110,11 @@ export const PERMISSION_DESCRIPTIONS: Readonly<Record<Permission, string>> = {
     "An issued invoice takes the next number in the company's series and goes to the client, " +
     "so it is kept apart from raising a draft. Give it to the person who does the firm's " +
     "accounts without making them an administrator.",
+  "advance:manage":
+    "Raise an advance for a client before there is an engagement letter, and map it to the " +
+    "services (or jobs) it pays for, split across several or moved later. A mapped advance " +
+    "comes off those services' bills, so this decides whose revenue it is. Issuing the " +
+    "invoice still needs the permission to issue invoices.",
   "tenant:admin":
     "Administer the firm: who works here, what their roles are, and every setting, " +
     "including this one.",
@@ -134,6 +141,7 @@ export const PERMISSION_ACTS: Readonly<Record<Permission, string>> = {
   "acceptance:record": "record a client's acceptance given outside the app",
   "billing:skip": "skip a bill",
   "invoice:issue": "issue or cancel an invoice, or issue a credit note",
+  "advance:manage": "raise or map an advance taken before the engagement letter",
   "tenant:admin": "manage the firm's people, roles and settings",
 };
 
@@ -237,13 +245,23 @@ export const DEFAULT_ROLES: Readonly<Record<string, RoleDefinition>> = {
       "acceptance:record",
       "billing:skip",
       "invoice:issue",
+      "advance:manage",
     ],
   },
   // Runs delivery for a book of clients; sees the audit trail for their work.
-  // Decides which of its bills will not be invoiced (0321).
+  // Decides which of its bills will not be invoiced (0321). Raises and maps
+  // an advance taken before the letter (0364, Q046: "Managers and above").
   manager: {
     label: "Manager",
-    permissions: ["party:read", "party:write", "ledger:read", "config:read", "work:write", "billing:skip"],
+    permissions: [
+      "party:read",
+      "party:write",
+      "ledger:read",
+      "config:read",
+      "work:write",
+      "billing:skip",
+      "advance:manage",
+    ],
   },
   // Does the work, and quotes from the catalogue. No audit-trail sweep of the
   // whole firm.

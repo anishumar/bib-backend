@@ -70,6 +70,7 @@ export const NOTIFY_CATEGORIES = {
   bill_to_raise:     { label: "A bill is ready to raise",              group: "billing",   mandatoryInApp: false, defaults: ON },
   advance_reminder:  { label: "An advance is overdue",                 group: "billing",   mandatoryInApp: false, defaults: ON },
   advance_summary:   { label: "The weekly advances summary",           group: "billing",   mandatoryInApp: false, defaults: ON },
+  advance_unmapped:  { label: "Advances still to be adjusted (monthly)", group: "billing", mandatoryInApp: false, defaults: ON },
   payment_received:  { label: "A payment is received",                 group: "billing",   mandatoryInApp: false, defaults: ON },
   dunning_decision:  { label: "An overdue invoice needs your decision", group: "billing",  mandatoryInApp: false, defaults: ON },
   filing_missed:     { label: "A filing deadline is missed",           group: "deadlines", mandatoryInApp: true,  defaults: ON },
@@ -184,6 +185,8 @@ export function notificationPath(
 ): string {
   // An advance reminder is about the money: the invoice when there is one,
   // else the Advances list.
+  // Advances still to be adjusted (0363): the list they are on.
+  if (category === "advance_unmapped") return "/invoices?tab=adjust";
   if (category === "advance_reminder") {
     const invoiceId = text(payload, "invoiceId");
     return invoiceId === null ? "/invoices?tab=advances" : `/invoices/${invoiceId}`;
@@ -340,6 +343,19 @@ export function renderNotification(n: RenderInput, seesFees: boolean): Rendered 
       };
     }
 
+    case "advance_unmapped": {
+      // One reminder a month per person (0363, Q047), whatever the number of
+      // advances: the count, and per currency what is left (never summed
+      // across currencies), for a reader who sees fees.
+      const count = int(p, "advances") ?? 0;
+      const totals = seesFees ? totalsOf(p) : null;
+      return {
+        title:
+          count === 1 ? "1 advance is still to be adjusted" : `${String(count)} advances are still to be adjusted`,
+        detail: totals ?? "Map them to the services they pay for, or give them back.",
+      };
+    }
+
     case "payment_received":
       return {
         title: `Payment received from ${n.clientName ?? "a client"}`,
@@ -352,6 +368,21 @@ export function renderNotification(n: RenderInput, seesFees: boolean): Rendered 
     case "filing_missed":
       return { title: "A filing deadline was missed", detail: about };
   }
+}
+
+/** Per-currency totals on a payload (`totals: [{currency, amount}]`), written
+ *  for a person, or null when there are none. */
+function totalsOf(p: Readonly<Record<string, unknown>>): string | null {
+  const raw = p["totals"];
+  if (!Array.isArray(raw)) return null;
+  const parts = raw.flatMap((t: unknown) => {
+    if (typeof t !== "object" || t === null) return [];
+    const row = t as Record<string, unknown>;
+    const amount = text(row, "amount");
+    const currency = text(row, "currency");
+    return amount === null || currency === null ? [] : [displayMoney(amount, currency)];
+  });
+  return parts.length === 0 ? null : parts.join(", ");
 }
 
 /** The amount on a payload, written for a person, or null when there is none. */

@@ -89,6 +89,7 @@ import {
   ManagerNotStaff,
   CreditNoteDateOutOfRange,
   InvoiceHasPayments,
+  InvoiceAdvanceMapped,
   CreditExceedsUnusedAdvance,
   InvalidPlaceOfSupply,
   InvalidSac,
@@ -797,6 +798,7 @@ export class InvoiceService {
     // is taken off with a credit note, or a mistaken payment is reversed first.
     const outcome = await this.deps.invoices.cancel(tenantId, invoiceId);
     if ("paid" in outcome) throw new InvoiceHasPayments(invoice.number, outcome.paid, invoice.currency);
+    if ("mapped" in outcome) throw new InvoiceAdvanceMapped(invoice.number, outcome.mapped, invoice.currency);
     const cancelled = outcome.cancelled;
     await this.deps.events.recordEvent({
       tenantId,

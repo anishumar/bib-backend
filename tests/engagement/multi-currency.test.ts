@@ -270,6 +270,33 @@ describe("what the client signs (canonicalContent)", () => {
     expect(now).not.toMatch(/currency:|\nrate\t/);
   });
 
+  it("commits to the advances it names as received (0363), and a letter naming none hashes as before", async () => {
+    const s = setup();
+    const id = await draft(s);
+    await gst(s, id);
+    const letter = (await s.letters.findLetter(TENANT, id))!;
+    const lines = await s.letters.listLines(TENANT, id);
+    const plain = canonicalContent({ letter, lines, feeGroups: [], clauses: [] });
+    expect(canonicalContent({ letter, lines, feeGroups: [], clauses: [], advancesReceived: [] })).toBe(plain);
+    const named = canonicalContent({
+      letter,
+      lines,
+      feeGroups: [],
+      clauses: [],
+      advancesReceived: [{ adhocAdvanceId: "00000000-0000-4000-8000-000000000001", amount: "12000" }],
+    });
+    expect(named).toBe(`${plain}
+received	00000000-0000-4000-8000-000000000001	12000`);
+    const more = canonicalContent({
+      letter,
+      lines,
+      feeGroups: [],
+      clauses: [],
+      advancesReceived: [{ adhocAdvanceId: "00000000-0000-4000-8000-000000000001", amount: "12000.01" }],
+    });
+    expect(more).not.toBe(named);
+  });
+
   it("commits to a line's other currency and to every other currency's rate", async () => {
     const s = setup();
     const id = await draft(s);

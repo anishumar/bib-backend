@@ -29,6 +29,7 @@ import type {
   PersonRef,
   RefundCandidate,
   ScheduleRecord,
+  AdvanceTake,
 } from "../../usecase/billing/ports";
 import { isoInstant } from "./instant";
 import { insertDraftInvoice, insertInvoiceLine } from "./invoice-repository";
@@ -85,6 +86,7 @@ interface DueRow {
   advance_invoice_number: string | null;
   advance_applied: string | null;
   pool_advance_due_id: string | null;
+  pool_allocation_id: string | null;
   pool_invoice_id: string | null;
   pool_invoice_number: string | null;
   pool_remaining: string | null;
@@ -137,13 +139,14 @@ function toRecord(r: DueRow): BillingDueRecord {
           },
     lastTaxPercent: r.last_tax_percent,
     advancePool:
-      r.pool_advance_due_id === null ||
+      (r.pool_advance_due_id === null && r.pool_allocation_id === null) ||
       r.pool_invoice_id === null ||
       r.pool_invoice_number === null ||
       r.pool_remaining === null
         ? null
         : {
             advanceDueId: r.pool_advance_due_id,
+            allocationId: r.pool_allocation_id,
             invoiceId: r.pool_invoice_id,
             invoiceNumber: r.pool_invoice_number,
             remaining: r.pool_remaining,
@@ -183,7 +186,7 @@ const DUE_SELECT = `
          su.email::text AS skipped_by_email, d.skip_reason,
          tax.tax_percent::text AS last_tax_percent,
          d.advance_invoice_id, adv.number AS advance_invoice_number, d.advance_applied::text AS advance_applied,
-         pool.advance_due_id AS pool_advance_due_id,
+         pool.advance_due_id AS pool_advance_due_id, pool.allocation_id AS pool_allocation_id,
          pool.invoice_id AS pool_invoice_id, pool.invoice_number AS pool_invoice_number,
          pool.remaining::text AS pool_remaining,
          -- An advance some engagement still waits on (0321): it may not be
@@ -247,18 +250,31 @@ const DUE_SELECT = `
            OR (d.fee_group_id IS NOT NULL AND ll.fee_group_id = d.fee_group_id AND ll.removed_at IS NULL)
            OR (d.kind = 'advance' AND d.engagement_id IS NULL AND e.engagement_letter_id = d.engagement_letter_id))
     ) subj ON true
-    -- THE ADVANCE THIS BILL WILL BE TAKEN OFF (0320): the service's own, else
-    -- the letter's, in the bill's currency, while some of it is left.
+    -- THE ADVANCE THIS BILL WILL BE TAKEN OFF (0320, 0363), in the bill's
+    -- currency, while some of it is left: (1) the service's own advance; (2)
+    -- part of an ad-hoc advance mapped to this service (or to its fee group,
+    -- or to the job whose period this bill's period holds); (3) the letter's
+    -- own advance and ad-hoc advances the letter named. Oldest money first
+    -- within each: an advance taken before the letter is older than its own.
+    -- An unmapped ad-hoc balance has no target and is never taken here.
     LEFT JOIN LATERAL (
-      SELECT ap.advance_due_id, ap.invoice_id, ap.invoice_number, ap.remaining
+      SELECT ap.advance_due_id, ap.allocation_id, ap.invoice_id, ap.invoice_number, ap.remaining
         FROM crm.advance_pool ap
        WHERE ap.tenant_id = d.tenant_id
          AND d.kind <> 'advance'
+         AND ap.source <> 'unmapped'
          AND ap.currency = d.currency
          AND ap.remaining > 0
-         AND ((ap.engagement_id IS NOT NULL AND ap.engagement_id = d.engagement_id)
+         AND ((ap.engagement_id IS NOT NULL
+               AND (ap.engagement_id = d.engagement_id
+                    OR (ap.source = 'allocation' AND ap.fee_group_id IS NOT NULL AND ap.fee_group_id = d.fee_group_id))
+               AND (ap.job_period_start IS NULL
+                    OR ap.job_period_start BETWEEN d.period_start AND d.period_end))
            OR (ap.engagement_id IS NULL AND ap.engagement_letter_id = subj.letter_id))
-       ORDER BY ap.engagement_id NULLS LAST, ap.invoice_number
+       ORDER BY CASE WHEN ap.engagement_id IS NOT NULL AND ap.source = 'letter_bill' THEN 0
+                     WHEN ap.engagement_id IS NOT NULL THEN 1
+                     ELSE 2 END,
+                ap.issued_on, ap.invoice_number
        LIMIT 1
     ) pool ON true
     LEFT JOIN LATERAL (
@@ -360,7 +376,7 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
     dueId: string,
     invoiceId: string,
     invoiceLineId: string | null,
-    applied: { readonly invoiceId: string; readonly amount: string } | null = null,
+    applied: AdvanceTake | null = null,
   ): Promise<boolean> {
     return withTenant(this.app, tenantId, async (db) => {
       if (applied !== null && !(await takeFromPool(db, applied))) return false;
@@ -372,6 +388,7 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
         UPDATE crm.billing_due d
            SET invoice_id = ${invoiceId}, invoice_line_id = ${invoiceLineId},
                advance_invoice_id = ${applied?.invoiceId ?? null},
+               advance_allocation_id = ${applied?.allocationId ?? null},
                advance_applied = ${applied?.amount ?? null}::numeric,
                covered_at = NULL
          WHERE d.id = ${dueId}
@@ -409,7 +426,8 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
         const rows = await db<{ id: string }[]>`
           UPDATE crm.billing_due d
              SET covered_at = now(), invoice_id = NULL, invoice_line_id = NULL,
-                 advance_invoice_id = ${c.applied.invoiceId}, advance_applied = ${c.applied.amount}::numeric
+                 advance_invoice_id = ${c.applied.invoiceId}, advance_applied = ${c.applied.amount}::numeric,
+                 advance_allocation_id = ${c.applied.allocationId ?? null}
            WHERE d.id = ${c.dueId}
              AND ${db.unsafe(OPEN_DUE_SQL)}
           RETURNING d.id
@@ -445,6 +463,7 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
           UPDATE crm.billing_due d
              SET invoice_id = ${invoice.id}, invoice_line_id = ${line.id},
                  advance_invoice_id = ${item.applied?.invoiceId ?? null},
+                 advance_allocation_id = ${item.applied?.allocationId ?? null},
                  advance_applied = ${item.applied?.amount ?? null}::numeric,
                  covered_at = NULL
            WHERE d.id = ${item.dueId}
@@ -466,14 +485,15 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
   async markCovered(
     tenantId: string,
     dueId: string,
-    applied: { readonly invoiceId: string; readonly amount: string },
+    applied: AdvanceTake,
   ): Promise<boolean> {
     return withTenant(this.app, tenantId, async (db) => {
       if (!(await takeFromPool(db, applied))) return false;
       const rows = await db<{ id: string }[]>`
         UPDATE crm.billing_due d
            SET covered_at = now(), invoice_id = NULL, invoice_line_id = NULL,
-               advance_invoice_id = ${applied.invoiceId}, advance_applied = ${applied.amount}::numeric
+               advance_invoice_id = ${applied.invoiceId}, advance_applied = ${applied.amount}::numeric,
+               advance_allocation_id = ${applied.allocationId ?? null}
          WHERE d.id = ${dueId}
            AND ${db.unsafe(OPEN_DUE_SQL)}
         RETURNING d.id
@@ -567,6 +587,7 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
                wu.email::text AS waived_by_email, w.refund_waive_reason AS waive_reason
           FROM crm.advance_pool ap
           JOIN crm.billing_due w ON w.id = ap.advance_due_id AND w.tenant_id = ap.tenant_id
+                                AND ap.source = 'letter_bill'
           JOIN (${db.unsafe(DUE_SELECT)}) due ON due.id = ap.advance_due_id
           LEFT JOIN tenancy.user_account wu ON wu.id = w.refund_waived_by_user_id
           LEFT JOIN crm.invoice_balance bal ON bal.invoice_id = ap.invoice_id AND bal.tenant_id = ap.tenant_id
@@ -733,15 +754,17 @@ const OPEN_DUE_SQL = `d.skipped_at IS NULL
  * still covers what this bill takes. The lock is held to the transaction's
  * end, so the second writer re-reads after the first has committed.
  */
-async function takeFromPool(
-  db: Db,
-  applied: { readonly invoiceId: string; readonly amount: string },
-): Promise<boolean> {
+async function takeFromPool(db: Db, applied: AdvanceTake): Promise<boolean> {
   await db`SELECT pg_advisory_xact_lock(hashtext(${`advance:${applied.invoiceId}`}))`;
+  // THE SOURCE, not the invoice (0363): an ad-hoc advance has a row per
+  // allocation and one for what is unmapped, all on one invoice. The lock
+  // stays the invoice's, so a re-map and a raise of the same advance queue.
+  const allocationId = applied.allocationId ?? null;
   const [row] = await db<{ ok: boolean }[]>`
     SELECT ap.remaining >= ${applied.amount}::numeric AS ok
       FROM crm.advance_pool ap
      WHERE ap.invoice_id = ${applied.invoiceId}
+       AND ${allocationId === null ? db`ap.source = 'letter_bill'` : db`ap.allocation_id = ${allocationId}`}
   `;
   return row?.ok === true;
 }

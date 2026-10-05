@@ -641,6 +641,16 @@ export class FakeIssuerTaxDefaults implements IssuerTaxDefaults {
 
 export class FakeAdvancePolicy implements AdvancePolicySource {
   policy: AdvancePolicy = DEFAULT_ADVANCE_POLICY;
+  unmappedDay = 1;
+
+  unmappedDayFor(): Promise<number> {
+    return Promise.resolve(this.unmappedDay);
+  }
+
+  setUnmappedDay(_t: string, day: number): Promise<void> {
+    this.unmappedDay = day;
+    return Promise.resolve();
+  }
 
   policyFor(): Promise<AdvancePolicy> {
     return Promise.resolve(this.policy);

@@ -452,14 +452,19 @@ export class PostgresDashboardRepository implements DashboardRepository {
           invoices: number;
         }[]
       >`
+        -- WHOSE each part is (0363, Q045): invoice_manager_share is one row
+        -- per invoice and its manager for an ordinary invoice (its whole net,
+        -- as before), and for an advance taken before the letter one row per
+        -- service manager it was mapped to plus the rest to its own manager.
+        -- An invoice is counted once, on its own manager's row.
         WITH docs AS (
-          SELECT i.manager_user_id AS manager,
+          SELECT s.manager_user_id AS manager,
                  to_char(i.issued_on, 'YYYY-MM') AS month,
-                 round(coalesce(t.net, 0) * i.fx_rate, 4) AS billed,
+                 round(coalesce(s.net_share, 0) * i.fx_rate, 4) AS billed,
                  0::numeric AS collected,
-                 1 AS invoices
+                 CASE WHEN s.basis = 'allocation' THEN 0 ELSE 1 END AS invoices
           FROM crm.invoice i
-          LEFT JOIN crm.invoice_totals t ON t.invoice_id = i.id AND t.tenant_id = i.tenant_id
+          JOIN crm.invoice_manager_share s ON s.invoice_id = i.id AND s.tenant_id = i.tenant_id
           WHERE i.status = 'issued'
             AND i.issued_on >= ${window.from}::date
             AND i.issued_on <  ${window.until}::date

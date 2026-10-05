@@ -125,6 +125,17 @@ export interface AdvanceBilling {
   billAdvances(input: { readonly tenantId: string; readonly letterId: string }, actor: Actor): Promise<unknown>;
 }
 
+/** A signed letter maps the advances it named as received (0363, Q048),
+ *  satisfied by the billing use case's `AdhocAdvanceService`. */
+export interface NamedAdvanceMapping {
+  mapNamedOnSigning(input: { readonly tenantId: string; readonly letterId: string }, actor: Actor): Promise<unknown>;
+  /** What the letter names, for its content hash: a term like its fees. */
+  namedOn(
+    tenantId: string,
+    letterId: string,
+  ): Promise<readonly { readonly adhocAdvanceId: string; readonly amount: string }[]>;
+}
+
 export interface FirmTimeZone {
   timeZoneFor(tenantId: string): Promise<string>;
   /** The companies that keep their own zone (0337): a letter is dated, and

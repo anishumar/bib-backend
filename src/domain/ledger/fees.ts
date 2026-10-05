@@ -37,6 +37,8 @@ export const MONEY_IN_PAYLOAD: Readonly<Partial<Record<EventVerb, readonly strin
   "billing_due.covered": ["advanceApplied"],
   "billing_due.invoiced": ["advanceApplied", "letterAmount", "billedAmount"],
   "billing_due.refund_kept": ["remaining"],
+  "advance_allocation.mapped": ["amount"],
+  "advance_allocation.ended": ["kept", "freed"],
   // Not written since 0322; old rows still carry the advance received.
   "engagement_letter.advance_recorded": ["amount"],
   "engagement_letter.currency_changed": ["fromFxRate", "toFxRate"],

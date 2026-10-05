@@ -595,6 +595,14 @@ describe("and EVERY child of a signed letter is frozen, not just the ones we rem
    * after signature, which is when revenue starts to be counted. Only its
    * person moves (a column GRANT), every change is ledgered
    * (`engagement_letter.originator_set`), and the route is a partner's.
+   *
+   * `crm.advance_allocation` (0363) is the sixth, and the same kind as `crm.billing_due`: an
+   * advance raised before the letter, mapped TO the letter when it is signed
+   * (Q048, scenario 1). It is written after the signature, and only because
+   * of it; what the letter AGREED (the advance it names and the amount) is
+   * `crm.engagement_letter_advance`, which IS frozen. The mapping may be ended
+   * later and the money moved, as any mapping may: that is the firm's
+   * bookkeeping, not a term.
    */
   const NOT_TERMS = [
     "crm.engagement",
@@ -602,6 +610,7 @@ describe("and EVERY child of a signed letter is frozen, not just the ones we rem
     "crm.recorded_acceptance",
     "crm.billing_due",
     "crm.letter_originator",
+    "crm.advance_allocation",
   ];
 
   it("finds no child table of an engagement letter without the freeze trigger", async () => {

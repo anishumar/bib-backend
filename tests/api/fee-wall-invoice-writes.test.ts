@@ -9,6 +9,7 @@
 // or removing a line, recording a payment, issuing a credit note and giving an
 // advance back. For a login that sees fees the gate is not there (the use case
 // answers, here 404 for an invoice the fake does not hold).
+import { fakeAdhocService } from "../../src/testfakes/adhoc";
 import { describe, expect, it } from "vitest";
 import { createOpenAPIApp } from "../../src/api/openapi";
 import { mapError } from "../../src/api/domainerr";
@@ -117,6 +118,7 @@ function world() {
       timeZones: new FakeFirmTimeZone(),
       clock: new FakeClock(),
     }),
+    adhoc: fakeAdhocService(),
     finals: new FinalBiller({
       facts: new FakeFinalBillFacts(),
       dues: new FakeBillingDueWriter(),
