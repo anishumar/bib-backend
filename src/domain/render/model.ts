@@ -329,6 +329,14 @@ export interface RenderableDocument {
   /** The firm's own reference. Printed prominently: it is how a client refers
    *  to this document on the phone. */
   readonly reference: string;
+  /**
+   * Which copy this is, printed under the reference: "Original for recipient"
+   * on a GST tax invoice (Rule 48: a supply of services is invoiced in
+   * duplicate, the original marked for the recipient; the supplier's copy is
+   * the copy of record BiB keeps). Absent on every other document, whose
+   * bytes therefore do not move.
+   */
+  readonly copyMark?: string | undefined;
   readonly issuer: RenderableParty;
   readonly recipient: RenderableParty;
   readonly recipientLabel: string;

@@ -469,6 +469,10 @@ export class PdfLibRenderer implements DocumentRenderer {
     this.advance(pdf, cursor, SIZE_TITLE);
     this.text(cursor, doc.documentTitle, { size: SIZE_TITLE, font: bold });
     this.textRight(cursor, doc.reference, PAGE_WIDTH - MARGIN_X, { size: SIZE_BODY, font: body, color: MUTED });
+    if (doc.copyMark !== undefined) {
+      this.advance(pdf, cursor, SIZE_SMALL + 4);
+      this.textRight(cursor, doc.copyMark.toUpperCase(), PAGE_WIDTH - MARGIN_X, { size: SIZE_SMALL, font: bold, color: INK });
+    }
     this.rule(pdf, cursor);
   }
 
@@ -1374,6 +1378,7 @@ function assertRenderable(doc: RenderableDocument, fonts: FontSet): ReadonlySet<
 
   check("the document title", doc.documentTitle);
   check("the reference", doc.reference);
+  check("the copy mark", doc.copyMark ?? null);
   check("the issuing entity's name", doc.issuer.name);
   doc.issuer.lines.forEach((l, i) => { check(`the issuing entity's address line ${String(i + 1)}`, l); });
   check("the recipient's name", doc.recipient.name);

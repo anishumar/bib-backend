@@ -1365,7 +1365,7 @@ export class PostgresRenderSource implements RenderSource {
           ...tds,
         ],
         ...(current ? { amountInWords: amountInWords(row.total, row.currency) } : {}),
-        ...(gst === null ? {} : { taxInvoice: gst.print }),
+        ...(gst === null ? {} : { taxInvoice: gst.print, copyMark: "Original for recipient" }),
         footer: current && parties !== null ? parties.issuer.name : row.entity_name,
         logo: await this.logo(db, tenantId, invoiceId, "invoice"),
         issuedOn: dated,

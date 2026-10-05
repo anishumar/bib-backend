@@ -124,6 +124,8 @@ describe("who an invoice is from and to (B12 / CA#1)", () => {
     const id = await draft();
     const d = (await source.describe({ tenantId: tenant, kind: "invoice", subjectRef: id }))?.document;
     expect(d?.issuer.name).toBe("Sharma Mehta & Co");
+    // A GST tax invoice is the recipient's original (Rule 48, S7).
+    expect(d?.copyMark).toBe("Original for recipient");
     expect(d?.issuer.lines).toEqual([
       "4th Floor, Pinnacle House",
       "12 MG Road, Camp, Pune",

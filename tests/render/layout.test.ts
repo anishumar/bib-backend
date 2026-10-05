@@ -599,6 +599,12 @@ describe("the GST tax invoice (Q056)", () => {
       "aecfb6ec139dab0532177f6a99107634a76d5f5f5fe8de0550d87963d7426b40",
     );
   });
+
+  it("marks the recipient's original (Rule 48), and only that moves the bytes", async () => {
+    const marked = await new PdfLibRenderer().render({ ...doc, copyMark: "Original for recipient" });
+    expect(sha(marked)).not.toBe("aecfb6ec139dab0532177f6a99107634a76d5f5f5fe8de0550d87963d7426b40");
+    expect(sha(marked)).toBe("68743934cf32e33e7f2510537aa98331420edbdf2989cdfe9ca61d446aef4fd9");
+  });
 });
 
 describe("the Annexure letter (0083)", () => {
