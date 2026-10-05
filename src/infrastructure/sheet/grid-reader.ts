@@ -39,6 +39,24 @@ import { inflateRawSync } from "node:zlib";
 import { SheetUnreadable } from "../../domain/clientimport/errors";
 import type { SheetReader } from "../../usecase/clientimport/ports";
 
+// ── THE SIZE OF WHAT A SHEET MAY UNPACK TO (F-9-2, S7) ─────────────────────
+//
+// A zip says how big its parts are and nothing makes it tell the truth: a few
+// kilobytes of deflate can inflate to gigabytes, and the reader inflated
+// whatever it was handed, in the request process. A row numbered 1,000,000 or
+// a cell in column XFD made it allocate a grid that size. An onboarding sheet
+// is a few hundred rows of forty columns; these bounds are generous for that
+// and stop a sheet built to take the instance down. Admin-only route, still
+// worth closing (audit 2026-09-23).
+const MAX_PART_BYTES = 50 * 1024 * 1024;
+const MAX_WORKBOOK_BYTES = 100 * 1024 * 1024;
+/** Columns past this are no column an import reads; they are not allocated. */
+const MAX_COLUMNS = 1_000;
+const MAX_ROWS = 20_000;
+
+/** A part, or the workbook, unpacks to more than the bounds above. */
+class TooLarge extends Error {}
+
 export class NodeSheetReader implements SheetReader {
   grid(bytes: Uint8Array, filename: string): (readonly string[])[] {
     const lower = filename.toLowerCase();
@@ -131,12 +149,22 @@ function entryAt(buf: Buffer, offset: number, method: number, size: number): Buf
   const start = offset + 30 + nameLen + extraLen;
   if (start + size > buf.length) return null;
   const data = buf.subarray(start, start + size);
+  if (method === 0 && data.length > MAX_PART_BYTES) throw new TooLarge();
   try {
     // 0 = stored, 8 = raw deflate. Excel writes 8 for everything here.
-    return method === 0 ? Buffer.from(data) : inflateRawSync(data);
-  } catch {
+    // Inflating stops at the bound instead of filling memory (F-9-2).
+    return method === 0 ? Buffer.from(data) : inflateRawSync(data, { maxOutputLength: MAX_PART_BYTES });
+  } catch (err) {
+    if (err instanceof RangeError) throw new TooLarge();
     return null;
   }
+}
+
+/** Adds a part to the map, refusing a workbook whose parts together pass the bound. */
+function keep(out: Map<string, Buffer>, name: string, data: Buffer, total: { bytes: number }): void {
+  total.bytes += data.length;
+  if (total.bytes > MAX_WORKBOOK_BYTES) throw new TooLarge();
+  out.set(name, data);
 }
 
 function readCentralDirectory(buf: Buffer): Map<string, Buffer> | null {
@@ -153,6 +181,7 @@ function readCentralDirectory(buf: Buffer): Map<string, Buffer> | null {
   if (eocd < 0) return null;
   const count = buf.readUInt16LE(eocd + 10);
   const out = new Map<string, Buffer>();
+  const total = { bytes: 0 };
   let at = buf.readUInt32LE(eocd + 16);
   for (let n = 0; n < count; n += 1) {
     if (at + 46 > buf.length || buf.readUInt32LE(at) !== 0x02014b50) break;
@@ -164,7 +193,7 @@ function readCentralDirectory(buf: Buffer): Map<string, Buffer> | null {
     const offset = buf.readUInt32LE(at + 42);
     const name = buf.subarray(at + 46, at + 46 + nameLen).toString("utf8");
     const data = entryAt(buf, offset, method, compressedSize);
-    if (data !== null) out.set(name, data);
+    if (data !== null) keep(out, name, data, total);
     at += 46 + nameLen + extraLen + commentLen;
   }
   return out;
@@ -173,6 +202,7 @@ function readCentralDirectory(buf: Buffer): Map<string, Buffer> | null {
 /** Walks local file headers for a zip whose directory is missing or unreadable. */
 function scanLocalHeaders(buf: Buffer): Map<string, Buffer> {
   const out = new Map<string, Buffer>();
+  const total = { bytes: 0 };
   let i = 0;
   while (i < buf.length - 4) {
     if (buf.readUInt32LE(i) !== 0x04034b50) {
@@ -187,7 +217,7 @@ function scanLocalHeaders(buf: Buffer): Map<string, Buffer> {
     const dataStart = i + 30 + nameLen + extraLen;
     if (compressedSize > 0) {
       const data = entryAt(buf, i, method, compressedSize);
-      if (data !== null) out.set(name, data);
+      if (data !== null) keep(out, name, data, total);
       i = dataStart + compressedSize;
     } else {
       // The size is in the trailing descriptor; only the directory has it.
@@ -314,7 +344,16 @@ function firstWorksheet(entries: ReadonlyMap<string, Buffer>): string | undefine
 
 /** Every cell of the first worksheet, as a grid of strings numbered as Excel numbers its rows. */
 function readWorkbook(buf: Buffer, filename: string): (readonly string[])[] {
-  const entries = readZipEntries(buf);
+  let entries: ReadonlyMap<string, Buffer>;
+  try {
+    entries = readZipEntries(buf);
+  } catch (err) {
+    if (!(err instanceof TooLarge)) throw err;
+    throw new SheetUnreadable(
+      filename,
+      "it unpacks to more than a client list ever needs (over 50 MB); save just the sheet you are importing as a new file",
+    );
+  }
   const dates = dateStyles(entries.get("xl/styles.xml")?.toString("utf8"));
   const date1904 = /<workbookPr\b[^>]*\bdate1904="(1|true)"/.test(
     entries.get("xl/workbook.xml")?.toString("utf8") ?? "",
@@ -338,10 +377,21 @@ function readWorkbook(buf: Buffer, filename: string): (readonly string[])[] {
     for (const cell of elements(row.body, "c")) {
       const ref = attr(cell.attrs, "r");
       if (ref === undefined) continue;
-      cells.set(columnIndex(ref), cellValue(cell, shared, dates, date1904));
+      const column = columnIndex(ref);
+      // Past any column an import reads (F-9-2): not allocated.
+      if (column >= MAX_COLUMNS) continue;
+      cells.set(column, cellValue(cell, shared, dates, date1904));
     }
     const width = Math.max(-1, ...cells.keys()) + 1;
     if (width <= 0) continue;
+    if (at > MAX_ROWS) {
+      // Excel writes formatted, empty rows far down; only content counts.
+      if ([...cells.values()].every((c) => c.trim() === "")) continue;
+      throw new SheetUnreadable(
+        filename,
+        `it has content on row ${String(at)}, past the ${String(MAX_ROWS)} rows one import takes; split it into smaller files`,
+      );
+    }
     const out = Array.from({ length: width }, (_, i) => cells.get(i) ?? "");
     byRowNumber.set(at, out);
     if (out.some((c) => c.trim() !== "")) lastWithContent = Math.max(lastWithContent, at);

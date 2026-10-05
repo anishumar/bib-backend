@@ -449,3 +449,30 @@ describe("reading a workbook", () => {
     expect(row?.keyManagerEmail).toBe("skohli@10x.global");
   });
 });
+
+describe("what a sheet may unpack to (F-9-2)", () => {
+  const read = (bytes: Uint8Array): unknown => new NodeSheetReader().grid(bytes, "bomb.xlsx");
+
+  it("refuses a part that inflates past the bound instead of filling memory", () => {
+    // ~60 KB of deflate that would inflate to 60 MB of one repeated character.
+    const huge = `<worksheet><sheetData>${" ".repeat(60 * 1024 * 1024)}</sheetData></worksheet>`;
+    expect(() => read(zipOf([["xl/worksheets/sheet1.xml", huge]], { central: true }))).toThrow(/over 50 MB/);
+  });
+
+  it("does not allocate a column past any an import reads", () => {
+    const grid = new NodeSheetReader().grid(
+      rawBook('<row r="1"><c r="A1" t="inlineStr"><is><t>Name</t></is></c><c r="XFD1" t="inlineStr"><is><t>x</t></is></c></row>'),
+      "wide.xlsx",
+    );
+    expect(grid[0]).toEqual(["Name"]);
+  });
+
+  it("skips empty formatted rows far down, and refuses content past the row bound", () => {
+    const name = '<row r="1"><c r="A1" t="inlineStr"><is><t>Name</t></is></c></row>';
+    const emptyFar = '<row r="1048576"><c r="A1048576" s="3"/></row>';
+    expect(new NodeSheetReader().grid(rawBook(name + emptyFar), "a.xlsx")).toHaveLength(1);
+    const contentFar = '<row r="900000"><c r="A900000" t="inlineStr"><is><t>Acme</t></is></c></row>';
+    expect(() => read(rawBook(name + contentFar))).toThrow(SheetUnreadable);
+    expect(() => read(rawBook(name + contentFar))).toThrow(/row 900000/);
+  });
+});
