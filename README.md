@@ -3,7 +3,8 @@
 The backend for BiB (Business in a Box) — a multi-tenant B2B2C SaaS for professional-services
 firms. Node + TypeScript, Postgres + RLS, hexagonal architecture.
 
-**Start here:** `CLAUDE.md` (the architecture, enforced) · `HANDOFF.md` (the decisions and why).
+**Start here:** `CLAUDE.md` (the architecture, enforced) · `HANDOFF.md` (the decisions and why) ·
+`docs/MERGE_BUILD-PLAN.md` (the live task board; `docs/BUILD-PLAN.md` is superseded history).
 
 ## Local setup
 
