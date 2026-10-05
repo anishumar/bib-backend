@@ -30,7 +30,7 @@ import { ReadinessService } from "../../src/usecase/readiness/service";
 import { FakeReadinessFacts } from "../../src/testfakes/readiness";
 import { FakeClock } from "../../src/testfakes/clock";
 import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Principal } from "../../src/platform/callctx";
 import { buildRouter } from "../../src/api/router";
 import { InMemoryRateLimiter } from "../../src/platform/ratelimit";
@@ -243,6 +243,11 @@ import {
   FakeEscalationSubjects,
   FakeEscalationTenants,
 } from "../../src/testfakes/escalation";
+
+// Walking every route of the app through Hono takes about four seconds on a
+// quiet machine and has gone past vitest's default 5 s on a loaded one. Real
+// work, not a hang: this file gets room for it (S7).
+vi.setConfig({ testTimeout: 30_000 });
 
 
 /**

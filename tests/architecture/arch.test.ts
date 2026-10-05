@@ -5,7 +5,12 @@
 // the price of making architectural erosion impossible.
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// dependency-cruiser runs in a child process over the whole tree: three
+// seconds quiet, past vitest's default 5 s on a loaded machine. Real work,
+// not a hang: this file gets room for it (S7).
+vi.setConfig({ testTimeout: 30_000 });
 
 describe("architecture", () => {
   it("import boundaries hold (dependency-cruiser)", () => {

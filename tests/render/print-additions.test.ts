@@ -6,11 +6,17 @@
 //   - a Summary of Fees kept on one page when it fits on one (CA#60);
 //   - the issuing company's letterhead at the foot of a proposal's pages
 //     after the cover (CA#18).
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { PDFDocument } from "pdf-lib";
 import { createHash } from "node:crypto";
 import { PdfLibRenderer } from "../../src/infrastructure/render/pdf-renderer";
 import type { Flow, LineTable, RenderableDocument } from "../../src/domain/render/model";
+
+// Drawing a PDF (fonts embedded, every page laid out) takes one to three
+// seconds a test on a quiet machine and has gone past vitest's default 5 s on
+// a loaded one (the full gate, another session's build). The time is real
+// work, not a hang, so this file gets room for it; nothing else does (S7).
+vi.setConfig({ testTimeout: 30_000 });
 
 const sha = (b: Uint8Array): string => createHash("sha256").update(b).digest("hex");
 

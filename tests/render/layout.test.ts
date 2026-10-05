@@ -6,11 +6,17 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import fontkit from "@pdf-lib/fontkit";
 import { PDFArray, PDFDict, PDFDocument, PDFName, PDFRawStream, decodePDFRawStream } from "pdf-lib";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CLIENT_DATE_ANCHOR, CLIENT_SIGN_ANCHOR, wrapParagraph } from "../../src/domain/render/model";
 import { PdfLibRenderer } from "../../src/infrastructure/render/pdf-renderer";
 import { RenderError } from "../../src/domain/render/errors";
 import type { Flow, RenderableDocument, RenderableImage } from "../../src/domain/render/model";
+
+// Drawing a PDF (fonts embedded, every page laid out) takes one to three
+// seconds a test on a quiet machine and has gone past vitest's default 5 s on
+// a loaded one (the full gate, another session's build). The time is real
+// work, not a hang, so this file gets room for it; nothing else does (S7).
+vi.setConfig({ testTimeout: 30_000 });
 
 function doc(overrides: Partial<RenderableDocument> = {}): RenderableDocument {
   return {
