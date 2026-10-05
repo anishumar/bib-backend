@@ -2039,7 +2039,7 @@ sees "Less: TDS" and the net it remits. Every rule below has a test (`tests/invo
   zero; CGST and SGST each at half the rate, so 18% on 1,000.05 is 90.00 + 90.00, not 180.01. NULL
   and `plain` compute exactly as 0325. `crm.invoice_totals` adds `cgst/sgst/utgst/igst`, `tds` (the
   client's rate on the PRE-TAX net, CBDT Circular 23/2017) and `net_payable`. Rounding is paise, no
-  round-off line (10x asked, unanswered).
+  round-off line on the lines; the TOTAL may round (Q087, 0375, S8 section).
 - **A draft follows the world; Issue freezes it.** `InvoiceService.refreshTax` re-decides a draft (and
   fills empty line SACs from the catalogue) on raise, add line, describe, and after the billing desk
   writes one (`InvoiceDrafter.refreshTax`). Issue decides for the issue date and writes the snapshot
