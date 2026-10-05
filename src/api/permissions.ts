@@ -679,6 +679,7 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("GET", "/api/v1/obligation-rules"), "party:read" as const],
   [routeKey("POST", "/api/v1/obligation-rules"), "tenant:admin" as const],
   [routeKey("POST", "/api/v1/obligation-rules/seed-india"), "tenant:admin" as const],
+  [routeKey("POST", "/api/v1/obligation-rules/seed-pack/{country}"), "tenant:admin" as const],
   [routeKey("PATCH", "/api/v1/obligation-rules/{ruleId}"), "tenant:admin" as const],
   // Superseding is `tenant:admin` like every other rule write, and it is the
   // sharpest of them: it decides which rule a return is due under from a

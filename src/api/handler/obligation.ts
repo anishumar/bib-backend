@@ -777,6 +777,26 @@ const seedRulesRoute = createRoute({
   },
 });
 
+const seedCountryPackRoute = createRoute({
+  method: "post",
+  path: "/api/v1/obligation-rules/seed-pack/{country}",
+  tags: ["obligations"],
+  summary: "Load a draft country rule pack: AE, SG or US",
+  description:
+    "Q074: the UAE, Singapore and US filings prepared from official sources for the firm to " +
+    "confirm. Every rule arrives UNCONFIRMED and on NO service, so nothing reaches the calendar " +
+    "until the firm adds a rule to a service in the catalogue. Idempotent on the rule's identity.",
+  request: { params: z.object({ country: z.enum(["AE", "SG", "US"]) }) },
+  responses: {
+    200: {
+      description: "How many rules were added",
+      content: { "application/json": { schema: z.object({ created: z.number().int() }) } },
+    },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not administer the firm"),
+  },
+});
+
 const createRuleRoute = createRoute({
   method: "post",
   path: "/api/v1/obligation-rules",
@@ -1407,6 +1427,14 @@ export function registerObligationRoutes(app: OpenAPIHono<AppEnv>, deps: Obligat
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const created = await deps.service.seedIndiaRulePack(s.tenantId, s.actor);
+    return c.json({ created }, 200);
+  });
+
+  app.openapi(seedCountryPackRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { country } = c.req.valid("param");
+    const created = await deps.service.seedCountryRulePack(s.tenantId, country, s.actor);
     return c.json({ created }, 200);
   });
 

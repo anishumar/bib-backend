@@ -118,6 +118,7 @@ import type {
 import type { FirmTimeZone } from "./ports.js";
 import { dayInZone } from "../../domain/scheduler/zone.js";
 import { assignedQuarterLabel, periodCutFor, type PeriodCut } from "../../domain/obligation/period-basis";
+import { INTL_RULE_PACKS } from "../../domain/obligation/rulepack-intl";
 import { isCountryCode } from "../../domain/country";
 
 const SYSTEM_ACTOR: Actor = { type: "system", id: null };
@@ -440,6 +441,59 @@ export class ObligationService {
    * the part that matters — never overwrites a rule a partner has since
    * CONFIRMED or given a lead time to.
    */
+  /**
+   * Load a DRAFT country pack (Q074, 2026-10-05): the UAE, Singapore or the
+   * United States, prepared from official sources for 10x to confirm.
+   *
+   * OFF TWICE OVER, and that is the point. Never loaded at firm creation: a
+   * firm presses "Load" on the rules screen. And every row is UNCONFIRMED and
+   * on NO service, so it generates nothing (T6.16 decision 1) until the firm
+   * adds it to a service in the catalogue, which confirms it in the same act.
+   * A shipped rule that reached every engagement once told a CLIENT the firm
+   * had missed filings it never took on (2026-09-18).
+   *
+   * Idempotent on the rule's identity, like the India pack: loading twice adds
+   * nothing and never overwrites a rule a partner has since confirmed.
+   */
+  async seedCountryRulePack(tenantId: string, country: string, actor: Actor = SYSTEM_ACTOR): Promise<number> {
+    const pack = INTL_RULE_PACKS.find((p) => p.jurisdiction === country);
+    if (pack === undefined) throw new InvalidJurisdiction(country);
+    let created = 0;
+    for (const seed of pack.rules) {
+      const template = await this.deps.templates.createIfAbsent({
+        id: this.deps.ids.newId(),
+        tenantId,
+        jurisdiction: pack.jurisdiction,
+        entityType: null,
+        module: seed.module,
+        name: seed.name,
+        authority: seed.authority,
+        recurrence: seed.recurrence,
+        fiscalYearStartMonth: seed.fiscalYearStartMonth,
+        periodBasis: seed.periodBasis,
+        dueRule: seedDueRule(seed),
+        unresolvedReason: seed.unresolvedReason,
+        leadTimeDays: 0,
+        rulePack: pack.rulePack,
+        effectiveFrom: null,
+        effectiveTo: null,
+        supersedesId: null,
+        status: "unconfirmed",
+      });
+      if (template !== null) created += 1;
+    }
+    if (created === 0) return 0;
+    const generating = pack.rules.filter((r) => r.dueRule !== null && r.recurrence !== "event").length;
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "obligation_rules.seeded",
+      objectId: tenantId,
+      actor,
+      payload: { rulePack: pack.rulePack, created, generating, awaitingAFact: pack.rules.length - generating },
+    });
+    return created;
+  }
+
   async seedIndiaRulePack(tenantId: string, actor: Actor = SYSTEM_ACTOR): Promise<number> {
     let created = 0;
     for (const seed of INDIA_SEED_RULES) {
