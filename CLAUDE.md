@@ -3368,7 +3368,7 @@ kind.** The client gave two answers on different days and they are different con
 *"Manager or above is fine"* (a rank threshold) and *"manager means engagement manager"* (a
 reporting line, which stalls the morning that person is on leave). The demo's own S3 says this
 is *"the maker-checker control and not a line to draw on the firm's behalf"*, so the firm draws
-it: `rank_threshold` · `reporting_line` · `reporting_line_or_rank`. **Nothing is seeded.**
+it: `rank_threshold` · `reporting_line` · `reporting_line_or_rank` · `client_key_manager` (Q069, S8 section). **Nothing is seeded.**
 
 **It is a kind and not a column for `confidence_tier`'s reason**: *who was allowed to approve
 this filing in March?* is an audit question, a published version is frozen, and an approval PINS
