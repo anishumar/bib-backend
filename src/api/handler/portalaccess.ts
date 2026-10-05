@@ -139,7 +139,95 @@ function toWire(r: PortalAccessRecord): z.infer<typeof PortalAccessSchema> {
   };
 }
 
+// ── A group (Q064) ──────────────────────────────────────────────────────────
+
+const GroupCompanySchema = z
+  .object({ partyId: z.string().uuid(), name: z.string() })
+  .openapi("PortalGroupCompany");
+
+const PortalGroupResponse = z
+  .object({
+    companies: z.array(GroupCompanySchema).openapi({
+      description:
+        "The OTHER companies in this client's group today: every company joined to it by " +
+        "ownership (parent_of, shareholder_of), both ways and to any depth. Never a person, " +
+        "the firm's own company, an archived company or another firm's. Empty when it is in " +
+        "no group.",
+    }),
+    contactsMissing: z
+      .array(
+        z.object({
+          membershipId: z.string().uuid(),
+          contactEmail: z.string(),
+          contactDisplayName: z.string().nullable(),
+          sees: z.array(z.string()).openapi({ description: "The group's companies they see today." }),
+        }),
+      )
+      .openapi({
+        description:
+          "Portal contacts who see another company of this group today and NOT this one: " +
+          "offered, never granted silently, when a company joins a group after its contacts " +
+          "were set up.",
+      }),
+  })
+  .openapi("PortalGroup");
+
+const GrantGroupRequest = z
+  .object({
+    clientPartyId: z.string().uuid().openapi({
+      description: "The client whose group's OTHER companies are granted. The list is the server's.",
+    }),
+    validFrom: IsoDate.optional().openapi({ description: "The day access starts; the browser's day." }),
+  })
+  .openapi("GrantPortalGroupRequest");
+
+const GrantGroupResponse = z
+  .object({
+    granted: z.array(PortalAccessSchema).openapi({
+      description: "One grant per company, each its own row and its own ledger event.",
+    }),
+    alreadyHeld: z.array(GroupCompanySchema).openapi({
+      description: "Companies the login could already see: left as they were.",
+    }),
+  })
+  .openapi("GrantPortalGroupResponse");
+
 // ── Routes ──────────────────────────────────────────────────────────────────
+
+const groupRoute = createRoute({
+  method: "get",
+  path: "/api/v1/portal-access/clients/{partyId}/group",
+  tags: ["portal"],
+  summary: "A client's group, and its portal contacts who cannot see this client yet",
+  request: { params: ClientParam },
+  responses: {
+    200: { description: "The group", content: { "application/json": { schema: PortalGroupResponse } } },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not grant access"),
+  },
+});
+
+const grantGroupRoute = createRoute({
+  method: "post",
+  path: "/api/v1/portal-access/memberships/{membershipId}/group",
+  tags: ["portal"],
+  summary: "Let a client-portal login read the rest of a client's group too",
+  description:
+    "Q064: a group's contact sees its sister companies. Still ONE GRANT PER COMPANY: each " +
+    "company of the server's group list is granted on its own, with its own ledger event and " +
+    "the same refusals as a single grant. A company the login already sees is left alone.",
+  request: {
+    params: MembershipParam,
+    body: { content: { "application/json": { schema: GrantGroupRequest } }, required: true },
+  },
+  responses: {
+    200: { description: "Granted", content: { "application/json": { schema: GrantGroupResponse } } },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not grant access"),
+    404: errorResponse("No such membership at this firm"),
+    409: errorResponse("The login cannot hold a grant"),
+  },
+});
 
 const listForMembershipRoute = createRoute({
   method: "get",
@@ -314,6 +402,48 @@ export function registerPortalAccessRoutes(
     return c.json(toWire(record), 201);
   });
 
+  app.openapi(groupRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { partyId } = c.req.valid("param");
+    const [companies, missing] = await Promise.all([
+      deps.service.groupOf(s.tenantId, partyId),
+      deps.service.groupContactsMissing(s.tenantId, partyId),
+    ]);
+    return c.json(
+      {
+        companies: companies.map((g) => ({ partyId: g.id, name: g.displayName })),
+        contactsMissing: missing.map((m) => ({
+          membershipId: m.membershipId,
+          contactEmail: m.contactEmail,
+          contactDisplayName: m.contactDisplayName,
+          sees: [...m.sees],
+        })),
+      },
+      200,
+    );
+  });
+
+  app.openapi(grantGroupRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { membershipId } = c.req.valid("param");
+    const body = c.req.valid("json");
+    const out = await deps.service.grantGroupOf(
+      { tenantId: s.tenantId, membershipId, clientPartyId: body.clientPartyId, validFrom: body.validFrom, grantedBy: s.userId },
+      s.actor,
+    );
+    const records = await deps.service.listForMembership(s.tenantId, membershipId);
+    const made = new Set(out.granted.map((g) => g.id));
+    return c.json(
+      {
+        granted: records.filter((r) => made.has(r.access.id)).map(toWire),
+        alreadyHeld: out.alreadyHeld.map((g) => ({ partyId: g.id, name: g.displayName })),
+      },
+      200,
+    );
+  });
+
   app.openapi(endGrantRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
@@ -332,5 +462,7 @@ export const portalAccessRoutes = {
   listForClient: listForClientRoute,
   scope: scopeRoute,
   grant: grantRoute,
+  group: groupRoute,
+  grantGroup: grantGroupRoute,
   endGrant: endGrantRoute,
 } as const;

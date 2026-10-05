@@ -102,6 +102,10 @@ export interface BillingManagerFacts {
  *  only; everything after it is scoped to one of them. */
 export interface AutoBillingFirms {
   firmsWithAutoBilling(): Promise<readonly string[]>;
+  /** The day the firm's automatic billing starts from (Q027; 0321's
+   *  `auto_billing_since`): a period ending before it is never billed by the
+   *  sweep. Null: never switched on through the app, no floor. */
+  billingStartsOn(tenantId: string): Promise<string | null>;
 }
 
 /** The month the firm's financial year starts, without which a quarter or a
@@ -663,9 +667,14 @@ export interface BillingSchedules {
 /** The firm's switch (0318). */
 export interface AutoBillingSetting {
   isOn(tenantId: string): Promise<boolean>;
-  /** Switching on also records the firm's day it went on (0321), `since`:
-   *  final bills are written only for work finished from then. */
+  /** Switching on also records the day billing starts from (0321, Q027),
+   *  `since`: the first day of the go-live month the firm chose. Nothing that
+   *  ended or finished before it is billed automatically. */
   set(tenantId: string, on: boolean, since: string): Promise<void>;
+  /** That day, or null when it was never switched on through the app. */
+  since(tenantId: string): Promise<string | null>;
+  /** Move it while the switch stays on (Q027). */
+  setSince(tenantId: string, since: string): Promise<void>;
   /** The firm's own payment terms (0327): days from an invoice's date to its
    *  due date when none was typed. Null: none. */
   dueInDays(tenantId: string): Promise<number | null>;

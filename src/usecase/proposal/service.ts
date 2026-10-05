@@ -92,6 +92,7 @@ import {
   ProposalNotCallersToday,
   ProposalNotFound,
   ProposalPartyArchived,
+  ProposalCompanyNotRegistered,
   ProposalClientIsOwnCompany,
   ServiceNotFound,
   ShareLinkUnknown,
@@ -130,6 +131,7 @@ import type {
   ProposalFilters,
   ProposalLinks,
   ProposalMailer,
+  ProposalSenders,
   ProposalPdfs,
   ProposalRecord,
   ProposalRepository,
@@ -176,6 +178,8 @@ export interface Deps {
    * rather than logged as sent.
    */
   readonly mailer: ProposalMailer | null;
+  /** Who a proposal email is from (Q059). Absent: from the firm, as before. */
+  readonly senders?: ProposalSenders;
   /** The proposal as a PDF, rendered and filed through the document store. */
   readonly pdfs: ProposalPdfs;
   /** Where a letter's links point. */
@@ -623,6 +627,7 @@ export class ProposalService {
     }
     // Before the reference is drawn, so a refusal spends no number (0305).
     await this.refuseArchived(input.tenantId, input.partyId, "client");
+    await this.refuseUnregistered(input.tenantId, input.partyId, "client");
     // Nor to one of the firm's own companies: the invoice refuses to bill one
     // (BILLS_THE_FIRM), and a quote to one is where that invoice would start.
     if (await this.deps.documents.isFirmEntity(input.tenantId, input.partyId)) {
@@ -935,6 +940,16 @@ export class ProposalService {
   }
 
   /** Quote one thing, from one frozen catalogue version. */
+  /** A client company with no country recorded (Q076) is not written onto a
+   *  new document: it would get no filings and no billing company. A person is
+   *  not asked; a party that does not exist is left to the foreign key. */
+  private async refuseUnregistered(tenantId: string, partyId: string, as: "client" | "entity"): Promise<void> {
+    const party = await this.deps.parties.findParty(tenantId, partyId);
+    if (party === null || party.kind !== "organization") return;
+    if ((await this.deps.parties.registeredCountry(tenantId, partyId)) !== null) return;
+    throw new ProposalCompanyNotRegistered(party.displayName, as);
+  }
+
   /** A client or an entity the firm put away is not written onto a new
    *  document (0305). A party that does not exist at all is left to the
    *  foreign key, as it always was. */
@@ -953,6 +968,7 @@ export class ProposalService {
     const proposal = await this.draftOrThrow(input.tenantId, input.proposalId);
     if (input.entityPartyId !== undefined) {
       await this.refuseArchived(input.tenantId, input.entityPartyId, "entity");
+      await this.refuseUnregistered(input.tenantId, input.entityPartyId, "entity");
     }
 
     checkQuantity(input.quantity);
@@ -1907,6 +1923,7 @@ export class ProposalService {
       await mailer.sendProposal({
         to: request.to,
         replyTo: record.preparedBy?.email ?? null,
+        sender: (await this.deps.senders?.senderForProposal(proposal.tenantId, proposal.id)) ?? null,
         firmName: record.firmName,
         preparedBy: record.preparedBy?.displayName ?? null,
         greetingName: record.addressee?.displayName ?? null,

@@ -168,6 +168,7 @@ export class NotificationFanout {
       for (const userId of people) {
         if (!ctx.staff.has(userId)) continue;
         if (userId === e.actorUserId) continue;
+        if (a.except?.includes(userId) === true) continue;
         if (!(await ctx.bellOn(userId, a.category))) continue;
         rows.push({
           tenantId: ctx.tenantId,

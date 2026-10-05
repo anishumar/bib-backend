@@ -74,7 +74,7 @@ beforeAll(async () => {
   if (!t) throw new Error("could not create the test tenant");
   tenant = t.id;
   self = await c.documentRepository.seedFirmEntity(tenant, "Multi Currency Test Pvt Ltd");
-  client = (await c.party.createOrganization({ tenantId: tenant, legalName: "Dune Traders" }, SYSTEM_ACTOR)).partyId;
+  client = (await c.party.createClientCompany({ tenantId: tenant, legalName: "Dune Traders", jurisdiction: "IN", entityType: "private_limited" }, SYSTEM_ACTOR)).partyId;
   await c.documents.addStandardBlock(
     { tenantId: tenant, kind: "cover", body: "Thank you for choosing us.", sortOrder: 1, issuingEntityPartyId: null },
     SYSTEM_ACTOR,

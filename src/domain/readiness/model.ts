@@ -1,5 +1,5 @@
 // Setup readiness (V2.6): is this firm set up well enough for the product to
-// run its work? Thirteen lines, each one a fact the database can answer and a
+// run its work? Fourteen lines, each one a fact the database can answer and a
 // screen that fixes it.
 //
 // ── WHY IT EXISTS ───────────────────────────────────────────────────────────
@@ -47,6 +47,7 @@ export const READINESS_KEYS = [
   "processes",
   "compliance_rules",
   "ladders",
+  "client_details",
   "account_team",
   "portal_contacts",
 ] as const;
@@ -106,6 +107,20 @@ export interface ReadinessFacts {
   readonly activeStaff: number;
   /** Standard terms (clauses) with a version in force. */
   readonly publishedTerms: number;
+  /**
+   * Client companies the firm has QUOTED OR ENGAGED (a proposal, a letter, or
+   * a letter line or engagement naming them), not archived, not the firm's
+   * own (Q076): their registration as it stands. A lead's prospect nobody has
+   * quoted yet is not here; a new proposal for one is refused in words.
+   */
+  readonly clientCompanies: readonly {
+    readonly partyId: string;
+    readonly name: string;
+    /** ISO 3166-1 alpha-2, or null when the company has no registration. */
+    readonly country: string | null;
+    /** MM-DD, or null. India's is fixed and never a gap. */
+    readonly yearEnd: string | null;
+  }[];
   /** Every client with an active engagement, not archived. */
   readonly activeClients: readonly {
     readonly partyId: string;
@@ -260,6 +275,29 @@ export function readinessLines(f: ReadinessFacts): readonly ReadinessLine[] {
                   ...c.deptsWithoutSpoc.map((d) => `spoc:${d}`),
                 ],
               })),
+          ),
+
+    // Q076: every client company the firm has quoted or engaged has its
+    // country and company type (registered), and outside India its year end.
+    // Nothing is backfilled: the firm fills these in.
+    client_details:
+      f.clientCompanies.length === 0
+        ? nothingToCheck("client_details")
+        : line(
+            "client_details",
+            f.clientCompanies
+              .map((c) => ({
+                id: c.partyId,
+                ref: null,
+                name: c.name,
+                missing:
+                  c.country === null
+                    ? ["country", "company_type"]
+                    : c.country !== "IN" && c.yearEnd === null
+                      ? ["year_end"]
+                      : [],
+              }))
+              .filter((g) => g.missing.length > 0),
           ),
 
     portal_contacts:

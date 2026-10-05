@@ -13,6 +13,7 @@ export function emptyFacts(): Omit<ReadinessFacts, "day"> {
     timeZone: "UTC",
     activeStaff: 1,
     publishedTerms: 0,
+    clientCompanies: [],
     activeClients: [],
     reportingLinePolicies: [],
     staffWithoutManager: [],

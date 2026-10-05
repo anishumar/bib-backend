@@ -466,3 +466,60 @@ describe("a letter sent for a firm comes FROM the firm, by name (audit 2026-10-0
     expect(only(reset).fromName).toBeUndefined();
   });
 });
+
+// ── Q059: a client email names its SPOC and replies to them ─────────────────
+
+describe("a client letter from the client's own person at the firm (Q059)", () => {
+  const PRIYA = { name: "Priya Sharma", email: "priya@10xglobal.in", ownAddress: false };
+
+  it("is from 'Priya Sharma, 10x Global', replies to Priya, and keeps the relay's address", () => {
+    const t = new Captured();
+    void new SmtpMailer(t).sendPortalInvite("meera@cobaltfoods.in", URL, EXPIRES, "10x Global", null, PRIYA);
+    const letter = only(t);
+    expect(letter.fromName).toBe("Priya Sharma, 10x Global");
+    expect(letter.replyTo).toEqual({ name: "Priya Sharma", address: "priya@10xglobal.in" });
+    expect(letter.fromAddress).toBeUndefined();
+    // The phishing guard names her and still never trusts the letter itself.
+    expect(letter.text).toContain("please check with Priya Sharma at 10x Global,");
+    expect(letter.text).toContain("on a number or address you already have");
+    expect(letter.html).toContain("check with Priya Sharma at 10x Global");
+  });
+
+  it("goes FROM her own address only when her domain is listed", () => {
+    const t = new Captured();
+    void new SmtpMailer(t).sendPortalWelcome("meera@cobaltfoods.in", URL, EXPIRES, "10x Global", null, {
+      ...PRIYA,
+      ownAddress: true,
+    });
+    expect(only(t).fromAddress).toBe("priya@10xglobal.in");
+    expect(only(t).fromName).toBe("Priya Sharma, 10x Global");
+  });
+
+  it("is from the firm, as before, with nobody in that seat", () => {
+    const t = new Captured();
+    void new SmtpMailer(t).sendPortalInvite("meera@cobaltfoods.in", URL, EXPIRES, "10x Global", null, null);
+    const letter = only(t);
+    expect(letter.fromName).toBe("10x Global");
+    expect(letter.replyTo).toBeUndefined();
+    expect(letter.fromAddress).toBeUndefined();
+    expect(letter.text).toContain("rather than replying to this message");
+  });
+
+  it("uses the address when the person has no name, and cannot be given a header by one", () => {
+    const t = new Captured();
+    void new SmtpMailer(t).sendPortalInvite("meera@cobaltfoods.in", URL, EXPIRES, "10x Global", null, {
+      name: "Priya\r\nBcc: evil@x.test",
+      email: "priya@10xglobal.in",
+      ownAddress: false,
+    });
+    expect(only(t).fromName).toBe("Priya Bcc: evil@x.test, 10x Global");
+    expect(only(t).fromName).not.toMatch(/[\r\n]/);
+    const blank = new Captured();
+    void new SmtpMailer(blank).sendPortalInvite("m@c.in", URL, EXPIRES, "10x Global", null, {
+      name: null,
+      email: "priya@10xglobal.in",
+      ownAddress: false,
+    });
+    expect(only(blank).fromName).toBe("priya@10xglobal.in, 10x Global");
+  });
+});

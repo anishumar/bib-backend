@@ -3,6 +3,7 @@
 //   1. the spec is generated from the routes (single source of truth),
 //   2. a validation failure returns the SAME envelope as every other error,
 //   3. the principal gate still answers 401 with that envelope.
+import { ClientMailService } from "../../src/usecase/clientmail/service";
 import { makeFxFakes } from "../../src/testfakes/fx";
 import { NotificationService } from "../../src/usecase/notify/service";
 import { FakeNotificationInbox, FakeNotificationSettings, FakeNotifyFirmSetting } from "../../src/testfakes/notify";
@@ -111,6 +112,7 @@ import {
 import {
   FakePortalAccessRepo,
   FakePortalClients,
+  FakePortalGroup,
   FakePortalMemberships,
 } from "../../src/testfakes/portalaccess";
 import { FakePortalHomeRepo, FakePortalScope } from "../../src/testfakes/portalhome";
@@ -447,6 +449,7 @@ function deps(): RouterDeps {
         grants: new FakePortalAccessRepo(),
         memberships: new FakePortalMemberships(),
         clients: new FakePortalClients(),
+        groups: new FakePortalGroup(),
         ids: new FakeIds(),
         clock: new FakeClock(new Date("2026-09-01T00:00:00.000Z")),
         timeZones: new FakeFirmTimeZone(),
@@ -494,7 +497,10 @@ function deps(): RouterDeps {
           findMembership: () =>
             Promise.resolve({ id: "m", userId: "u", audience: "CLIENT_PORTAL", isActive: true }),
         },
-        access: { grant: () => Promise.resolve({ id: "g" }) },
+        access: {
+          grant: () => Promise.resolve({ id: "g" }),
+          grantGroupOf: () => Promise.resolve({ granted: [] }),
+        },
         firms: { tenantNames: () => Promise.resolve(new Map()) },
         events: new RecordingEventSink(),
       }),
@@ -544,6 +550,12 @@ function deps(): RouterDeps {
       firmEntities: makeFirmEntityFakes().service,
     },
     fx: { service: makeFxFakes().service },
+    clientMail: {
+      service: new ClientMailService({
+        store: { sendFromDomains: () => Promise.resolve([]), setSendFromDomains: () => Promise.resolve() },
+        events: new RecordingEventSink(),
+      }),
+    },
     readiness: {
       service: new ReadinessService({
         facts: new FakeReadinessFacts(),
@@ -648,6 +660,7 @@ function deps(): RouterDeps {
         grants: new FakePortalAccessRepo(),
         memberships: new FakePortalMemberships(),
         clients: new FakePortalClients(),
+        groups: new FakePortalGroup(),
         ids: new FakeIds(),
         clock: new FakeClock(new Date("2026-09-01T00:00:00.000Z")),
         timeZones: new FakeFirmTimeZone(),

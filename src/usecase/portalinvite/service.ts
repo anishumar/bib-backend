@@ -46,6 +46,7 @@ import type {
   PortalContactMemberships,
   PortalFirmDirectory,
   PortalFirmTimeZone,
+  PortalInviteSenders,
 } from "./ports";
 
 /** The audience a portal invitation is for, spelled once. A typo in the one
@@ -58,6 +59,8 @@ interface Deps {
   readonly memberships: PortalContactMemberships;
   readonly access: PortalContactAccess;
   readonly firms: PortalFirmDirectory;
+  /** Who the letter is from (Q059). Absent: from the firm, as before. */
+  readonly senders?: PortalInviteSenders;
   /** Optional: without it the letter says UTC, as before (CA#50). */
   readonly timeZones?: PortalFirmTimeZone;
   /** `invite` records nothing of its own — the three writes under it each emit
@@ -103,12 +106,17 @@ export interface InvitePortalContactInput {
    *  server's, which is a day behind a firm in India every morning. */
   readonly validFrom?: string | undefined;
   readonly invitedBy: string;
+  /** Also grant the rest of the client's group, one grant per company (Q064).
+   *  Absent or false: this one company, as before. */
+  readonly alsoGroup?: boolean | undefined;
 }
 
 export interface PortalInvitation {
   readonly membershipId: string;
   readonly userId: string;
   readonly grantId: string;
+  /** The group's other companies granted in the same act (Q064). */
+  readonly alsoGranted: readonly { readonly clientPartyId: string; readonly clientName: string }[];
   /** When the link stops working. The token itself is never returned — see the
    *  port. */
   readonly expiresAt: string;
@@ -159,6 +167,21 @@ export class PortalInviteService {
       },
       actor,
     );
+    // THE GROUP (Q064), before the letter: by the time the link is opened the
+    // contact sees every company they were given. One grant per company.
+    const group =
+      input.alsoGroup === true
+        ? await this.deps.access.grantGroupOf(
+            {
+              tenantId: input.tenantId,
+              membershipId: membership.id,
+              clientPartyId: input.clientPartyId,
+              validFrom: input.validFrom,
+              grantedBy: input.invitedBy,
+            },
+            actor,
+          )
+        : { granted: [] };
 
     // The letter has to name the firm or it reads as phishing: it arrives
     // unasked, from an address the reader has no reason to expect. Null when
@@ -169,12 +192,14 @@ export class PortalInviteService {
       membership.userId,
       names.get(input.tenantId) ?? null,
       await this.firmZone(input.tenantId),
+      (await this.deps.senders?.senderForClient(input.tenantId, input.clientPartyId)) ?? null,
     );
 
     return {
       membershipId: membership.id,
       userId: membership.userId,
       grantId: grant.id,
+      alsoGranted: group.granted.map((g) => ({ clientPartyId: g.clientPartyId, clientName: g.clientName })),
       expiresAt,
     };
   }
@@ -234,6 +259,7 @@ export class PortalInviteService {
       membership.userId,
       names.get(input.tenantId) ?? null,
       await this.firmZone(input.tenantId),
+      (await this.deps.senders?.senderForContact(input.tenantId, membership.id)) ?? null,
     );
 
     await this.deps.events.recordEvent({

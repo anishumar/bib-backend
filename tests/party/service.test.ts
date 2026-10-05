@@ -68,9 +68,55 @@ describe("registerLegalEntity", () => {
       organizationPartyId: org.partyId,
       jurisdiction: "sg",
       entityType: "pte_ltd",
+      financialYearEnd: "12-31",
     }, ACTOR);
     expect(entity.jurisdiction).toBe("SG");
     expect(entity.status).toBe("active");
+  });
+
+  it("requires a year end outside India and fixes India's at 31 March (Q076)", async () => {
+    const { service } = svc();
+    const sg = await service.createOrganization({ tenantId: TENANT, legalName: "Acme Pte Ltd" }, ACTOR);
+    await expect(
+      service.registerLegalEntity({ tenantId: TENANT, organizationPartyId: sg.partyId, jurisdiction: "SG", entityType: "pte_ltd" }, ACTOR),
+    ).rejects.toMatchObject({ code: "INVALID_PARTY_DETAILS" });
+    const india = await service.createOrganization({ tenantId: TENANT, legalName: "Acme Pvt Ltd" }, ACTOR);
+    const entity = await service.registerLegalEntity(
+      { tenantId: TENANT, organizationPartyId: india.partyId, jurisdiction: "IN", entityType: "private_limited" },
+      ACTOR,
+    );
+    expect(entity.financialYearEnd).toBe("03-31");
+    const other = await service.createOrganization({ tenantId: TENANT, legalName: "Acme Two Pvt Ltd" }, ACTOR);
+    await expect(
+      service.registerLegalEntity(
+        { tenantId: TENANT, organizationPartyId: other.partyId, jurisdiction: "IN", entityType: "private_limited", financialYearEnd: "12-31" },
+        ACTOR,
+      ),
+    ).rejects.toMatchObject({ code: "INVALID_PARTY_DETAILS" });
+  });
+
+  it("creates a client company with its registration in one act, refusing one without (Q076)", async () => {
+    const { service, events } = svc();
+    await expect(
+      service.createClientCompany({ tenantId: TENANT, legalName: "Gulf FZCO", jurisdiction: "AE", entityType: "fzco" }, ACTOR),
+    ).rejects.toMatchObject({ code: "INVALID_PARTY_DETAILS" });
+    await expect(
+      service.createClientCompany({ tenantId: TENANT, legalName: "Nowhere Ltd", jurisdiction: "India", entityType: "x" }, ACTOR),
+    ).rejects.toMatchObject({ code: "INVALID_PARTY_DETAILS" });
+    await expect(
+      service.createClientCompany({ tenantId: TENANT, legalName: "Blank Type", jurisdiction: "IN", entityType: "  " }, ACTOR),
+    ).rejects.toMatchObject({ code: "INVALID_PARTY_DETAILS" });
+    const org = await service.createClientCompany(
+      { tenantId: TENANT, legalName: "Gulf FZCO", jurisdiction: "ae", entityType: "fzco", financialYearEnd: "12-31" },
+      ACTOR,
+    );
+    const profile = await service.partyProfile(TENANT, org.partyId);
+    expect(profile.legalEntities).toEqual([
+      expect.objectContaining({ jurisdiction: "AE", entityType: "fzco", financialYearEnd: "12-31" }),
+    ]);
+    // Nothing was written for the three refused.
+    expect(events.verbs().filter((v) => v === "party.created")).toHaveLength(1);
+    expect(events.verbs()).toContain("legal_entity.registered");
   });
 
   it("refuses to register against a person", async () => {

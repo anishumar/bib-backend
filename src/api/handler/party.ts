@@ -232,6 +232,22 @@ const CreateOrganizationBody = z
     tradeName: z.string().min(1).optional(),
     industry: z.string().min(1).optional(),
     website: z.string().min(1).optional(),
+    // Q076: a client company is created WITH its registration, in one act.
+    jurisdiction: z.string().min(1).max(10).openapi({
+      description: "Required (Q076). The country it is registered in, ISO 3166-1 two letters: IN, AE, SG, US.",
+      example: "IN",
+    }),
+    entityType: z.string().min(1).max(100).openapi({
+      description: "Required (Q076). What kind of company: private_limited, llp, pte_ltd, fzco, c_corp... the firm's own word.",
+      example: "private_limited",
+    }),
+    financialYearEnd: z.string().max(5).optional().openapi({
+      description:
+        "MM-DD, the last day of its financial year. REQUIRED outside India; an Indian company's " +
+        "is fixed at 03-31 and may be left out (anything else is refused).",
+      example: "12-31",
+    }),
+    incorporatedOn: z.string().date().optional(),
   })
   .openapi("CreateOrganizationRequest");
 
@@ -389,6 +405,12 @@ const CorrectLegalEntityBody = z
   .object({
     jurisdiction: z.string().max(10).optional().openapi({ example: "IN" }),
     entityType: z.string().max(100).optional().openapi({ example: "private_limited" }),
+    financialYearEnd: z.string().max(5).optional().openapi({
+      description:
+        "Q076: MM-DD. Required for a company outside India (moving one out of India asks for it); " +
+        "an Indian company's is fixed at 03-31.",
+      example: "12-31",
+    }),
   })
   .openapi("CorrectLegalEntity");
 
@@ -396,7 +418,7 @@ const correctLegalEntityRoute = createRoute({
   method: "patch",
   path: "/api/v1/parties/{partyId}/legal-entity",
   tags: ["party"],
-  summary: "Correct a registered company's country or kind",
+  summary: "Correct a registered company's country, kind or year end",
   request: {
     params: PartyParam,
     body: { content: { "application/json": { schema: CorrectLegalEntityBody } }, required: true },
@@ -730,7 +752,7 @@ export function registerPartyRoutes(app: OpenAPIHono<AppEnv>, deps: PartyDeps): 
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const body = c.req.valid("json");
-    const org = await deps.service.createOrganization({ tenantId: s.tenantId, ...body }, s.actor);
+    const org = await deps.service.createClientCompany({ tenantId: s.tenantId, ...body }, s.actor);
     return c.json(organizationWire(org), 201);
   });
 

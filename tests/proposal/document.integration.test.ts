@@ -133,7 +133,7 @@ beforeAll(async () => {
       (${tenant}, 'dept', 'TRC', 'Transactions & Regulatory Compliance', 2)
   `;
 
-  nexus = (await party.createOrganization({ tenantId: tenant, legalName: "Nexus Fintech" }, SYSTEM_ACTOR)).partyId;
+  nexus = (await party.createClientCompany({ tenantId: tenant, legalName: "Nexus Fintech", jurisdiction: "IN", entityType: "private_limited" }, SYSTEM_ACTOR)).partyId;
   priya = (await party.createPerson({ tenantId: tenant, fullName: "Priya Sharma" }, SYSTEM_ACTOR)).partyId;
   await party.addRelationship(
     { tenantId: tenant, fromPartyId: priya, toPartyId: nexus, type: "director_of", validFrom: "2024-01-01" },

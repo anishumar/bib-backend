@@ -63,7 +63,7 @@ beforeAll(async () => {
   if (!t) throw new Error("could not create the test tenant");
   tenant = t.id;
   await c.documentRepository.seedFirmEntity(tenant, "Quote Prose Test LLP");
-  client = (await c.party.createOrganization({ tenantId: tenant, legalName: "Nexus Fintech" }, SYSTEM_ACTOR)).partyId;
+  client = (await c.party.createClientCompany({ tenantId: tenant, legalName: "Nexus Fintech", jurisdiction: "IN", entityType: "private_limited" }, SYSTEM_ACTOR)).partyId;
 
   let order = 0;
   for (const [kind, body, isHeading] of [

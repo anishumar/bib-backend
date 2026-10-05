@@ -4,6 +4,7 @@
 // fakes; the SQL half is `desk.integration.test.ts`.
 import { describe, expect, it } from "vitest";
 import { BillingDeskService } from "../../src/usecase/billing/desk";
+import { InvalidBillingInput } from "../../src/domain/billing/errors";
 import { GoLiveScheduler } from "../../src/usecase/billing/golive";
 import {
   FakeAutoBillingSetting,
@@ -478,10 +479,49 @@ describe("the firm's switch", () => {
     expect(w.events.recorded[0]).toMatchObject({ verb: "tenant.auto_billing_set", payload: { from: false, to: true } });
   });
 
-  it("records the firm's day it went on, from which final bills are written (0321)", async () => {
+  it("starts from the first of this month when no month is given (0321, Q027)", async () => {
     const w = world();
     await w.service.setAutoBilling(FIRM, true, ME);
-    expect(w.setting.since.get(FIRM)).toBe("2026-12-05");
+    expect(w.setting.sinceDays.get(FIRM)).toBe("2026-12-01");
+    expect(w.events.recorded[0]).toMatchObject({ payload: { from: false, to: true, startsOn: "2026-12-01" } });
+    expect((await w.service.settings(FIRM)).autoBillingFrom).toBe("2026-12-01");
+  });
+
+  it("starts from the go-live month the firm chose, past or a few months ahead (Q027)", async () => {
+    const w = world();
+    await w.service.setAutoBilling(FIRM, true, ME, "2026-10");
+    expect(w.setting.sinceDays.get(FIRM)).toBe("2026-10-01");
+    const later = world();
+    await later.service.setAutoBilling(FIRM, true, ME, "2027-02");
+    expect(later.setting.sinceDays.get(FIRM)).toBe("2027-02-01");
+  });
+
+  it("refuses a month that is not one, or more than a year ahead, and writes nothing", async () => {
+    for (const bad of ["2026-13", "Oct 2026", "2026-1", "2028-01", "1999-12"]) {
+      const w = world();
+      await expect(w.service.setAutoBilling(FIRM, true, ME, bad)).rejects.toBeInstanceOf(InvalidBillingInput);
+      expect(await w.service.autoBilling(FIRM)).toBe(false);
+      expect(w.events.recorded).toEqual([]);
+    }
+  });
+
+  it("moves the month while on, recording both sides, and refuses it while off", async () => {
+    const w = world();
+    await expect(w.service.setAutoBillingFrom(FIRM, "2026-11", ME)).rejects.toBeInstanceOf(InvalidBillingInput);
+    await w.service.setAutoBilling(FIRM, true, ME, "2026-10");
+    await w.service.setAutoBillingFrom(FIRM, "2026-11", ME);
+    expect(w.setting.sinceDays.get(FIRM)).toBe("2026-11-01");
+    expect(w.events.recorded.at(-1)).toMatchObject({
+      verb: "tenant.auto_billing_from_set",
+      payload: { from: "2026-10-01", to: "2026-11-01" },
+    });
+    // The same month again changes nothing and records nothing.
+    const before = w.events.recorded.length;
+    await w.service.setAutoBillingFrom(FIRM, "2026-11", ME);
+    expect(w.events.recorded).toHaveLength(before);
+    // Sent with the switch already on, the month alone moves.
+    await w.service.setAutoBilling(FIRM, true, ME, "2026-12");
+    expect(w.setting.sinceDays.get(FIRM)).toBe("2026-12-01");
   });
 });
 

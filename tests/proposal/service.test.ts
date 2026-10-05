@@ -40,6 +40,7 @@ import {
   ProposalAddresseeNotAPerson,
   ProposalIssuerNotAFirmEntity,
   ProposalPartyArchived,
+  ProposalCompanyNotRegistered,
   ProposalClientIsOwnCompany,
 } from "../../src/domain/proposal/errors";
 import { SEEDED_FIRM_ENTITY } from "../../src/testfakes/document";
@@ -81,6 +82,45 @@ async function draftWith(
   );
   return p.id;
 }
+
+describe("a client company with no country recorded (Q076)", () => {
+  it("refuses a new proposal for it, in words, before a reference number is spent", async () => {
+    const s = setup();
+    s.parties.know(PARTY, "Acme Industries Private Limited").unregister(PARTY);
+    const err = await draftWith(s).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ProposalCompanyNotRegistered);
+    expect((err as ProposalCompanyNotRegistered).code).toBe("COMPANY_NOT_REGISTERED");
+    expect((err as Error).message).toMatch(
+      /^Acme Industries Private Limited has no country recorded, so a proposal cannot be drafted for it\. Record its country and company type on its client page first/,
+    );
+    expect(s.proposals.rows).toHaveLength(0);
+    expect(s.events.recorded).toHaveLength(0);
+  });
+
+  it("does not ask a person for a country", async () => {
+    const s = setup();
+    s.parties.know(PARTY, "Priya Menon", "person").unregister(PARTY);
+    await expect(draftWith(s)).resolves.toBeTruthy();
+  });
+
+  it("refuses a line for a company of the group with no country", async () => {
+    const s = setup();
+    const id = await draftWith(s);
+    s.parties.know(US_ENTITY, "Acme Inc.").unregister(US_ENTITY);
+    await expect(
+      s.service.addLine({
+        tenantId: TENANT,
+        proposalId: id,
+        entityPartyId: US_ENTITY,
+        serviceVersionId: GST_VERSION,
+        description: "GST filing, 12 months",
+        quantity: "12",
+        unitAmount: "2000",
+        discountPercent: "0",
+      }),
+    ).rejects.toThrow(/Acme Inc\. has no country recorded, so a proposal line cannot be for it/);
+  });
+});
 
 describe("a client the firm has ARCHIVED (0305)", () => {
   // A new document may not name a party the firm put away. Refused with the

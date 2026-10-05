@@ -70,6 +70,7 @@ const PARTY_ROW = { id: PARTY, tenantId: TENANT, kind: "organization", displayNa
 describe("party.ts answers field by field", () => {
   const service = {
     createOrganization: () => Promise.resolve(ORG),
+    createClientCompany: () => Promise.resolve(ORG),
     createPerson: () => Promise.resolve(PERSON),
     registerLegalEntity: () => Promise.resolve(ENTITY),
     correctLegalEntity: () => Promise.resolve(ENTITY),
@@ -98,7 +99,7 @@ describe("party.ts answers field by field", () => {
   });
 
   const routes: [string, string, unknown?][] = [
-    ["POST", "/api/v1/parties/organizations", { legalName: "Cobalt Foods" }],
+    ["POST", "/api/v1/parties/organizations", { legalName: "Cobalt Foods", jurisdiction: "IN", entityType: "private_limited" }],
     ["POST", "/api/v1/parties/persons", { fullName: "Meera Menon" }],
     ["POST", `/api/v1/parties/organizations/${PARTY}/legal-entities`, { jurisdiction: "IN", entityType: "private_limited" }],
     ["PATCH", `/api/v1/parties/${PARTY}/legal-entity`, { jurisdiction: "IN" }],
@@ -169,7 +170,7 @@ describe("tenancy.ts answers field by field", () => {
 });
 
 describe("portalinvite.ts answers field by field", () => {
-  const invitation = { membershipId: ID, userId: USER, grantId: ID, expiresAt: "2026-10-10T00:00:00.000Z", ...LEAK };
+  const invitation = { membershipId: ID, userId: USER, grantId: ID, alsoGranted: [], expiresAt: "2026-10-10T00:00:00.000Z", ...LEAK };
   const service = {
     invite: () => Promise.resolve(invitation),
     resend: () => Promise.resolve(invitation),

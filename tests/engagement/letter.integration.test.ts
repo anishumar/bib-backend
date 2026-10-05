@@ -242,15 +242,15 @@ beforeAll(async () => {
   await documentRepository.seedFirmEntity(tenantB, "EL Test B LLP");
 
   partyA = (
-    await party.createOrganization({ tenantId: tenantA, legalName: "Acme Ltd" }, SYSTEM_ACTOR)
+    await party.createClientCompany({ tenantId: tenantA, legalName: "Acme Ltd", jurisdiction: "IN", entityType: "private_limited" }, SYSTEM_ACTOR)
   ).partyId;
 
   entityA1 = (
-    await party.createOrganization({ tenantId: tenantA, legalName: "Acme Foods Ltd" }, SYSTEM_ACTOR)
+    await party.createClientCompany({ tenantId: tenantA, legalName: "Acme Foods Ltd", jurisdiction: "IN", entityType: "private_limited" }, SYSTEM_ACTOR)
   ).partyId;
   entityA2 = (
-    await party.createOrganization(
-      { tenantId: tenantA, legalName: "Acme Logistics Ltd" },
+    await party.createClientCompany(
+      { tenantId: tenantA, legalName: "Acme Logistics Ltd", jurisdiction: "IN", entityType: "private_limited" },
       SYSTEM_ACTOR,
     )
   ).partyId;
@@ -338,7 +338,7 @@ let partyBId = "";
 async function partyAtB(): Promise<string> {
   if (partyBId === "") {
     partyBId = (
-      await party.createOrganization({ tenantId: tenantB, legalName: "Other Firm Client" }, SYSTEM_ACTOR)
+      await party.createClientCompany({ tenantId: tenantB, legalName: "Other Firm Client", jurisdiction: "IN", entityType: "private_limited" }, SYSTEM_ACTOR)
     ).partyId;
   }
   return partyBId;
@@ -1732,7 +1732,7 @@ describe("who a letter and an invoice name, in the database (F-10-1, 0306)", () 
   const DAY = "2026-09-25";
 
   async function org(name: string): Promise<string> {
-    return (await party.createOrganization({ tenantId: tenantA, legalName: `${name} ${stamp}` }, SYSTEM_ACTOR))
+    return (await party.createClientCompany({ tenantId: tenantA, legalName: `${name} ${stamp}`, jurisdiction: "IN", entityType: "private_limited" }, SYSTEM_ACTOR))
       .partyId;
   }
   async function person(name: string): Promise<string> {

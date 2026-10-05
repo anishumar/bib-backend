@@ -63,7 +63,7 @@ call POST /api/v1/tenancy/structure/axes '{"axis":"dept","code":"FRC","name":"Fi
 FRC=$(jget 'd["id"]')
 call POST /api/v1/tenancy/structure/axes '{"axis":"dept","code":"TRC","name":"Tax & Regulatory Compliance","sortOrder":2}' >/dev/null
 TRC=$(jget 'd["id"]')
-call POST /api/v1/parties/organizations '{"legalName":"Bharat Steel Private Limited","tradeName":"Bharat Steel"}' >/dev/null
+call POST /api/v1/parties/organizations '{"legalName":"Bharat Steel Private Limited","tradeName":"Bharat Steel","jurisdiction":"IN","entityType":"private_limited"}' >/dev/null
 CLIENT=$(jget 'd["partyId"]')
 echo "  firm $TEN · client $CLIENT"
 echo

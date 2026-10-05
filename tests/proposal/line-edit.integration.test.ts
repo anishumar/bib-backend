@@ -100,7 +100,7 @@ beforeAll(async () => {
   tenant = t.id;
   await documentRepository.seedFirmEntity(tenant, "Line Edit Test LLP");
   client = (
-    await party.createOrganization({ tenantId: tenant, legalName: "Meridian Textiles" }, SYSTEM_ACTOR)
+    await party.createClientCompany({ tenantId: tenant, legalName: "Meridian Textiles", jurisdiction: "IN", entityType: "private_limited" }, SYSTEM_ACTOR)
   ).partyId;
 
   const defined = await config.define(

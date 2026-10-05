@@ -126,6 +126,13 @@ export class FakeAutoBillingFirms implements AutoBillingFirms {
   firmsWithAutoBilling(): Promise<readonly string[]> {
     return Promise.resolve(this.firms);
   }
+
+  /** Each firm's go-live day (Q027); none until a test sets one. */
+  readonly startsOn = new Map<string, string>();
+
+  billingStartsOn(tenantId: string): Promise<string | null> {
+    return Promise.resolve(this.startsOn.get(tenantId) ?? null);
+  }
 }
 
 export class FakeFiscalYearSource implements FiscalYearSource {
@@ -777,8 +784,8 @@ export class FakeFinalBillFacts implements FinalBillFacts {
 
 export class FakeAutoBillingSetting implements AutoBillingSetting {
   private readonly on = new Set<string>();
-  /** The day each firm last switched on (0321). */
-  readonly since = new Map<string, string>();
+  /** The day each firm's automatic billing starts from (0321, Q027). */
+  readonly sinceDays = new Map<string, string>();
 
   isOn(tenantId: string): Promise<boolean> {
     return Promise.resolve(this.on.has(tenantId));
@@ -787,7 +794,16 @@ export class FakeAutoBillingSetting implements AutoBillingSetting {
   set(tenantId: string, on: boolean, since?: string): Promise<void> {
     if (on) this.on.add(tenantId);
     else this.on.delete(tenantId);
-    if (on && since !== undefined) this.since.set(tenantId, since);
+    if (on && since !== undefined) this.sinceDays.set(tenantId, since);
+    return Promise.resolve();
+  }
+
+  since(tenantId: string): Promise<string | null> {
+    return Promise.resolve(this.sinceDays.get(tenantId) ?? null);
+  }
+
+  setSince(tenantId: string, since: string): Promise<void> {
+    this.sinceDays.set(tenantId, since);
     return Promise.resolve();
   }
 

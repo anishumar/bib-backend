@@ -182,6 +182,9 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("GET", "/api/v1/portal-access/memberships/{membershipId}/scope"), "portal:grant" as const],
   [routeKey("GET", "/api/v1/portal-access/clients/{partyId}"), "portal:grant" as const],
   [routeKey("POST", "/api/v1/portal-access/memberships/{membershipId}"), "portal:grant" as const],
+  // Q064: a client's group, and granting the rest of it (one grant per company).
+  [routeKey("GET", "/api/v1/portal-access/clients/{partyId}/group"), "portal:grant" as const],
+  [routeKey("POST", "/api/v1/portal-access/memberships/{membershipId}/group"), "portal:grant" as const],
   [routeKey("POST", "/api/v1/portal-access/grants/{grantId}/end"), "portal:grant" as const],
 
   // Inviting a client's contact IS granting them access — it creates the login
@@ -308,6 +311,10 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // Setup readiness (V2.6): what the firm has not set up yet, by name. Behind
   // the permission every line's fix already needs.
   [routeKey("GET", "/api/v1/tenancy/readiness"), "tenant:admin" as const],
+  // Which domains the firm's client mail may claim to come from (Q059): an
+  // administrator's call, made once the mail provider authorises the relay.
+  [routeKey("GET", "/api/v1/tenancy/mail-senders"), "tenant:admin" as const],
+  [routeKey("PUT", "/api/v1/tenancy/mail-senders"), "tenant:admin" as const],
   // The PICKER, not the roster: names and rungs of active staff, no emails.
   // `party:read`: whoever may look at a client may see which colleague to
   // hand its work to. Decided 2026-09-25; see `TenancyService.listColleagues`.

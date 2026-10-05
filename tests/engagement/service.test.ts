@@ -40,6 +40,7 @@ import {
   UnpricedLineHasDiscount,
   ServiceHasNoListPrice,
   LetterPartyArchived,
+  LetterCompanyNotRegistered,
   LetterClientIsOwnCompany,
   LetterNotCallersToday,
 } from "../../src/domain/engagement/errors";
@@ -1758,6 +1759,28 @@ describe("G1.8 — a letter cannot print another country's law", () => {
   });
 });
 
+
+describe("a client company with no country recorded (Q076)", () => {
+  it("refuses a new letter for it, in words", async () => {
+    const s = setup();
+    s.parties.know(PARTY, "Acme Industries Private Limited").unregister(PARTY);
+    const err = await draft(s).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LetterCompanyNotRegistered);
+    expect((err as Error).message).toMatch(
+      /^Acme Industries Private Limited has no country recorded, so an engagement letter cannot be drafted for it\./,
+    );
+    expect(s.letters.letters).toHaveLength(0);
+  });
+
+  it("refuses a line for a company with no country", async () => {
+    const s = setup();
+    const id = await draft(s);
+    s.parties.know(ENTITY_A, "Acme Foods Private Limited").unregister(ENTITY_A);
+    await expect(completeTerms(s, id)).rejects.toThrow(
+      /Acme Foods Private Limited has no country recorded, so a letter line cannot be for it/,
+    );
+  });
+});
 
 describe("a client the firm has ARCHIVED (0305)", () => {
   it("refuses a new letter for them", async () => {

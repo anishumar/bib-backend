@@ -100,7 +100,11 @@ export class FakePartyRepo implements PartyRepository {
   correctLegalEntity(
     tenantId: string,
     partyId: string,
-    patch: { readonly jurisdiction?: string | undefined; readonly entityType?: string | undefined },
+    patch: {
+      readonly jurisdiction?: string | undefined;
+      readonly entityType?: string | undefined;
+      readonly financialYearEnd?: string | null | undefined;
+    },
   ): Promise<LegalEntity | null> {
     const i = this.legalEntities.findIndex((e) => e.tenantId === tenantId && e.partyId === partyId);
     const entity = this.legalEntities[i];
@@ -109,6 +113,7 @@ export class FakePartyRepo implements PartyRepository {
       ...entity,
       jurisdiction: patch.jurisdiction ?? entity.jurisdiction,
       entityType: patch.entityType ?? entity.entityType,
+      financialYearEnd: patch.financialYearEnd === undefined ? entity.financialYearEnd : patch.financialYearEnd,
     };
     this.legalEntities[i] = next;
     return Promise.resolve(next);
@@ -173,6 +178,15 @@ export class FakePartyRepo implements PartyRepository {
     };
     this.persons.push(person);
     return Promise.resolve(person);
+  }
+
+  async createRegisteredOrganization(
+    o: NewOrganization,
+    registration: Omit<NewLegalEntity, "partyId" | "tenantId">,
+  ): Promise<{ readonly organization: Organization; readonly entity: LegalEntity }> {
+    const organization = await this.createOrganization(o);
+    const entity = await this.addLegalEntity({ ...registration, partyId: o.partyId, tenantId: o.tenantId });
+    return { organization, entity };
   }
 
   addLegalEntity(e: NewLegalEntity): Promise<LegalEntity> {
@@ -278,6 +292,19 @@ export class FakePartyStanding {
   know(partyId: string, displayName: string, kind: Party["kind"] = "organization"): this {
     this.known.set(partyId, { displayName, kind });
     return this;
+  }
+
+  /** Companies a test says have no country recorded (Q076). Everybody else is
+   *  registered in India, which is the ordinary case. */
+  readonly unregistered = new Set<string>();
+
+  unregister(partyId: string): this {
+    this.unregistered.add(partyId);
+    return this;
+  }
+
+  registeredCountry(_tenantId: string, partyId: string): Promise<string | null> {
+    return Promise.resolve(this.unregistered.has(partyId) ? null : "IN");
   }
 
   findParty(

@@ -45,9 +45,8 @@ call POST /api/v1/config/service '{"key":"s","body":{"name":"S","billingBasis":"
 call POST /api/v1/config/service/s/versions/1/publish ""; echo " <- service"
 SVCV=$(jget 'd["id"]')
 
-call POST /api/v1/parties/organizations '{"legalName":"Bharat Steel Private Limited"}' >/dev/null
+call POST /api/v1/parties/organizations '{"legalName":"Bharat Steel Private Limited","jurisdiction":"IN","entityType":"private_limited"}' >/dev/null
 CLIENT=$(jget 'd["partyId"]')
-call POST "/api/v1/parties/organizations/$CLIENT/legal-entities" '{"jurisdiction":"IN","entityType":"private_limited"}' >/dev/null
 TODAY=$(python3 -c 'import datetime;print(datetime.date.today().isoformat())')
 call POST /api/v1/engagement-letters "{\"partyId\":\"$CLIENT\",\"jurisdiction\":\"IN\",\"title\":\"T\",\"currency\":\"INR\",\"fxRate\":\"1\",\"fxRateDate\":\"$TODAY\"}" >/dev/null
 EL=$(jget 'd["id"]')

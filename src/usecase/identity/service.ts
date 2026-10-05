@@ -19,6 +19,7 @@ import type { Membership, UserAccount } from "../../domain/tenancy/model";
 import type { EventSink } from "../ledger/ports";
 import { normalizeEmail } from "../../domain/tenancy/model";
 import type { Session } from "../../domain/identity/model";
+import type { ClientSender } from "../../domain/mail/model";
 import {
   MAX_PASSWORD_LENGTH,
   MIN_PASSWORD_LENGTH,
@@ -568,7 +569,12 @@ export class IdentityService {
    * member of the firm is inviting a person they already named, so there is no
    * account to confirm the existence of and nothing to be quiet about.
    */
-  async invitePortalContact(userId: string, firmName: string | null, timeZone?: string | null): Promise<string> {
+  async invitePortalContact(
+    userId: string,
+    firmName: string | null,
+    timeZone?: string | null,
+    sender?: ClientSender | null,
+  ): Promise<string> {
     const user = await this.deps.users.findById(userId);
     // The caller has just created or found this account, so a miss here is a
     // race or a deactivated login rather than a typo — and the invite must not
@@ -621,6 +627,7 @@ export class IdentityService {
         expiresAt,
         firmName,
         timeZone,
+        sender ?? null,
       );
       return expiresAt;
     }
@@ -630,6 +637,7 @@ export class IdentityService {
       expiresAt,
       firmName,
       timeZone,
+      sender ?? null,
     );
     return expiresAt;
   }
@@ -678,6 +686,7 @@ export class IdentityService {
     userId: string,
     firmName: string | null,
     timeZone?: string | null,
+    sender?: ClientSender | null,
   ): Promise<ResentInvitation> {
     const budget = await this.deps.attempts.check(
       `portal-invite:${userId}`,
@@ -729,6 +738,7 @@ export class IdentityService {
       expiresAt,
       firmName,
       timeZone,
+      sender ?? null,
     );
     return { expiresAt, supersededLinks };
   }

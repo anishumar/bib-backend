@@ -24,6 +24,8 @@ import {
   isValidIdentifier,
   normalizeIdentifier,
   relationshipFits,
+  yearEndFor,
+  yearEndProblem,
 } from "../../domain/party/model";
 import {
   DuplicateIdentifier,
@@ -74,6 +76,17 @@ export interface CreateOrganizationInput {
   readonly tradeName?: string | undefined;
   readonly industry?: string | undefined;
   readonly website?: string | undefined;
+}
+
+/** A client company, created with its registration (Q076). */
+export interface CreateClientCompanyInput extends CreateOrganizationInput {
+  /** Required. Two-letter country, upper case. */
+  readonly jurisdiction: string;
+  /** Q076: required. The firm's own word: private_limited, llp, fzco... */
+  readonly entityType: string;
+  /** MM-DD. Required outside India; India's is fixed at 31 March. */
+  readonly financialYearEnd?: string | undefined;
+  readonly incorporatedOn?: string | undefined;
 }
 
 export interface CreatePersonInput {
@@ -168,6 +181,11 @@ export class PartyService {
 
   /** Create an organization party. Display name prefers the trade name, falling
    *  back to the legal name. */
+  /**
+   * An organization with no registration yet: a lead's prospect (whose type
+   * nobody has asked), or an import's group umbrella that is not itself a
+   * company. A CLIENT company is `createClientCompany`, which requires one.
+   */
   async createOrganization(input: CreateOrganizationInput, actor: Actor): Promise<Organization> {
     const org = await this.deps.parties.createOrganization({
       partyId: this.deps.ids.newId(),
@@ -186,6 +204,60 @@ export class PartyService {
       payload: { kind: "organization" },
     });
     return org;
+  }
+
+  /**
+   * Create a client company WITH its registration (Q076): country and company
+   * type always, the year end outside India. Everything is checked before
+   * anything is written, and the three rows go in one transaction, so a
+   * company made on the Clients screen never exists with no country (which
+   * generated no filings and told nobody).
+   */
+  async createClientCompany(input: CreateClientCompanyInput, actor: Actor): Promise<Organization> {
+    const registration = this.checkedRegistration(input.jurisdiction, input.entityType, input.financialYearEnd ?? null);
+    const partyId = this.deps.ids.newId();
+    const { organization, entity } = await this.deps.parties.createRegisteredOrganization(
+      {
+        partyId,
+        tenantId: input.tenantId,
+        legalName: input.legalName,
+        tradeName: input.tradeName ?? null,
+        industry: input.industry ?? null,
+        website: input.website ?? null,
+        displayName: input.tradeName?.trim() || input.legalName,
+      },
+      { ...registration, incorporatedOn: input.incorporatedOn ?? null, registeredAddress: null },
+    );
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "party.created",
+      objectId: organization.partyId,
+      actor,
+      payload: { kind: "organization" },
+    });
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "legal_entity.registered",
+      objectId: entity.partyId,
+      actor,
+      payload: { jurisdiction: entity.jurisdiction, entityType: entity.entityType },
+    });
+    return organization;
+  }
+
+  /** Country, type and year end checked together (Q076), as stored. */
+  private checkedRegistration(
+    rawJurisdiction: string,
+    rawType: string,
+    rawYearEnd: string | null,
+  ): { readonly jurisdiction: string; readonly entityType: string; readonly financialYearEnd: string | null } {
+    const jurisdiction = rawJurisdiction.trim().toUpperCase();
+    if (!isCountryCode(jurisdiction)) throw new InvalidPartyDetails(countryCodeProblem(rawJurisdiction));
+    const entityType = rawType.trim();
+    if (entityType === "") throw new InvalidPartyDetails("Say what kind of company it is, e.g. private_limited.");
+    const problem = yearEndProblem(jurisdiction, rawYearEnd);
+    if (problem !== null) throw new InvalidPartyDetails(problem);
+    return { jurisdiction, entityType, financialYearEnd: yearEndFor(jurisdiction, rawYearEnd) };
   }
 
   /** Create a person party. */
@@ -220,13 +292,12 @@ export class PartyService {
     if (!org) throw new NotAnOrganization(input.organizationPartyId);
     const [registered] = await this.deps.parties.listLegalEntities(input.tenantId, input.organizationPartyId);
     if (registered !== undefined) throw new AlreadyRegistered(registered.jurisdiction);
+    const checked = this.checkedRegistration(input.jurisdiction, input.entityType, input.financialYearEnd ?? null);
     const entity = await this.deps.parties.addLegalEntity({
       partyId: input.organizationPartyId,
       tenantId: input.tenantId,
-      jurisdiction: input.jurisdiction.trim().toUpperCase(),
-      entityType: input.entityType,
+      ...checked,
       incorporatedOn: input.incorporatedOn ?? null,
-      financialYearEnd: input.financialYearEnd ?? null,
       registeredAddress: input.registeredAddress ?? null,
     });
     await this.deps.events.recordEvent({
@@ -635,6 +706,8 @@ export class PartyService {
       readonly partyId: string;
       readonly jurisdiction?: string | undefined;
       readonly entityType?: string | undefined;
+      /** Q076: the year end, MM-DD; required outside India, fixed inside it. */
+      readonly financialYearEnd?: string | undefined;
     },
     actor: Actor,
   ): Promise<LegalEntity> {
@@ -648,14 +721,24 @@ export class PartyService {
     if (entityType !== undefined && entityType === "") {
       throw new InvalidPartyDetails("Say what kind of company it is, e.g. private_limited.");
     }
+    // The year end is judged against the country the company will HAVE
+    // (Q076): moving it out of India asks for one, moving it in fixes it.
+    const nextCountry = jurisdiction ?? current.jurisdiction;
+    const givenYearEnd =
+      input.financialYearEnd !== undefined ? input.financialYearEnd : nextCountry === current.jurisdiction ? current.financialYearEnd : null;
+    const yearProblem = yearEndProblem(nextCountry, givenYearEnd);
+    if (yearProblem !== null) throw new InvalidPartyDetails(yearProblem);
+    const nextYearEnd = yearEndFor(nextCountry, givenYearEnd);
     const fields: string[] = [];
     if (jurisdiction !== undefined && jurisdiction !== current.jurisdiction) fields.push("jurisdiction");
     if (entityType !== undefined && entityType !== current.entityType) fields.push("entityType");
+    if (nextYearEnd !== current.financialYearEnd) fields.push("financialYearEnd");
     if (fields.length === 0) throw new NothingToChange();
 
     const corrected = await this.deps.parties.correctLegalEntity(input.tenantId, input.partyId, {
       ...(fields.includes("jurisdiction") ? { jurisdiction } : {}),
       ...(fields.includes("entityType") ? { entityType } : {}),
+      ...(fields.includes("financialYearEnd") ? { financialYearEnd: nextYearEnd } : {}),
     });
     if (!corrected) throw new NotALegalEntity();
     await this.deps.events.recordEvent({
@@ -663,7 +746,12 @@ export class PartyService {
       verb: "legal_entity.corrected",
       objectId: input.partyId,
       actor,
-      payload: { fields, jurisdiction: corrected.jurisdiction, entityType: corrected.entityType },
+      payload: {
+        fields,
+        jurisdiction: corrected.jurisdiction,
+        entityType: corrected.entityType,
+        financialYearEnd: corrected.financialYearEnd,
+      },
     });
     return corrected;
   }

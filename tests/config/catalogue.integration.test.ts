@@ -184,8 +184,8 @@ beforeAll(async () => {
   await documentRepository.seedFirmEntity(tenant, "Catalogue Test");
 
   client = (
-    await party.createOrganization(
-      { tenantId: tenant, legalName: "Meridian Textiles Private Limited" },
+    await party.createClientCompany(
+      { tenantId: tenant, legalName: "Meridian Textiles Private Limited", jurisdiction: "IN", entityType: "private_limited" },
       SYSTEM_ACTOR,
     )
   ).partyId;

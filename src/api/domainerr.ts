@@ -120,6 +120,7 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_AUDIENCE":
       case "INVALID_TIME_ZONE":
       case "INVALID_COUNTRY":
+      case "INVALID_SEND_DOMAIN":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       case "SLUG_TAKEN":
       case "EMAIL_TAKEN":
@@ -843,6 +844,7 @@ export function mapError(err: unknown): MappedError {
       case "APPROVAL_NOT_NEEDED":
       case "ALREADY_APPROVED":
       case "PARTY_ARCHIVED":
+      case "COMPANY_NOT_REGISTERED":
       case "ADDRESSEE_NOT_LINKED":
       case "NOT_OUT_FOR_ANSWER":
       case "ALREADY_ANSWERED":
@@ -978,6 +980,7 @@ export function mapError(err: unknown): MappedError {
       case "QUOTE_HAS_NO_LINES":
       case "QUOTE_NAMES_NO_ENTITY":
       case "PARTY_ARCHIVED":
+      case "COMPANY_NOT_REGISTERED":
       case "ADDRESSEE_NOT_LINKED":
       case "ENTITY_OUTSIDE_CLIENT":
       case "FEE_GROUP_NOT_EMPTY":

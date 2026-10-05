@@ -18,6 +18,7 @@ import { PortalAccessService } from "../../src/usecase/portalaccess/service";
 import { PortalHomeService } from "../../src/usecase/portalhome/service";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
 import { systemIds } from "../../src/platform/ids";
+import { PostgresPortalGroup } from "../../src/infrastructure/postgres/portal-group";
 import { systemClock } from "../../src/platform/clock";
 
 const cfg = load();
@@ -29,6 +30,7 @@ const access = new PortalAccessService({
   grants,
   memberships: grants,
   clients: grants,
+  groups: new PostgresPortalGroup(app),
   ids: systemIds,
   clock: systemClock,
   events: new RecordingEventSink(),

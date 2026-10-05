@@ -499,20 +499,19 @@ step "GB → Ravi. Everywhere else falls to the rotation."
 # ── The book ─────────────────────────────────────────────────────────────────
 
 say "The book"
-org() { asp partner "$API/api/v1/parties/organizations" -d "{\"legalName\":\"$1\"}" | field partyId; }
-entity() { asp partner "$API/api/v1/parties/organizations/$1/legal-entities" -d "$2" > /dev/null; }
+# A client company is created WITH its registration (Q076): $2 is the JSON
+# fragment for country, company type and the rest.
+org() { asp partner "$API/api/v1/parties/organizations" -d "{\"legalName\":\"$1\",$2}" | field partyId; }
 ident()  { asp partner "$API/api/v1/parties/$1/identifiers" -d "$2" > /dev/null; }
 
-COBALT=$(org "Cobalt Foods Private Limited")
-entity "$COBALT" '{"jurisdiction":"IN","entityType":"private_limited","incorporatedOn":"2019-06-11","financialYearEnd":"03-31"}'
+COBALT=$(org "Cobalt Foods Private Limited" '"jurisdiction":"IN","entityType":"private_limited","incorporatedOn":"2019-06-11","financialYearEnd":"03-31"')
 ident  "$COBALT" '{"type":"pan","value":"AAACC1234F","validFrom":"2019-06-11"}'
 ident  "$COBALT" '{"type":"gstin","value":"29AAACC1234F1Z5","validFrom":"2019-07-01"}'
 step "Cobalt Foods Private Limited — PAN and a Karnataka GSTIN"
 
 # THE GROUP. G0.1: four companies file four sets of returns, so a board showing
 # only the billing client is four identical cards. This is the second company.
-COBALT_LOG=$(org "Cobalt Logistics Private Limited")
-entity "$COBALT_LOG" '{"jurisdiction":"IN","entityType":"private_limited","incorporatedOn":"2021-04-02","financialYearEnd":"03-31"}'
+COBALT_LOG=$(org "Cobalt Logistics Private Limited" '"jurisdiction":"IN","entityType":"private_limited","incorporatedOn":"2021-04-02","financialYearEnd":"03-31"')
 ident  "$COBALT_LOG" '{"type":"pan","value":"AAACC9911K","validFrom":"2021-04-02"}'
 ident  "$COBALT_LOG" '{"type":"gstin","value":"27AAACC9911K1Z2","validFrom":"2021-05-01"}'
 # `parent_of`, FROM the parent — the type vocabulary is a table
@@ -522,19 +521,18 @@ asp partner "$API/api/v1/parties/relationships" \
   -d "{\"fromPartyId\":\"$COBALT\",\"toPartyId\":\"$COBALT_LOG\",\"type\":\"parent_of\",\"validFrom\":\"2021-04-02\"}" | ok
 step "Cobalt Logistics Private Limited — a Maharashtra GSTIN, Cobalt Foods is its parent"
 
-LAKEVIEW=$(org "Lakeview Organics Private Limited")
-entity "$LAKEVIEW" '{"jurisdiction":"IN","entityType":"private_limited","incorporatedOn":"2020-11-03","financialYearEnd":"03-31"}'
+LAKEVIEW=$(org "Lakeview Organics Private Limited" '"jurisdiction":"IN","entityType":"private_limited","incorporatedOn":"2020-11-03","financialYearEnd":"03-31"')
 ident  "$LAKEVIEW" '{"type":"pan","value":"AAACL5678M","validFrom":"2021-02-01"}'
 ident  "$LAKEVIEW" '{"type":"gstin","value":"29AAACL5678M1Z8","validFrom":"2021-02-01"}'
 step "Lakeview Organics Private Limited"
 
-# PROBLEM CORNER (2). Registered NOWHERE. A compliance rule matches an entity's
-# jurisdiction exactly, so this one produces no calendar at all and the coverage
-# tab names it with `entity_not_registered` — which is a real answer, and the
-# reason that reason exists.
-HARBOUR=$(org "Harbour Provisions Private Limited")
+# PROBLEM CORNER (2). A new client still being onboarded: its papers are not in
+# and its onboarding task has sat unassigned for a week (below). It used to be
+# registered NOWHERE; since Q076 a client company cannot be created without its
+# country and company type, so it is registered, and `entity_not_registered` on
+# the coverage tab is now only for companies recorded before that rule.
+HARBOUR=$(org "Harbour Provisions Private Limited" '"jurisdiction":"IN","entityType":"private_limited"')
 ident "$HARBOUR" '{"type":"pan","value":"AAACH3344P","validFrom":"2023-01-09"}'
-warn "Harbour Provisions has no legal entity registered — its calendar will be empty, with a reason."
 
 # ── The client's own contact, let in (T6.5) ──────────────────────────────────
 #
@@ -849,7 +847,7 @@ asp client "$API/api/v1/portal/asks/$A_QUESTION/answer"   -d '{"answerText":"Bot
 step "three asks on Meera's action centre, one of them already answered"
 
 # UNASSIGNED, and OLD, so the unassigned rungs of the ladder have fired.
-W_HARBOUR=$(task "{\"clientPartyId\":\"$HARBOUR\",\"entityPartyId\":\"$HARBOUR\",\"title\":\"Onboarding - collect Harbour's incorporation papers\",\"description\":\"Nothing can be filed for this client until it is registered as a legal entity.\",\"dueOn\":\"$LAST_WEEK\"}")
+W_HARBOUR=$(task "{\"clientPartyId\":\"$HARBOUR\",\"entityPartyId\":\"$HARBOUR\",\"title\":\"Onboarding - collect Harbour's incorporation papers\",\"description\":\"Nothing can be set up for this client until its papers are in.\",\"dueOn\":\"$LAST_WEEK\"}")
 step "Harbour onboarding - a week late, and nobody holds it"
 
 W_ORPHAN=$(task "{\"clientPartyId\":\"$COBALT\",\"entityPartyId\":\"$COBALT\",\"title\":\"FY27 statutory audit - open the file\",\"description\":\"Audit is filed under RAA and this client has no SPOC there.\",\"dueOn\":\"$DUE_SOON\"}")
@@ -997,7 +995,7 @@ cat <<EOF
     · Harbour has no SPOC at all        → its work goes to Ravi (Key Manager) to hand out
     · Lakeview has TWO SPOCs on TRC     → the router refuses to choose
     · Farhan reports to nobody          → his escalations reach NOBODY
-    · Harbour Provisions is unregistered → its calendar is empty, with a reason
+    · Harbour Provisions is still onboarding → its papers task sits unassigned
     · $WAITING shipped rules have no formula   → the calendar's coverage tab
     · one invoice is 75 days overdue    → a credit hold waiting on a partner
 

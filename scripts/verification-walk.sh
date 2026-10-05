@@ -146,12 +146,9 @@ SVCV=$(jget 'd["id"]')
 
 say "6. A client, a signed letter, and the advance that starts the engine"
 call "$J/p.txt" POST "/api/v1/parties/organizations" \
-  '{"legalName":"Ravi Textiles Private Limited"}'
-expect "a client company" 201 "$J/out"
+  '{"legalName":"Ravi Textiles Private Limited","jurisdiction":"IN","entityType":"private_limited"}'
+expect "a client company, registered in India (Q076)" 201 "$J/out"
 CLIENT=$(jget 'd["partyId"]')
-
-call "$J/p.txt" POST "/api/v1/parties/organizations/$CLIENT/legal-entities"   '{"jurisdiction":"IN","entityType":"private_limited"}'
-expect "…registered as a legal entity" 201 "$J/out"
 
 TODAY=$(python3 -c 'import datetime;print(datetime.date.today().isoformat())')
 call "$J/p.txt" POST "/api/v1/engagement-letters"   "{\"partyId\":\"$CLIENT\",\"jurisdiction\":\"IN\",\"title\":\"Ravi Textiles - FY26\",\"currency\":\"INR\",\"fxRate\":\"1\",\"fxRateDate\":\"$TODAY\"}"
@@ -266,9 +263,8 @@ for v in ('output.approved','output.rejected','membership.reports_to_changed'):
 " < "$J/body"
 
 say "14. A second client, left WAITING — so the screens have something to show"
-call "$J/p.txt" POST "/api/v1/parties/organizations" '{"legalName":"Meridian Foods Private Limited"}'
+call "$J/p.txt" POST "/api/v1/parties/organizations" '{"legalName":"Meridian Foods Private Limited","jurisdiction":"IN","entityType":"private_limited"}'
 CLIENT2=$(jget 'd["partyId"]')
-call "$J/p.txt" POST "/api/v1/parties/organizations/$CLIENT2/legal-entities" '{"jurisdiction":"IN","entityType":"private_limited"}'
 call "$J/p.txt" POST "/api/v1/engagement-letters" "{\"partyId\":\"$CLIENT2\",\"jurisdiction\":\"IN\",\"title\":\"Meridian Foods - FY26\",\"currency\":\"INR\",\"fxRate\":\"1\",\"fxRateDate\":\"$TODAY\"}"
 EL2=$(jget 'd["id"]')
 call "$J/p.txt" POST "/api/v1/engagement-letters/$EL2/lines" "{\"entityPartyId\":\"$CLIENT2\",\"serviceVersionId\":\"$SVCV\",\"description\":\"GST monthly filing, 12 months\",\"quantity\":\"12\",\"unitAmount\":\"15000\",\"discountPercent\":\"0\"}"

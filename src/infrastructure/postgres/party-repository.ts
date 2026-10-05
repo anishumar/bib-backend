@@ -184,6 +184,17 @@ export class PostgresPartyRepository implements PartyRepository, ClientDirectory
     return withTenant(this.app, o.tenantId, (db) => insertOrganization(db, o));
   }
 
+  async createRegisteredOrganization(
+    o: NewOrganization,
+    registration: Omit<NewLegalEntity, "partyId" | "tenantId">,
+  ): Promise<{ readonly organization: Organization; readonly entity: LegalEntity }> {
+    return withTenant(this.app, o.tenantId, async (db) => {
+      const organization = await insertOrganization(db, o);
+      const entity = await insertLegalEntity(db, { ...registration, partyId: o.partyId, tenantId: o.tenantId });
+      return { organization, entity };
+    });
+  }
+
   async createPerson(p: NewPerson): Promise<Person> {
     return withTenant(this.app, p.tenantId, async (db) => {
       await db`
@@ -213,6 +224,16 @@ export class PostgresPartyRepository implements PartyRepository, ClientDirectory
    * to keep rendering it after somebody tidies the picker. Archiving hides a
    * party from LISTS; it never makes one stop existing.
    */
+  /** The country of its registration (Q076), or null when it has none. */
+  async registeredCountry(tenantId: string, partyId: string): Promise<string | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ jurisdiction: string }[]>`
+        SELECT jurisdiction FROM core.legal_entity WHERE party_id = ${partyId} AND tenant_id = ${tenantId}
+      `;
+      return row?.jurisdiction ?? null;
+    });
+  }
+
   async findParty(tenantId: string, partyId: string): Promise<Party | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<PartyRow[]>`
@@ -267,13 +288,18 @@ export class PostgresPartyRepository implements PartyRepository, ClientDirectory
   async correctLegalEntity(
     tenantId: string,
     partyId: string,
-    patch: { readonly jurisdiction?: string | undefined; readonly entityType?: string | undefined },
+    patch: {
+      readonly jurisdiction?: string | undefined;
+      readonly entityType?: string | undefined;
+      readonly financialYearEnd?: string | null | undefined;
+    },
   ): Promise<LegalEntity | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<LegalEntityRow[]>`
         UPDATE core.legal_entity SET
           jurisdiction = ${patch.jurisdiction ?? db`jurisdiction`},
-          entity_type  = ${patch.entityType ?? db`entity_type`}
+          entity_type  = ${patch.entityType ?? db`entity_type`},
+          financial_year_end = ${patch.financialYearEnd === undefined ? db`financial_year_end` : patch.financialYearEnd}
         WHERE party_id = ${partyId}
         RETURNING party_id, tenant_id, jurisdiction, entity_type,
                   incorporated_on::text AS incorporated_on,

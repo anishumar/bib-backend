@@ -130,14 +130,14 @@ beforeAll(async () => {
   tenantB = b.id;
 
   partyA = (
-    await party.createOrganization(
-      { tenantId: tenantA, legalName: "Meridian Textiles Private Limited" },
+    await party.createClientCompany(
+      { tenantId: tenantA, legalName: "Meridian Textiles Private Limited", jurisdiction: "IN", entityType: "private_limited" },
       SYSTEM_ACTOR,
     )
   ).partyId;
   partyB = (
-    await party.createOrganization(
-      { tenantId: tenantB, legalName: "Somebody Else Ltd" },
+    await party.createClientCompany(
+      { tenantId: tenantB, legalName: "Somebody Else Ltd", jurisdiction: "IN", entityType: "private_limited" },
       SYSTEM_ACTOR,
     )
   ).partyId;

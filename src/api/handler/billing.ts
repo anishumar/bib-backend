@@ -636,6 +636,12 @@ const SettingsSchema = z
     autoBilling: z.boolean().openapi({
       description: "Whether the daily sweep writes bill dues for this firm. Off until the firm turns it on.",
     }),
+    autoBillingFrom: z.string().nullable().openapi({
+      description:
+        "The day automatic billing starts from (Q027), YYYY-MM-DD, the first of the go-live month the " +
+        "firm chose when it switched on. Nothing that ended or finished before it is billed " +
+        "automatically or shown as missed. Null: never switched on through the app.",
+    }),
     advancePolicy: AdvancePolicySchema,
     taxDefaults: z.array(TaxDefaultSchema).openapi({
       description: "Each company's default tax rate. A company with none gets no automatic advance draft.",
@@ -676,6 +682,12 @@ const putSettingsRoute = createRoute({
           schema: z
             .object({
               autoBilling: z.boolean().optional(),
+              autoBillingFrom: z.string().optional().openapi({
+                description:
+                  "The go-live month, YYYY-MM (Q027). Sent with `autoBilling: true` it is the month " +
+                  "the switch starts from (absent = this month); sent alone it moves the month while " +
+                  "the switch is on.",
+              }),
               advancePolicy: AdvancePolicySchema.optional(),
               taxDefaults: z.array(TaxDefaultSchema).max(50).optional(),
               invoiceDueDays: z.number().int().min(0).max(365).nullable().optional().openapi({
@@ -800,6 +812,7 @@ function advanceBody(a: AdvanceOnDesk | AdvanceForMe, fees: boolean) {
 function settingsBody(s: BillingSettings) {
   return {
     autoBilling: s.autoBilling,
+    autoBillingFrom: s.autoBillingFrom,
     advancePolicy: {
       draftOverdueDays: s.advancePolicy.draftOverdueDays,
       unpaidOverdueDays: s.advancePolicy.unpaidOverdueDays,
@@ -1038,7 +1051,11 @@ export function registerBillingRoutes(app: OpenAPIHono<AppEnv>, deps: BillingDep
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const body = c.req.valid("json");
-    if (body.autoBilling !== undefined) await deps.service.setAutoBilling(s.tenantId, body.autoBilling, s.actor);
+    if (body.autoBilling !== undefined) {
+      await deps.service.setAutoBilling(s.tenantId, body.autoBilling, s.actor, body.autoBillingFrom);
+    } else if (body.autoBillingFrom !== undefined) {
+      await deps.service.setAutoBillingFrom(s.tenantId, body.autoBillingFrom, s.actor);
+    }
     if (body.advancePolicy !== undefined) await deps.service.setAdvancePolicy(s.tenantId, body.advancePolicy, s.actor);
     if (body.invoiceDueDays !== undefined) {
       await deps.service.setInvoiceDueDays(s.tenantId, body.invoiceDueDays, s.actor);

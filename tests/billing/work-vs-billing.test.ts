@@ -261,6 +261,16 @@ describe("Work vs Billing: a done job with no bill", () => {
     expect(r?.notes.map((n) => [n.code, n.date])).toEqual([["before_billing_start", "2026-07-01"]]);
   });
 
+  it("never flags a period that ended before the go-live month as missed (Q027)", async () => {
+    const aug = job({ jobId: "j-aug", periodStart: "2026-08-01", periodEnd: "2026-08-31", periodLabel: "Aug 2026" });
+    const [r] = await rows(facts({ autoBillingSince: "2026-09-01", jobs: [aug] }));
+    expect(r?.flags).toEqual([]);
+    expect(r?.notes.map((x) => [x.code, x.date])).toEqual([["before_auto_billing", "2026-09-01"]]);
+    // The same period with go-live in August is billable, and missing.
+    const [after] = await rows(facts({ autoBillingSince: "2026-08-01", jobs: [aug] }));
+    expect(after?.flags.map((f) => [f.code, f.cause])).toEqual([["no_bill", "not_written"]]);
+  });
+
   it("cannot cut a quarter with no financial year, and says so", async () => {
     const [r] = await rows(
       facts({
@@ -503,7 +513,9 @@ describe("Work vs Billing: one-time work", () => {
         jobs: [auditJob],
       }),
     );
-    expect(before?.flags.map((f) => f.cause)).toEqual(["before_auto_billing"]);
+    // Finished before the go-live month (Q027): history, a note, never missed.
+    expect(before?.flags).toEqual([]);
+    expect(before?.notes.map((x) => [x.code, x.date])).toEqual([["before_auto_billing", "2026-10-01"]]);
     const [missing] = await rows(facts({ subjects: [audit], jobs: [auditJob] }));
     expect(missing?.flags.map((f) => f.cause)).toEqual(["not_written"]);
   });

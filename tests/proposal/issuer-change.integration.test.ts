@@ -27,14 +27,14 @@ beforeAll(async () => {
   if (!t) throw new Error("could not create the test tenant");
   tenant = t.id;
   fallback = await c.documentRepository.seedFirmEntity(tenant, "Issuer Change Test Pvt Ltd");
-  client = (await c.party.createOrganization({ tenantId: tenant, legalName: "Meridian Foods" }, SYSTEM_ACTOR))
+  client = (await c.party.createClientCompany({ tenantId: tenant, legalName: "Meridian Foods", jurisdiction: "IN", entityType: "private_limited" }, SYSTEM_ACTOR))
     .partyId;
 
   // The firm's UAE company: an organization, registered in AE, named for AE.
   gulf = (await c.party.createOrganization({ tenantId: tenant, legalName: "Test Gulf FZE" }, SYSTEM_ACTOR))
     .partyId;
   await c.party.registerLegalEntity(
-    { tenantId: tenant, organizationPartyId: gulf, jurisdiction: "AE", entityType: "fze" },
+    { tenantId: tenant, organizationPartyId: gulf, jurisdiction: "AE", entityType: "fze", financialYearEnd: "12-31" },
     SYSTEM_ACTOR,
   );
   await c.documents.setPreference(

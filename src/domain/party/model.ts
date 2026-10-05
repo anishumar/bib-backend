@@ -225,6 +225,51 @@ export function isValidIdentifier(type: IdentifierType, normalized: string): boo
   }
 }
 
+// ── A client company's registration (Q076, Ashish 2026-10-04) ─────────────
+//
+// Country and company type are required on every new client company; the
+// year end is required outside India and FIXED at 31 March inside it (Q077:
+// no Indian client runs another year). A company with no country gets no
+// filings at all and is billed by nobody's rule, silently, which is why these
+// stopped being optional.
+
+/** India's year, the one a company there may not choose. */
+export const INDIA_YEAR_END = "03-31";
+
+/** `MM-DD`, and a day that exists in that month. */
+export function isYearEnd(s: string): boolean {
+  const m = /^(\d{2})-(\d{2})$/.exec(s.trim());
+  if (!m) return false;
+  const month = Number(m[1]);
+  const day = Number(m[2]);
+  const lengths = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return month >= 1 && month <= 12 && day >= 1 && day <= (lengths[month - 1] ?? 0);
+}
+
+/**
+ * Why a company's year end cannot be recorded with its country, in words, or
+ * null. India: blank or 31 March. Elsewhere: required, a real month and day.
+ */
+export function yearEndProblem(jurisdiction: string, yearEnd: string | null): string | null {
+  const given = yearEnd === null || yearEnd.trim() === "" ? null : yearEnd.trim();
+  if (jurisdiction === "IN") {
+    return given === null || given === INDIA_YEAR_END
+      ? null
+      : `An Indian company's year ends on 31 March (${INDIA_YEAR_END}). Leave the year end blank.`;
+  }
+  if (given === null) {
+    return "A company outside India needs its year end: the month and day its financial year closes, e.g. 12-31.";
+  }
+  return isYearEnd(given) ? null : `Year end "${given}" is not a month and day. Give it as MM-DD, e.g. 12-31.`;
+}
+
+/** What is stored: India's fixed day, else the year end given (checked first). */
+export function yearEndFor(jurisdiction: string, yearEnd: string | null): string | null {
+  if (jurisdiction === "IN") return INDIA_YEAR_END;
+  const given = yearEnd === null || yearEnd.trim() === "" ? null : yearEnd.trim();
+  return given;
+}
+
 /** Whether a party is currently hidden from pickers and lists. A one-line
  *  predicate so the question is asked the same way everywhere and nobody has to
  *  decide again whether null or a timestamp is the live state. */

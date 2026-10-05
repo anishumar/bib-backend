@@ -5,6 +5,7 @@
 // decision we expect to change without the login flow noticing.
 import type { Membership, UserAccount } from "../../domain/tenancy/model";
 import type { MagicLink, MagicLinkPurpose, Session } from "../../domain/identity/model";
+import type { ClientSender } from "../../domain/mail/model";
 
 // ── Directory: the narrow slice of tenancy identity needs ────────────────────
 // Stated as its own interfaces rather than importing tenancy's ports: this use
@@ -186,6 +187,10 @@ export interface Mailer {
     /** The firm's zone, so the expiry reads on the firm's clock (CA#50).
      *  Absent or null: UTC, named. */
     timeZone?: string | null,
+    /** The client's Key Manager (Q059): the letter is from them by name, a
+     *  reply reaches them, and their own address is the From when the firm
+     *  listed its domain. Absent or null: from the firm, as before. */
+    sender?: ClientSender | null,
   ): Promise<void>;
 
   /**
@@ -232,6 +237,8 @@ export interface Mailer {
     expiresAt: string,
     firmName: string | null,
     timeZone?: string | null,
+    /** As on the invitation (Q059). */
+    sender?: ClientSender | null,
   ): Promise<void>;
 
   /**

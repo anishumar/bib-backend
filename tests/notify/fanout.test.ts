@@ -80,6 +80,32 @@ describe("the map", () => {
     expect(planFor(fact("client_request.replied", { authorSide: "firm" })).announce).toEqual([]);
   });
 
+  it("tells the new lead's owner it is theirs and every admin a lead came in, never the owner twice (Q066)", () => {
+    const named = planFor(fact("lead.captured", { ownerUserId: ASHA, ownerAssignedBy: "requested" }));
+    expect(named.announce.map((a) => a.category)).toEqual(["lead_assigned", "lead_new"]);
+    expect(named.announce[0]?.to).toEqual([{ kind: "user", userId: ASHA }]);
+    expect(named.announce[0]?.payload).toEqual({});
+    expect(named.announce[1]?.to).toEqual([{ kind: "permission", permission: "tenant:admin" }]);
+    expect(named.announce[1]?.except).toEqual([ASHA]);
+    expect(named.announce[1]?.payload).toEqual({});
+
+    // The firm's rule chose: the owner is told it was the rule, not a person.
+    const byRule = planFor(fact("lead.captured", { ownerUserId: ASHA, ownerAssignedBy: "round_robin" }));
+    expect(byRule.announce[0]?.payload).toEqual({ byRule: true });
+
+    // Left unassigned: only the admins hear, and they hear it is unassigned.
+    const nobody = planFor(fact("lead.captured", { ownerUserId: null, ownerAssignedBy: null }));
+    expect(nobody.announce.map((a) => a.category)).toEqual(["lead_new"]);
+    expect(nobody.announce[0]?.payload).toEqual({ unassigned: true });
+    expect(nobody.announce[0]?.except).toEqual([]);
+  });
+
+  it("closes a lead's notifications, both kinds, when it closes", () => {
+    expect(planFor(fact("lead.stage_changed", { closed: true })).resolve).toEqual([
+      { sourceType: "lead", sourceId: OBJ, categories: ["lead_assigned", "lead_new"] },
+    ]);
+  });
+
   it("closes a step's notifications only for that step", () => {
     const plan = planFor(fact("job.step_advanced", { stepKey: "review", to: "done" }));
     expect(plan.resolve[0]).toMatchObject({ sourceType: "job", sourceId: OBJ, stepKey: "review" });

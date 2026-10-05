@@ -149,6 +149,7 @@ describe("a letter handed to a real relay", () => {
     await mailerOn(port).sendProposal({
       to: "priya@nexusfintech.in",
       replyTo: "sahil@10xglobal.in",
+      sender: null,
       firmName: "10X Global Inc.",
       preparedBy: "Sahil Kohli",
       greetingName: "Priya Sharma",

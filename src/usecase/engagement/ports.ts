@@ -66,6 +66,9 @@ export interface PartyStanding {
     /** A letter is addressed to a PERSON (F-10-1). */
     readonly kind: "organization" | "person";
   } | null>;
+  /** The country its registration records (Q076); null when an organization
+   *  has none. A person is never asked. */
+  registeredCountry(tenantId: string, partyId: string): Promise<string | null>;
 }
 
 /**
