@@ -553,6 +553,24 @@ describe("moving between the firm's own states", () => {
     ]);
   });
 
+  it("passes the portal days typed at close to the calendar, and moves nothing when one is refused (Q084)", async () => {
+    const h = await harness();
+    const item = await h.service.create({ tenantId: FIRM, clientPartyId: CLIENT, title: "x" }, ACTOR);
+    const completed = (await stateNamed(h, "completed")).id;
+    const days = { "00000000-0000-4000-8000-0000000000a1": "2026-08-25" };
+
+    h.filings.refusePortalDays = new Error("refused");
+    await expect(
+      h.service.moveToState({ tenantId: FIRM, workItemId: item.id, stateId: completed, filedOn: days }, ACTOR),
+    ).rejects.toThrow("refused");
+    expect(h.filings.calls).toEqual([]);
+    expect(h.items.rows.find((r) => r.id === item.id)?.stateId).toBe(item.stateId);
+
+    h.filings.refusePortalDays = null;
+    await h.service.moveToState({ tenantId: FIRM, workItemId: item.id, stateId: completed, filedOn: days }, ACTOR);
+    expect(h.filings.calls).toEqual([{ workItemId: item.id, discharged: true, portalDays: days }]);
+  });
+
   it("never tells the calendar a CANCELLED task discharged a filing", async () => {
     // The trap this whole flag exists for. "Terminal" alone would record that a
     // statutory return had been FILED because somebody tidied their board —

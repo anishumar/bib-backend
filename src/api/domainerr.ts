@@ -328,6 +328,7 @@ export function mapError(err: unknown): MappedError {
       case "ASSIGNED_PERIOD_NEEDS_TAX":
       case "INVALID_DUE_RULE":
       case "INCOMPLETE_DUE_RULE":
+      case "INVALID_FILED_ON":
       case "UNRESOLVED_REASON_REQUIRED":
       case "UNRESOLVED_REASON_NOT_ALLOWED":
       case "INVALID_LEAD_TIME":

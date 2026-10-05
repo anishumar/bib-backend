@@ -255,7 +255,13 @@ export interface ObligationFiling {
     workItemId: string,
     discharged: boolean,
     actor: Actor,
+    /** Q084: the portal day of each return this close files, by obligation
+     *  id. A return with no entry is filed on today. */
+    portalDays?: Readonly<Record<string, string>>,
   ): Promise<void>;
+  /** Q084: refuse a bad portal day BEFORE the task moves, so a refused date
+   *  leaves the task (and a checker's decision) where it was. */
+  assertPortalDays(tenantId: string, workItemId: string, portalDays: Readonly<Record<string, string>>): Promise<void>;
   /**
    * The filing this task files, if any, and the company's open filings with
    * no task yet (audit 2026-10-03, CA#36): what the task page offers to link.
@@ -270,6 +276,9 @@ export interface ObligationFiling {
     /** The filings this task filed besides its own: a period job's task
      *  files its period's returns (Q063). */
     readonly filedHere: readonly LinkableFiling[];
+    /** What finishing it now would file (Q084): the returns the close asks
+     *  a portal filing day for. */
+    readonly filesOnDone: readonly LinkableFiling[];
   }>;
   /** Make this task the one that files that filing; filed at once when the
    *  task is already done. The calendar's rules refuse, in words. */

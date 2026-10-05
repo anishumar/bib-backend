@@ -906,6 +906,9 @@ export interface ObligationInstanceRepository {
     /** The task whose completion files it (0357): its own, or a period
      *  job's task (Q063). Written with `filed_on`, never apart from it. */
     filedByWorkItemId: string,
+    /** The day it was filed on the PORTAL, typed when the task closed (Q084).
+     *  Wins over `filedAt`'s day; null keeps today's behaviour. */
+    portalDay?: IsoDate | null,
   ): Promise<IsoDate | null>;
   /**
    * Take a recorded filing back and return the obligation to `stateId`.

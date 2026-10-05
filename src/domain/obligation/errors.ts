@@ -52,6 +52,7 @@ export type ObligationErrorCode =
   | "EXCEPTION_ON_EVENT_RULE"
   | "NO_INITIAL_STATE"
   | "NO_FILED_STATE"
+  | "INVALID_FILED_ON"
   | "NO_MISSED_STATE"
   | "NO_RESOLUTION_STATE"
   | "OBLIGATION_NOT_FOUND"
@@ -415,6 +416,26 @@ export class NoFiledState extends ObligationError {
         `nowhere to land and the calendar would keep showing it as open. Every firm is seeded ` +
         `with one ("Filed"): mark one of your compliance states as the filed one on the ` +
         `compliance vocabulary screen.`,
+    );
+  }
+}
+
+/**
+ * A portal filing date that cannot be the day a return was filed (Q084): not
+ * a day, a day that has not begun anywhere yet, or a day before the period the
+ * return is for even started. Refused rather than clamped: a typed 2025 for
+ * 2026 would otherwise mark a return filed a year early, on the record a
+ * partner answers to.
+ */
+export class InvalidFiledOn extends ObligationError {
+  constructor(periodLabel: string, value: string, why: "not_a_day" | "future" | "before_period") {
+    super(
+      "INVALID_FILED_ON",
+      why === "not_a_day"
+        ? `"${value}" is not a date. Give the day the return for ${periodLabel} was filed on the portal.`
+        : why === "future"
+          ? `${longDay(value)} has not come yet. Give the day the return for ${periodLabel} was actually filed on the portal.`
+          : `${longDay(value)} is before ${periodLabel} began, so its return cannot have been filed then. Check the date.`,
     );
   }
 }

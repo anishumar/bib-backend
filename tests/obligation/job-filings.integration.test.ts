@@ -252,6 +252,12 @@ describe("the filings a period job's task files (Q063)", () => {
     expect(await instances.clearFiled(tenant, nov, pending, jobTaskId)).toBe(true);
     expect(await instances.findById(tenant, nov)).toMatchObject({ filedOn: null, filedByWorkItemId: null });
 
+    // Q084: the portal day typed at close wins over the instant's day.
+    expect(await instances.markFiled(tenant, nov, "2026-12-05T06:00:00Z", filedState, jobTaskId, "2026-12-02")).toBe(
+      "2026-12-02",
+    );
+    expect(await instances.clearFiled(tenant, nov, pending, jobTaskId)).toBe(true);
+
     // The calendar names the filer.
     await instances.markFiled(tenant, nov, "2026-12-05T06:00:00Z", filedState, jobTaskId);
     const [row] = await instances.calendar(tenant, { filedByWorkItemId: jobTaskId, includeSettled: true });

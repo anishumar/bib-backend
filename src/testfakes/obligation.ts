@@ -673,13 +673,14 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
     filedAt: string,
     stateId: string,
     filedByWorkItemId: string,
+    portalDay: string | null = null,
   ): Promise<string | null> {
     const i = this.rows.findIndex((r) => r.tenantId === tenantId && r.id === obligationId);
     const row = this.rows[i];
     // `AND filed_on IS NULL`, modelled — the guard that makes a second
     // completion of the same task write no second event.
     if (!row || row.filedOn !== null) return Promise.resolve(null);
-    const filedOn = dayInZone(filedAt, this.filingZone);
+    const filedOn = portalDay ?? dayInZone(filedAt, this.filingZone);
     this.rows[i] = { ...row, filedOn, stateId, filedByWorkItemId };
     return Promise.resolve(filedOn);
   }

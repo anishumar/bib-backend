@@ -336,6 +336,12 @@ const TaskFilingResponse = z
         "files every open filing of its company inside the job's period on a rule its service " +
         "carries, and reopening it un-files exactly these.",
     }),
+    filesOnDone: z.array(LinkableFilingSchema).openapi({
+      description:
+        "Q084: what finishing this task NOW would file (its own filing while unfiled, and a " +
+        "period job's returns). The close asks the portal filing day for each. Empty when it " +
+        "files nothing.",
+    }),
   })
   .openapi("TaskFilingResponse");
 
@@ -486,6 +492,13 @@ const MoveStateRequest = z
         "otherwise. 'Blocked' on its own records that work is stuck and never why — and a " +
         "year later 'are our delays ours or the client's' has no query that can answer it.",
     }),
+    filedOn: z.record(z.string().uuid(), IsoDate).optional().openapi({
+      description:
+        "Q084: the day each return was filed on the PORTAL, by obligation id, when this " +
+        "finishes a task that files returns (`filesOnDone` on the task's filing read). A " +
+        "return left out is filed on today. A day that has not come yet, or one before the " +
+        "return's period began, is refused (400 INVALID_FILED_ON) and nothing moves.",
+    }),
   })
   .openapi("MoveWorkItemStateRequest");
 
@@ -537,6 +550,13 @@ const DecideReviewRequest = z
       description:
         "Mandatory on a rejection. WHY work came back is the only signal that ever explains " +
         "rework — marking the task Completed later erases the fact that it was rejected.",
+    }),
+    filedOn: z.record(z.string().uuid(), IsoDate).optional().openapi({
+      description:
+        "Q084: the day each return was filed on the PORTAL, by obligation id, when this " +
+        "finishes a task that files returns (`filesOnDone` on the task's filing read). A " +
+        "return left out is filed on today. A day that has not come yet, or one before the " +
+        "return's period began, is refused (400 INVALID_FILED_ON) and nothing moves.",
     }),
   })
   .openapi("DecideWorkItemReviewRequest");
@@ -764,11 +784,13 @@ function filingWire(r: {
   readonly linked: LinkableFiling | null;
   readonly open: readonly LinkableFiling[];
   readonly filedHere: readonly LinkableFiling[];
+  readonly filesOnDone: readonly LinkableFiling[];
 }): z.infer<typeof TaskFilingResponse> {
   return {
     linked: r.linked === null ? null : toLinkableWire(r.linked),
     open: r.open.map(toLinkableWire),
     filedHere: r.filedHere.map(toLinkableWire),
+    filesOnDone: r.filesOnDone.map(toLinkableWire),
   };
 }
 
@@ -1508,6 +1530,7 @@ export function registerWorkItemRoutes(app: OpenAPIHono<AppEnv>, deps: WorkItemD
         workItemId,
         stateId: body.stateId,
         blockedReason: body.blockedReason,
+        filedOn: body.filedOn,
       },
       s.actor,
     );
@@ -1683,6 +1706,7 @@ export function registerWorkItemRoutes(app: OpenAPIHono<AppEnv>, deps: WorkItemD
         decision: body.decision,
         notes: body.notes,
         decidedBy: s.userId,
+        filedOn: body.filedOn,
       },
       s.actor,
     );

@@ -40,6 +40,7 @@ import {
   type DueRule,
   type DueRuleException,
   type IsoDate,
+  type ObligationInstance,
   type ObligationState,
   type ObligationTemplate,
 } from "../../domain/obligation/model.js";
@@ -62,6 +63,7 @@ import {
   AlreadyDecided,
   FilingNotLinkable,
   NoFiledState,
+  InvalidFiledOn,
   NoInitialState,
   NoMissedState,
   NoResolutionState,
@@ -117,6 +119,7 @@ import type {
 } from "./ports.js";
 import type { FirmTimeZone } from "./ports.js";
 import { dayInZone } from "../../domain/scheduler/zone.js";
+import { isCalendarDay } from "../../domain/day.js";
 import { assignedQuarterLabel, periodCutFor, type PeriodCut } from "../../domain/obligation/period-basis";
 import { INTL_RULE_PACKS } from "../../domain/obligation/rulepack-intl";
 import { isCountryCode } from "../../domain/country";
@@ -2395,6 +2398,9 @@ export class ObligationService {
     workItemId: string,
     discharged: boolean,
     actor: Actor = SYSTEM_ACTOR,
+    /** Q084: the day each return was filed on the portal, by obligation id,
+     *  typed when the task closed. A row with no entry is filed on today. */
+    portalDays: Readonly<Record<string, string>> = {},
   ): Promise<void> {
     if (!discharged) {
       // The rows THIS task filed: its own filing, and a period job's.
@@ -2420,22 +2426,24 @@ export class ObligationService {
       return;
     }
 
-    // Most work items are not a filing. This is the ordinary answer, and it
-    // costs indexed lookups rather than a state list nobody needs.
-    const own = await this.deps.instances.findByWorkItem(tenantId, workItemId);
-    const byJob = await this.deps.instances.listJobFilingsForTask(tenantId, workItemId);
-    const toFile = [
-      ...(own !== null && own.filedOn === null ? [{ row: own, byJobTask: false }] : []),
-      ...byJob.filter((o) => o.id !== own?.id).map((row) => ({ row, byJobTask: true })),
-    ];
+    const toFile = await this.rowsToFile(tenantId, workItemId);
     if (toFile.length === 0) return;
+    this.checkPortalDays(toFile, portalDays);
+    const filedAt = this.deps.clock.now().toISOString();
 
     const filed = filedState(await this.deps.states.list(tenantId));
     if (filed === null) throw new NoFiledState();
-    // One instant for every row; each row's own zone makes it a day (S7).
-    const filedAt = this.deps.clock.now().toISOString();
+    // One instant for every row; each row's own zone makes it a day (S7),
+    // unless the person closing the task typed the portal's day (Q084).
     for (const { row, byJobTask } of toFile) {
-      const filedOn = await this.deps.instances.markFiled(tenantId, row.id, filedAt, filed.id, workItemId);
+      const filedOn = await this.deps.instances.markFiled(
+        tenantId,
+        row.id,
+        filedAt,
+        filed.id,
+        workItemId,
+        portalDays[row.id] ?? null,
+      );
       if (filedOn === null) {
         continue; // somebody else got there first; their event is the one that counts
       }
@@ -2469,6 +2477,55 @@ export class ObligationService {
   // empty, raises no second task for it.
 
   /**
+   * What finishing this task would file: its own filing while unfiled, and a
+   * period job's returns (Q063). Most work items are not a filing; this is
+   * then two indexed lookups and nothing more.
+   */
+  private async rowsToFile(
+    tenantId: string,
+    workItemId: string,
+  ): Promise<readonly { readonly row: ObligationInstance; readonly byJobTask: boolean }[]> {
+    const own = await this.deps.instances.findByWorkItem(tenantId, workItemId);
+    const byJob = await this.deps.instances.listJobFilingsForTask(tenantId, workItemId);
+    return [
+      ...(own !== null && own.filedOn === null ? [{ row: own, byJobTask: false }] : []),
+      ...byJob.filter((o) => o.id !== own?.id).map((row) => ({ row, byJobTask: true })),
+    ];
+  }
+
+  /**
+   * Q084: a typed portal day is checked BEFORE anything is written, so one bad
+   * date files none of them rather than half. Refused: not a day; a day that
+   * has not begun anywhere on earth yet (UTC+14 is the first to start one); a
+   * day before the return's own period began. A day for a filing this task
+   * does not file is ignored, never an error: the page may be a moment stale.
+   */
+  private checkPortalDays(
+    toFile: readonly { readonly row: ObligationInstance }[],
+    portalDays: Readonly<Record<string, string>>,
+  ): void {
+    const latestDayOnEarth = dayInZone(this.deps.clock.now().toISOString(), "Pacific/Kiritimati");
+    for (const { row } of toFile) {
+      const day = portalDays[row.id];
+      if (day === undefined) continue;
+      if (!isCalendarDay(day)) throw new InvalidFiledOn(row.periodLabel, day, "not_a_day");
+      if (day > latestDayOnEarth) throw new InvalidFiledOn(row.periodLabel, day, "future");
+      if (day < row.periodStart) throw new InvalidFiledOn(row.periodLabel, day, "before_period");
+    }
+  }
+
+  /** The same check, asked before the task moves (or before a checker's
+   *  Approve is recorded), so a refused date leaves the task where it was. */
+  async assertPortalDays(
+    tenantId: string,
+    workItemId: string,
+    portalDays: Readonly<Record<string, string>>,
+  ): Promise<void> {
+    if (Object.keys(portalDays).length === 0) return;
+    this.checkPortalDays(await this.rowsToFile(tenantId, workItemId), portalDays);
+  }
+
+  /**
    * The filing this task files, if any, and the company's open filings that
    * have no task yet, by due date: what the task page offers to link. Open
    * means not filed, not withdrawn and not waiting on a partner's decision
@@ -2482,6 +2539,9 @@ export class ObligationService {
     readonly linked: CalendarRow | null;
     readonly open: readonly CalendarRow[];
     readonly filedHere: readonly CalendarRow[];
+    /** What finishing it would file now (Q084): the rows the close asks a
+     *  portal day for. Empty once filed, or when it files nothing. */
+    readonly filesOnDone: readonly CalendarRow[];
   }> {
     // OPEN ones only, and the read's widest page: a company with years of
     // filed history would push its open filings off a settled-inclusive page.
@@ -2518,7 +2578,16 @@ export class ObligationService {
     )
       .filter((r) => r.id !== linkedRow?.id)
       .sort((a, b) => a.statutoryDueOn.localeCompare(b.statutoryDueOn) || a.name.localeCompare(b.name));
-    return { linked, open, filedHere };
+    // What finishing it now would file (Q084), as calendar rows so the page
+    // can name each one when it asks for its portal day.
+    const pendingIds = new Set((await this.rowsToFile(tenantId, workItemId)).map((t) => t.row.id));
+    const filesOnDone =
+      pendingIds.size === 0
+        ? []
+        : rows
+            .filter((r) => pendingIds.has(r.id))
+            .sort((a, b) => a.statutoryDueOn.localeCompare(b.statutoryDueOn) || a.name.localeCompare(b.name));
+    return { linked, open, filedHere, filesOnDone };
   }
 
   /**

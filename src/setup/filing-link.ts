@@ -32,10 +32,12 @@ function toLinkable(r: CalendarRow): LinkableFiling {
 
 export function obligationFilingPort(obligations: () => ObligationService): ObligationFiling {
   return {
-    reconcileFiling: (tenantId, workItemId, discharged, actor) =>
-      obligations().reconcileFiling(tenantId, workItemId, discharged, actor),
+    reconcileFiling: (tenantId, workItemId, discharged, actor, portalDays) =>
+      obligations().reconcileFiling(tenantId, workItemId, discharged, actor, portalDays ?? {}),
+    assertPortalDays: (tenantId, workItemId, portalDays) =>
+      obligations().assertPortalDays(tenantId, workItemId, portalDays),
     filingsForTask: async (tenantId, workItemId, entityPartyId) => {
-      const { linked, open, filedHere } = await obligations().filingsForTask(
+      const { linked, open, filedHere, filesOnDone } = await obligations().filingsForTask(
         tenantId,
         workItemId,
         entityPartyId,
@@ -44,6 +46,7 @@ export function obligationFilingPort(obligations: () => ObligationService): Obli
         linked: linked === null ? null : toLinkable(linked),
         open: open.map(toLinkable),
         filedHere: filedHere.map(toLinkable),
+        filesOnDone: filesOnDone.map(toLinkable),
       };
     },
     linkTask: (tenantId, obligationId, task, actor) =>

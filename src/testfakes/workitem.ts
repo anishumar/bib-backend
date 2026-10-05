@@ -879,7 +879,15 @@ export class FakeObligationCoverage implements ObligationCoverage {
  * `ObligationService`'s and is tested there over a store.
  */
 export class FakeObligationFiling implements ObligationFiling {
-  readonly calls: { workItemId: string; discharged: boolean }[] = [];
+  readonly calls: { workItemId: string; discharged: boolean; portalDays?: Readonly<Record<string, string>> }[] = [];
+  /** Q084: what `assertPortalDays` was asked, and a refusal a test can arm. */
+  readonly portalChecks: { workItemId: string; portalDays: Readonly<Record<string, string>> }[] = [];
+  refusePortalDays: Error | null = null;
+
+  assertPortalDays(_tenantId: string, workItemId: string, portalDays: Readonly<Record<string, string>>): Promise<void> {
+    this.portalChecks.push({ workItemId, portalDays });
+    return this.refusePortalDays === null ? Promise.resolve() : Promise.reject(this.refusePortalDays);
+  }
   /** What `filingsForTask` answers, and what `linkTask` was told (CA#36). */
   readonly filings: LinkableFiling[] = [];
   readonly links: {
@@ -896,6 +904,7 @@ export class FakeObligationFiling implements ObligationFiling {
     readonly linked: LinkableFiling | null;
     readonly open: readonly LinkableFiling[];
     readonly filedHere: readonly LinkableFiling[];
+    readonly filesOnDone: readonly LinkableFiling[];
   }> {
     const link = this.links.find((l) => l.task.id === workItemId);
     return Promise.resolve({
@@ -904,6 +913,7 @@ export class FakeObligationFiling implements ObligationFiling {
       filedHere: this.filings.filter(
         (f) => f.filedByWorkItemId === workItemId && f.obligationId !== link?.obligationId,
       ),
+      filesOnDone: this.filings.filter((f) => f.filedOn === null && link?.obligationId === f.obligationId),
     });
   }
 
@@ -927,8 +937,9 @@ export class FakeObligationFiling implements ObligationFiling {
     workItemId: string,
     discharged: boolean,
     _actor: Actor,
+    portalDays?: Readonly<Record<string, string>>,
   ): Promise<void> {
-    this.calls.push({ workItemId, discharged });
+    this.calls.push({ workItemId, discharged, ...(portalDays === undefined ? {} : { portalDays }) });
     return Promise.resolve();
   }
 }

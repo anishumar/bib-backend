@@ -424,6 +424,44 @@ describe("the filing closes when its task does, and opens again if the task reop
     expect(ev?.payload).toMatchObject({ filedOn: "2026-08-29", daysLate: -22 });
   });
 
+  it("files on the PORTAL day typed when the task closed, and counts lateness from it (Q084)", async () => {
+    // 10x, 2026-10-05: "While closing job, ask filing date separately". A
+    // return filed on the portal on 25 Aug and closed in BiB on the 30th was
+    // filed on the 25th.
+    const workItemId = await raisedFiling();
+    const id = h.instances.rows.find((r) => r.workItemId === workItemId)?.id ?? "";
+    await h.service.reconcileFiling(FIRM, workItemId, true, ACTOR, { [id]: "2026-08-25" });
+    expect(filed()[0]?.filedOn).toBe("2026-08-25");
+    const ev = h.events.recorded.find((e) => e.verb === "obligation.filed");
+    expect(ev?.payload).toMatchObject({ filedOn: "2026-08-25", daysLate: -26 });
+  });
+
+  it("refuses a portal day that has not come, or one before the period began, and files nothing (Q084)", async () => {
+    const workItemId = await raisedFiling();
+    const id = h.instances.rows.find((r) => r.workItemId === workItemId)?.id ?? "";
+    for (const bad of ["2026-09-30", "2026-07-31", "2026-02-30", "yesterday"]) {
+      await expect(h.service.reconcileFiling(FIRM, workItemId, true, ACTOR, { [id]: bad })).rejects.toMatchObject({
+        code: "INVALID_FILED_ON",
+      });
+      await expect(h.service.assertPortalDays(FIRM, workItemId, { [id]: bad })).rejects.toMatchObject({
+        code: "INVALID_FILED_ON",
+      });
+    }
+    expect(filed()).toHaveLength(0);
+    // A day for a return this task does not file is ignored, never refused.
+    await h.service.assertPortalDays(FIRM, workItemId, { "00000000-0000-4000-8000-0000000000aa": "1999-01-01" });
+  });
+
+  it("names what finishing the task would file (Q084)", async () => {
+    const workItemId = await raisedFiling();
+    const row = h.instances.rows.find((r) => r.workItemId === workItemId);
+    const before = await h.service.filingsForTask(FIRM, workItemId, row?.entityPartyId ?? "");
+    expect(before.filesOnDone.map((f) => f.id)).toEqual([row?.id]);
+    await h.service.reconcileFiling(FIRM, workItemId, true, ACTOR);
+    const after = await h.service.filingsForTask(FIRM, workItemId, row?.entityPartyId ?? "");
+    expect(after.filesOnDone).toEqual([]);
+  });
+
   it("writes ONE obligation.filed however many times it is told", async () => {
     // The call is reconciliation, not a transition: a double-click, a retry and
     // a redelivered message all arrive here, and the guard is in the store's

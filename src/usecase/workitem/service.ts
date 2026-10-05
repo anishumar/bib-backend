@@ -656,6 +656,9 @@ export interface MoveStateInput {
   /** Required when the target state is one the firm has marked as BLOCKED, and
    *  refused otherwise. */
   readonly blockedReason?: string | null | undefined;
+  /** Q084: the day each return was filed on the portal, by obligation id,
+   *  when this move finishes a task that files returns. */
+  readonly filedOn?: Readonly<Record<string, string>> | undefined;
 }
 
 export interface AssignWorkItemInput {
@@ -697,6 +700,8 @@ export interface DecideReviewInput {
   readonly decision: "approved" | "rejected";
   readonly notes?: string | null | undefined;
   readonly decidedBy: string;
+  /** Q084: on Approve, the portal day of each return the finished task files. */
+  readonly filedOn?: Readonly<Record<string, string>> | undefined;
 }
 
 /** One person who might check a work item, with the answer and its reason. */
@@ -1371,6 +1376,10 @@ export class WorkItemService {
 
     if (to.id === from.id) throw new WorkItemAlreadyInState(to.name);
     if (!to.isActive) throw new StateRetired(to.name);
+    // Q084: a bad portal day is refused before anything moves.
+    if (to.isTerminal && to.isSuccess && input.filedOn !== undefined) {
+      await this.deps.filings.assertPortalDays(input.tenantId, item.id, input.filedOn);
+    }
 
     const reason = (input.blockedReason ?? "").trim();
     if (to.isBlocked && reason.length === 0) throw new BlockReasonRequired(to.name);
@@ -1463,6 +1472,7 @@ export class WorkItemService {
       item.id,
       to.isTerminal && to.isSuccess,
       actor,
+      input.filedOn,
     );
     return updated;
   }
@@ -1775,6 +1785,7 @@ export class WorkItemService {
     readonly linked: LinkableFiling | null;
     readonly open: readonly LinkableFiling[];
     readonly filedHere: readonly LinkableFiling[];
+    readonly filesOnDone: readonly LinkableFiling[];
   }> {
     const item = await this.requireItem(tenantId, workItemId);
     return this.deps.filings.filingsForTask(tenantId, item.id, item.entityPartyId ?? item.clientPartyId);
@@ -2143,6 +2154,11 @@ export class WorkItemService {
     if (approval.decision !== "pending") throw new ReviewAlreadyDecided(approval.decision);
 
     const notes = (input.notes ?? "").trim();
+    // Q084: refused before the decision is recorded, so a bad date leaves the
+    // check open rather than approved with the task unmoved.
+    if (input.decision === "approved" && input.filedOn !== undefined) {
+      await this.deps.filings.assertPortalDays(input.tenantId, approval.workItemId, input.filedOn);
+    }
     if (input.decision === "rejected" && notes.length === 0) {
       throw new ReviewRejectionNeedsNote();
     }
@@ -2219,7 +2235,7 @@ export class WorkItemService {
     // the board renders it. A failed move leaves a decided review on a task in
     // its old state, visible and recoverable; the reverse would show a task
     // finished that nobody approved.
-    await this.followDecision(input.tenantId, decided, actor);
+    await this.followDecision(input.tenantId, decided, actor, input.filedOn);
     return decided;
   }
 
@@ -2237,6 +2253,7 @@ export class WorkItemService {
     tenantId: string,
     decided: WorkItemApproval,
     actor: Actor,
+    filedOn: Readonly<Record<string, string>> | undefined,
   ): Promise<void> {
     const item = await this.requireItem(tenantId, decided.workItemId);
     const states = await this.deps.vocabulary.listStates(tenantId);
@@ -2251,7 +2268,7 @@ export class WorkItemService {
           : null;
     if (target === null || target.id === current.id) return;
     await this.move(
-      { tenantId, workItemId: item.id, stateId: target.id },
+      { tenantId, workItemId: item.id, stateId: target.id, ...(filedOn === undefined ? {} : { filedOn }) },
       actor,
       decided.decision === "approved" ? "approved" : "rejected",
     );
