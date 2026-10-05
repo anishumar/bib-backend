@@ -109,7 +109,7 @@ import {
 // its policy. `usecase/scheduler` imports `domain/serviceaxis` the same way and
 // for the same reason: a use case may reach a sibling DOMAIN, never a sibling
 // use case.
-import type { CheckerCandidate, Maker, VerificationPolicy } from "../../domain/verification/model";
+import type { CheckerCandidate, ClientCheckers, Maker, VerificationPolicy } from "../../domain/verification/model";
 import { INELIGIBILITY_MESSAGES, isEligible } from "../../domain/verification/model";
 import type {
   LinkableFiling,
@@ -895,7 +895,7 @@ export class WorkItemService {
     const verdict =
       me === undefined
         ? { eligible: false, reason: "NO_WORK_PERMISSION" as const }
-        : isEligible(me, this.makerOf(open.approval, staff), policy);
+        : isEligible(me, this.makerOf(open.approval, staff), policy, await this.clientCheckersOf(tenantId, open.approval, policy));
     return {
       eligible: verdict.eligible,
       reason: verdict.reason === null ? null : INELIGIBILITY_MESSAGES[verdict.reason],
@@ -948,7 +948,7 @@ export class WorkItemService {
       const verdict =
         me === undefined
           ? { eligible: false, reason: "NO_WORK_PERMISSION" as const }
-          : isEligible(me, this.makerOf(row.approval, staff), policy);
+          : isEligible(me, this.makerOf(row.approval, staff), policy, await this.clientCheckersOf(tenantId, row.approval, policy));
       out.push({
         ...row,
         viewer: {
@@ -2114,9 +2114,10 @@ export class WorkItemService {
     const staff = await this.deps.reviewers.activeStaff(tenantId);
     const maker = this.makerOf(approval, staff);
     const candidates = await this.candidates(tenantId, staff);
+    const client = await this.clientCheckersOf(tenantId, approval, policy);
 
     return candidates.map((candidate) => {
-      const verdict = isEligible(candidate, maker, policy);
+      const verdict = isEligible(candidate, maker, policy, client);
       return {
         userId: candidate.userId,
         displayName: candidate.displayName,
@@ -2158,7 +2159,12 @@ export class WorkItemService {
     // membership; this is the deactivated-between-requests case, and it is a
     // refusal rather than a crash.
     if (!me) throw new AssigneeNotStaff(input.decidedBy);
-    const verdict = isEligible(me, this.makerOf(approval, staff), policy);
+    const verdict = isEligible(
+      me,
+      this.makerOf(approval, staff),
+      policy,
+      await this.clientCheckersOf(input.tenantId, approval, policy),
+    );
     if (!verdict.eligible) {
       throw new ReviewerNotEligible(
         verdict.reason === null ? "You may not check this." : INELIGIBILITY_MESSAGES[verdict.reason],
@@ -2439,6 +2445,28 @@ export class WorkItemService {
    * checker is vacuous — there is no self to be — and a `reporting_line` policy
    * matches nobody, which the screen says out loud.
    */
+  /**
+   * The task's client's Key Manager and the person who signs for the firm, on
+   * the firm's today (Q069). Read ONLY under `client_key_manager`; the same two
+   * rungs the owner rule reads (T6.17), so "who checks" and "who owns it when
+   * nobody does" name the same Key Manager.
+   */
+  private async clientCheckersOf(
+    tenantId: string,
+    approval: WorkItemApproval,
+    policy: VerificationPolicy | null,
+  ): Promise<ClientCheckers | null> {
+    if (policy?.rule !== "client_key_manager") return null;
+    const item = await this.deps.items.findById(tenantId, approval.workItemId);
+    if (!item) return null;
+    const today = dayInZone(this.deps.clock.now().toISOString(), await this.deps.timeZones.timeZoneFor(tenantId));
+    const [keyManager, partner] = await Promise.all([
+      this.deps.owners.keyManagerFor(tenantId, item.clientPartyId, today),
+      this.deps.owners.signingPartner(tenantId, item.clientPartyId),
+    ]);
+    return { keyManagerUserId: keyManager?.userId ?? null, partnerUserId: partner?.userId ?? null };
+  }
+
   private makerOf(
     approval: WorkItemApproval,
     staff: readonly { readonly userId: string; readonly reportsToUserId: string | null }[],

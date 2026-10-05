@@ -548,6 +548,8 @@ const EligibilitySchema = z
         "BELOW_GRADE",
         "UNGRADED",
         "NOT_THE_MAKERS_MANAGER",
+        "NOT_THE_CLIENTS_CHECKER",
+        "NO_CLIENT_CHECKER",
       ])
       .nullable()
       .openapi({
@@ -574,7 +576,7 @@ const CheckSchema = z
     submittedAt: z.string().datetime(),
     policyKey: z.string().nullable(),
     rule: z
-      .enum(["rank_threshold", "reporting_line", "reporting_line_or_rank"])
+      .enum(["rank_threshold", "reporting_line", "reporting_line_or_rank", "client_key_manager"])
       .nullable()
       .openapi({
         description:

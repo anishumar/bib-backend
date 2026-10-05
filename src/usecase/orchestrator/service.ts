@@ -82,6 +82,7 @@ import type {
 } from "../verification/ports";
 import type {
   CheckerCandidate,
+  ClientCheckers,
   Eligibility,
   Maker,
   StepApproval,
@@ -1628,13 +1629,33 @@ export class OrchestratorService {
       this.makerOf(tenantId, approval),
       this.candidates(tenantId),
     ]);
+    const client = await this.clientCheckersOf(tenantId, approval, policy);
 
     return candidates.map((c) => ({
       userId: c.candidate.userId,
       displayName: c.candidate.displayName,
       gradeName: c.candidate.gradeName,
-      ...isEligible(c.candidate, maker, policy),
+      ...isEligible(c.candidate, maker, policy, client),
     }));
+  }
+
+  /**
+   * The work's client's Key Manager and the person who signs for the firm,
+   * on the firm's today (Q069). Asked ONLY under `client_key_manager`: every
+   * other rule is decided by the maker and the candidate alone, and a check
+   * queue must not pay the owner-rule read per row for nothing. The same
+   * facts the owner rule reads for this job's steps (T6.17), so "who checks"
+   * and "who owns it when nobody does" name the same Key Manager.
+   */
+  private async clientCheckersOf(
+    tenantId: string,
+    approval: StepApproval,
+    policy: VerificationPolicy | null,
+  ): Promise<ClientCheckers | null> {
+    if (policy?.rule !== "client_key_manager") return null;
+    const today = dayInZone(this.deps.clock.now().toISOString(), await this.deps.timeZones.timeZoneFor(tenantId));
+    const facts = await this.deps.desks.ownerFactsFor(tenantId, approval.jobId, today);
+    return { keyManagerUserId: facts.keyManager?.userId ?? null, partnerUserId: facts.partner?.userId ?? null };
   }
 
   /**
@@ -1715,7 +1736,7 @@ export class OrchestratorService {
     // membership; this is the deactivated-between-requests case, and it is a
     // refusal rather than a crash.
     if (!me) return { eligible: false, reason: "NO_WORK_PERMISSION" };
-    return isEligible(me.candidate, maker, policy);
+    return isEligible(me.candidate, maker, policy, await this.clientCheckersOf(tenantId, approval, policy));
   }
 
   /**
@@ -1761,7 +1782,7 @@ export class OrchestratorService {
       const verdict: Eligibility =
         me === undefined
           ? { eligible: false, reason: "NO_WORK_PERMISSION" }
-          : isEligible(me.candidate, maker, policy);
+          : isEligible(me.candidate, maker, policy, await this.clientCheckersOf(tenantId, row.approval, policy));
       const reviewPoints = lineViews(lines[i] ?? [], marksOn(marks, "review", row.approval.id));
       out.push({
         ...row,

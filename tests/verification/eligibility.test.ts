@@ -65,13 +65,16 @@ describe("maker != checker — the rule no firm may configure away", () => {
       const policy: VerificationPolicy = {
         label: rule,
         rule,
-        minGradeRank: rule === "reporting_line" ? null : 1,
-        minGradeCode: rule === "reporting_line" ? null : "analyst",
+        minGradeRank: rulePer(rule).usesRank ? 1 : null,
+        minGradeCode: rulePer(rule).usesRank ? "analyst" : null,
       };
+      // Under the client's-Key-Manager rule the maker IS the Key Manager here:
+      // the strongest case, where the rule would otherwise name them.
       const verdict = isEligible(
         candidate({ userId: PRIYA, gradeRank: 10 }),
         maker(PRIYA, ANAND),
         policy,
+        { keyManagerUserId: PRIYA, partnerUserId: PRIYA },
       );
       expect(verdict, `rule ${rule} let the maker check their own work`).toEqual({
         eligible: false,
@@ -270,6 +273,48 @@ describe("the reporting line cannot be made into a loop", () => {
   });
 });
 
+const CLIENT_KM: VerificationPolicy = {
+  label: "Key Manager review",
+  rule: "client_key_manager",
+  minGradeRank: null,
+  minGradeCode: null,
+};
+
+describe("the client's Key Manager checks (Q069, 10x 2026-10-05)", () => {
+  const client = { keyManagerUserId: ANAND, partnerUserId: SIDHARTH };
+
+  it("lets the client's Key Manager check, and nobody else, whatever their grade", () => {
+    expect(isEligible(candidate({ userId: ANAND }), maker(PRIYA), CLIENT_KM, client)).toEqual({ eligible: true, reason: null });
+    expect(isEligible(candidate({ userId: SIDHARTH, gradeRank: 12 }), maker(PRIYA), CLIENT_KM, client)).toEqual({
+      eligible: false,
+      reason: "NOT_THE_CLIENTS_CHECKER",
+    });
+  });
+
+  it("falls to the person who signs for the firm when the Key Manager did the work", () => {
+    expect(isEligible(candidate({ userId: SIDHARTH }), maker(ANAND), CLIENT_KM, client).eligible).toBe(true);
+    expect(isEligible(candidate({ userId: ANAND }), maker(ANAND), CLIENT_KM, client).reason).toBe("IS_THE_MAKER");
+  });
+
+  it("falls to the person who signs for the firm when the client has no Key Manager", () => {
+    const noKm = { keyManagerUserId: null, partnerUserId: SIDHARTH };
+    expect(isEligible(candidate({ userId: SIDHARTH }), maker(PRIYA), CLIENT_KM, noKm).eligible).toBe(true);
+  });
+
+  it("lets nobody in when there is neither, and says so", () => {
+    const none = { keyManagerUserId: null, partnerUserId: null };
+    expect(isEligible(candidate({ userId: ANAND }), maker(PRIYA), CLIENT_KM, none).reason).toBe("NO_CLIENT_CHECKER");
+    // Facts not gathered (a caller that forgot) is the same refusal, never "anybody".
+    expect(isEligible(candidate({ userId: ANAND }), maker(PRIYA), CLIENT_KM).reason).toBe("NO_CLIENT_CHECKER");
+  });
+
+  it("still needs work:write", () => {
+    expect(isEligible(candidate({ userId: ANAND, canWrite: false }), maker(PRIYA), CLIENT_KM, client).reason).toBe(
+      "NO_WORK_PERMISSION",
+    );
+  });
+});
+
 describe("the closed sets stay honest", () => {
   it("every rule has a description and an answer about what it reads", () => {
     // A rule added without a description would ship a radio button on the
@@ -278,7 +323,7 @@ describe("the closed sets stay honest", () => {
     for (const rule of VERIFICATION_RULES) {
       expect(VERIFICATION_RULE_DESCRIPTIONS[rule], rule).toBeTruthy();
       const reads = rulePer(rule);
-      expect(reads.usesRank || reads.usesReportingLine, `${rule} reads nothing`).toBe(true);
+      expect(reads.usesRank || reads.usesReportingLine || reads.usesClient, `${rule} reads nothing`).toBe(true);
     }
   });
 

@@ -50,12 +50,17 @@
  * partner can read and no test can cover — the same little language T2.7
  * refused for step conditions.
  */
-export type VerificationRule = "rank_threshold" | "reporting_line" | "reporting_line_or_rank";
+export type VerificationRule =
+  | "rank_threshold"
+  | "reporting_line"
+  | "reporting_line_or_rank"
+  | "client_key_manager";
 
 export const VERIFICATION_RULES: readonly VerificationRule[] = [
   "rank_threshold",
   "reporting_line",
   "reporting_line_or_rank",
+  "client_key_manager",
 ];
 
 export function isVerificationRule(v: string): v is VerificationRule {
@@ -80,7 +85,35 @@ export const VERIFICATION_RULE_DESCRIPTIONS: Readonly<Record<VerificationRule, s
   reporting_line_or_rank:
     "The maker's own manager, OR anybody at or above the grade you choose. The reporting " +
     "line is who normally checks it; the grade is who can when they are away.",
+  client_key_manager:
+    "The client's Key Manager checks the work. When the client has no Key Manager, or the " +
+    "Key Manager did the work, the person who signs for the firm checks it.",
 };
+
+/**
+ * Who checks a client's work under `client_key_manager` (Q069, 10x, 2026-10-05:
+ * "Client's engagement manager"). Facts about the WORK's client, gathered by
+ * the use case, because the rule is pure: the Key Manager in force on the
+ * firm's today, and the person who signs for the firm (the owner rule's last
+ * rung, T6.17), each an active member of staff or null.
+ */
+export interface ClientCheckers {
+  readonly keyManagerUserId: string | null;
+  readonly partnerUserId: string | null;
+}
+
+/**
+ * The one person who checks under `client_key_manager`, or null when nobody
+ * can. The Key Manager, unless there is none or they are the maker (maker !=
+ * checker); then the signing partner, unless they are the maker too.
+ */
+export function clientChecker(client: ClientCheckers | null, maker: Maker | null): string | null {
+  if (client === null) return null;
+  const makerId = maker?.userId ?? null;
+  if (client.keyManagerUserId !== null && client.keyManagerUserId !== makerId) return client.keyManagerUserId;
+  if (client.partnerUserId !== null && client.partnerUserId !== makerId) return client.partnerUserId;
+  return null;
+}
 
 /**
  * A firm's published answer to "who may check this kind of work".
@@ -112,14 +145,18 @@ export interface VerificationPolicy {
 export function rulePer(rule: VerificationRule): {
   readonly usesRank: boolean;
   readonly usesReportingLine: boolean;
+  /** Reads the WORK's client (its Key Manager), not the maker or the candidate. */
+  readonly usesClient: boolean;
 } {
   switch (rule) {
     case "rank_threshold":
-      return { usesRank: true, usesReportingLine: false };
+      return { usesRank: true, usesReportingLine: false, usesClient: false };
     case "reporting_line":
-      return { usesRank: false, usesReportingLine: true };
+      return { usesRank: false, usesReportingLine: true, usesClient: false };
     case "reporting_line_or_rank":
-      return { usesRank: true, usesReportingLine: true };
+      return { usesRank: true, usesReportingLine: true, usesClient: false };
+    case "client_key_manager":
+      return { usesRank: false, usesReportingLine: false, usesClient: true };
   }
 }
 
@@ -172,7 +209,9 @@ export type IneligibilityReason =
   | "NO_WORK_PERMISSION"
   | "BELOW_GRADE"
   | "UNGRADED"
-  | "NOT_THE_MAKERS_MANAGER";
+  | "NOT_THE_MAKERS_MANAGER"
+  | "NOT_THE_CLIENTS_CHECKER"
+  | "NO_CLIENT_CHECKER";
 
 export interface Eligibility {
   readonly eligible: boolean;
@@ -217,10 +256,20 @@ export function isEligible(
   candidate: CheckerCandidate,
   maker: Maker | null,
   policy: VerificationPolicy | null,
+  client: ClientCheckers | null = null,
 ): Eligibility {
   if (maker !== null && candidate.userId === maker.userId) return no("IS_THE_MAKER");
   if (!candidate.canWrite) return no("NO_WORK_PERMISSION");
   if (policy === null) return ELIGIBLE;
+
+  // Q069 (10x, 2026-10-05): ONE person, decided by the work's client. The
+  // caller passes the client's facts only for this rule; without them nobody
+  // qualifies, which the screen says rather than letting anybody in.
+  if (policy.rule === "client_key_manager") {
+    const checker = clientChecker(client, maker);
+    if (checker === null) return no("NO_CLIENT_CHECKER");
+    return checker === candidate.userId ? ELIGIBLE : no("NOT_THE_CLIENTS_CHECKER");
+  }
 
   const { usesRank, usesReportingLine } = rulePer(policy.rule);
 
@@ -260,6 +309,12 @@ export const INELIGIBILITY_MESSAGES: Readonly<Record<IneligibilityReason, string
     "ladder yet. An administrator can set your grade from the roster.",
   NOT_THE_MAKERS_MANAGER:
     "This step is checked by the maker's own manager, and that is not you.",
+  NOT_THE_CLIENTS_CHECKER:
+    "This work is checked by the client's Key Manager (or, when there is none, by the person " +
+    "who signs for the firm), and that is not you.",
+  NO_CLIENT_CHECKER:
+    "This client has no Key Manager and the firm has nobody who signs for it, so nobody can " +
+    "check this yet. Name the client's Key Manager on the client page.",
 };
 
 /** A check waiting on somebody, or one that has been decided. Mirrors

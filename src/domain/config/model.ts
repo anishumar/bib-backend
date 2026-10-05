@@ -918,7 +918,8 @@ function validateVerificationPolicyBody(body: Record<string, unknown>): string |
       `"rule" must be one of ${VERIFICATION_RULES.join(", ")}. "rank_threshold" is the firm's ` +
       `stated rule ("Manager or above is fine"); "reporting_line" is the tighter reading ` +
       `("manager means engagement manager") and stalls when that person is away; ` +
-      `"reporting_line_or_rank" is both. Got ${describe(rule)}`
+      `"reporting_line_or_rank" is both; "client_key_manager" is the client's Key Manager, ` +
+      `else the person who signs for the firm. Got ${describe(rule)}`
     );
   }
 
@@ -947,13 +948,13 @@ function validateVerificationPolicyBody(body: Record<string, unknown>): string |
   // looks live and is not — the shape this codebase keeps catching.
   if (minGradeRank !== null && minGradeRank !== undefined) {
     return (
-      `rule "reporting_line" checks only who the maker reports to, so it must not carry a ` +
+      `rule ${JSON.stringify(rule)} tests no grade, so it must not carry a ` +
       `"minGradeRank": a threshold nothing reads is a setting that looks live. Use ` +
-      `"reporting_line_or_rank" to have both.`
+      `"reporting_line_or_rank" to have a reporting line and a grade.`
     );
   }
   if (minGradeCode !== null && minGradeCode !== undefined) {
-    return `rule "reporting_line" tests no grade, so "minGradeCode" must be null`;
+    return `rule ${JSON.stringify(rule)} tests no grade, so "minGradeCode" must be null`;
   }
   return null;
 }
