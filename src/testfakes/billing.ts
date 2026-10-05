@@ -4,6 +4,7 @@
 // not be able to forget: a subject's `duePeriodStarts` is READ from the dues
 // already written (the anti-join), and a second due for the same subject and
 // period is refused (the partial unique indexes), answering no id for it.
+import { NO_TAX_SNAPSHOT } from "../domain/invoice/model";
 import type { SpocWithManager } from "../domain/billing/model";
 import { DEFAULT_ADVANCE_POLICY, type AdvancePolicy } from "../domain/billing/advance";
 import { compareAmounts, subtractAmounts } from "../domain/money/model";
@@ -293,6 +294,7 @@ export class FakeBillingDueDesk implements BillingDueDesk {
             irnRegisteredAt: null,
             notes: d.notes,
             managerUserId: d.managerUserId ?? null,
+            tax: NO_TAX_SNAPSHOT,
           };
     return { invoice, covered, invoiced, conflicts };
   }
@@ -458,6 +460,14 @@ export class FakeInvoiceDrafter implements InvoiceDrafter {
     return Promise.resolve();
   }
 
+  /** Drafts whose tax was decided after the desk wrote them (Q056). */
+  readonly taxRefreshed: string[] = [];
+
+  refreshTax(_tenantId: string, invoiceId: string): Promise<void> {
+    this.taxRefreshed.push(invoiceId);
+    return Promise.resolve();
+  }
+
   prepareLine(draft: NewInvoice, input: Parameters<InvoiceDrafter["prepareLine"]>[1]): Promise<NewInvoiceLine> {
     const invoice = this.invoices.find((i) => i.id === draft.id);
     if (invoice === undefined) return Promise.reject(new Error("no such invoice"));
@@ -480,6 +490,7 @@ export class FakeInvoiceDrafter implements InvoiceDrafter {
       currency: draft.currency,
       discountPercent: "0",
       taxPercent: input.taxPercent ?? "0",
+      sac: null,
     });
   }
 

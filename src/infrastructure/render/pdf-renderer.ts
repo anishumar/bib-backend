@@ -60,6 +60,7 @@ import type {
   RenderableImage,
   Section,
   SignatureBlock,
+  TaxInvoicePrint,
   TotalRow,
 } from "../../domain/render/model";
 import { wrapParagraph } from "../../domain/render/model";
@@ -382,6 +383,8 @@ export class PdfLibRenderer implements DocumentRenderer {
     if (doc.totals.length > 0) this.drawTotals(cursor, doc, body, bold, pdf);
     // The total in words (CA#1), only on a document that carries it.
     if (doc.amountInWords !== undefined) this.drawInWords(cursor, doc.amountInWords, body, bold, pdf);
+    // A GST tax invoice's own block (Q056), only on one that carries it.
+    if (doc.taxInvoice !== undefined) this.drawTaxInvoice(cursor, doc.taxInvoice, body, bold, pdf);
     // THE TERMS, after the commercials and before the signatures — where an
     // engagement letter has always put them, and where the client is reading
     // when they reach the line they sign on.
@@ -571,7 +574,18 @@ export class PdfLibRenderer implements DocumentRenderer {
   ): void {
     const table = doc.table;
     if (table === null) return;
+    this.drawLineTable(cursor, table, body, bold, pdf);
+  }
 
+  /** A table of rows under a header and between two rules: the document's
+   *  lines, or a GST invoice's tax summary (Q056). */
+  private drawLineTable(
+    cursor: Cursor,
+    table: LineTable,
+    body: Face,
+    bold: Face,
+    pdf: PDFDocument,
+  ): void {
     const totalWeight = table.columns.reduce((n, c) => n + c.weight, 0);
     const widths = table.columns.map((c) => (c.weight / totalWeight) * CONTENT_WIDTH);
     const edges: number[] = [];
@@ -648,16 +662,65 @@ export class PdfLibRenderer implements DocumentRenderer {
   /** "Amount in words" and the words, across the page under the totals. Kept
    *  together: a label at the foot of a page with its words over the break
    *  reads as nothing. */
-  private drawInWords(cursor: Cursor, words: string, body: Face, bold: Face, pdf: PDFDocument): void {
+  private drawInWords(
+    cursor: Cursor,
+    words: string,
+    body: Face,
+    bold: Face,
+    pdf: PDFDocument,
+    label = "Amount in words",
+  ): void {
     const lines = wrapParagraph(words, CONTENT_WIDTH, (s) => body.widthOfTextAtSize(s, SIZE_BODY));
     const height = 18 + SIZE_SMALL * LEADING + lines.length * SIZE_BODY * LEADING;
     if (cursor.y - height < MARGIN_BOTTOM) this.newPage(pdf, cursor);
     this.advance(pdf, cursor, 18);
-    this.text(cursor, "Amount in words", { size: SIZE_SMALL, font: bold, color: MUTED });
+    this.text(cursor, label, { size: SIZE_SMALL, font: bold, color: MUTED });
     for (const line of lines) {
       this.advance(pdf, cursor, SIZE_BODY * LEADING);
       this.text(cursor, line, { font: body });
     }
+  }
+
+  /**
+   * A GST tax invoice's block after the total in words (Q056): the tax in
+   * words, the SAC-wise summary, the declarations, the bank details and the
+   * signatory. Each piece is kept on one page: a label at the foot of a page
+   * with its lines over the break reads as nothing.
+   */
+  private drawTaxInvoice(cursor: Cursor, t: TaxInvoicePrint, body: Face, bold: Face, pdf: PDFDocument): void {
+    const line = SIZE_BODY * LEADING;
+    const keep = (height: number): void => {
+      if (cursor.y - height < MARGIN_BOTTOM) this.newPage(pdf, cursor);
+    };
+    const labelled = (label: string, lines: readonly string[]): void => {
+      const wrapped = lines.flatMap((l) => wrapParagraph(l, CONTENT_WIDTH, (s) => body.widthOfTextAtSize(s, SIZE_BODY)));
+      keep(18 + SIZE_SMALL * LEADING + wrapped.length * line);
+      this.advance(pdf, cursor, 18);
+      this.text(cursor, label, { size: SIZE_SMALL, font: bold, color: MUTED });
+      for (const l of wrapped) {
+        this.advance(pdf, cursor, line);
+        this.text(cursor, l, { font: body });
+      }
+    };
+
+    if (t.taxInWords !== null) this.drawInWords(cursor, t.taxInWords, body, bold, pdf, "Tax amount in words");
+
+    // The summary with its heading, on one page when it fits on one.
+    keep(18 + SIZE_SMALL * LEADING + 24 + (t.summary.rows.length + 1) * 14);
+    this.advance(pdf, cursor, 18);
+    this.text(cursor, "Tax summary by SAC", { size: SIZE_SMALL, font: bold, color: MUTED });
+    this.drawLineTable(cursor, t.summary, body, bold, pdf);
+
+    if (t.declarations.length > 0) labelled("Declarations", t.declarations);
+    if (t.bank.length > 0) labelled("Bank details", t.bank);
+
+    // For the company, room to sign, "Authorised signatory": right-aligned.
+    const right = PAGE_WIDTH - MARGIN_X;
+    keep(24 + line + 30 + line);
+    this.advance(pdf, cursor, 24);
+    this.textRight(cursor, t.signatoryFor, right, { font: bold, size: SIZE_BODY });
+    this.advance(pdf, cursor, 30 + line);
+    this.textRight(cursor, "Authorised signatory", right, { font: body, size: SIZE_SMALL, color: MUTED });
   }
 
   /**
@@ -1390,5 +1453,19 @@ function assertRenderable(doc: RenderableDocument, fonts: FontSet): ReadonlySet<
     proposal.letterhead?.forEach((l, i) => { check(`the letterhead's line ${String(i + 1)}`, l); });
   }
   check("the amount in words", doc.amountInWords ?? null);
+  const tax = doc.taxInvoice;
+  if (tax !== undefined) {
+    check("the tax amount in words", tax.taxInWords);
+    tax.summary.columns.forEach((c) => { check("a column heading of the tax summary", c.label); });
+    tax.summary.rows.forEach((row, i) => {
+      row.forEach((cell) => { check(`row ${String(i + 1)} of the tax summary`, cell); });
+    });
+    tax.declarations.forEach((d, i) => { check(`declaration ${String(i + 1)}`, d); });
+    tax.bank.forEach((b, i) => { check(`bank details line ${String(i + 1)}`, b); });
+    check("the signatory line", tax.signatoryFor);
+    check("the signatory line", "Authorised signatory");
+  }
+  // A GST invoice's line-table headings ("Taxable value"), checked like any cell.
+  doc.table?.columns.forEach((c) => { check("a column heading", c.label); });
   return seen;
 }

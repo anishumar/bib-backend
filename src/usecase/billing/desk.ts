@@ -442,7 +442,11 @@ export class BillingDeskService {
       });
     }
     const invoice = written.invoice;
-    if (invoice !== null) await this.deps.invoices.recordRaised(invoice, actor);
+    if (invoice !== null) {
+      await this.deps.invoices.recordRaised(invoice, actor);
+      // The draft's GST split and TDS (Q056), now that its lines are written.
+      await this.deps.invoices.refreshTax(input.tenantId, invoice.id);
+    }
     for (const { p } of lines) {
       const on = written.invoiced.find((w) => w.dueId === p.due.id);
       if (on === undefined || invoice === null) continue;

@@ -49,6 +49,10 @@ import { CLIENT_DATE_ANCHOR, CLIENT_SIGN_ANCHOR } from "../../domain/render/mode
 import type { DescribedDocument, RenderSource } from "../../usecase/render/ports";
 import { isoInstant, zoneDayOf } from "./instant";
 import { amountInWords, documentMoney } from "../../domain/render/money";
+import { isTaxTreatment, stateLabel } from "../../domain/invoice/gst";
+import type { TaxTreatment } from "../../domain/invoice/gst";
+import { gstPrint, tdsRows } from "../../domain/invoice/gst-print";
+import { financialYearLabel } from "../../domain/invoice/model";
 import { readPostalAddress } from "../../domain/party/address";
 import type { PostalAddress } from "../../domain/party/address";
 
@@ -158,6 +162,31 @@ interface InvoiceRow {
   printed_parties: unknown;
   /** Read live for a draft; null once issued. */
   live_parties: unknown;
+  /** Q056 (0370): what it says about tax; treatment null before 0370. */
+  tax_treatment: string | null;
+  supplier_state_code: string | null;
+  place_of_supply_state_code: string | null;
+  place_of_supply_country: string | null;
+  tds_section: string | null;
+  tds_percent: string | null;
+  fx_rate: string;
+  cgst: string;
+  sgst: string;
+  utgst: string;
+  igst: string;
+  tds: string;
+  net_payable: string;
+  /** The tax at the invoice's rate in INR, two places. */
+  tax_inr: string;
+  lut_reference: string | null;
+  lut_year: number | null;
+  bank_account_name: string | null;
+  bank_account_number: string | null;
+  bank_name: string | null;
+  bank_branch: string | null;
+  bank_ifsc: string | null;
+  bank_swift: string | null;
+  bank_iban: string | null;
 }
 
 interface InvoiceLineRow {
@@ -167,6 +196,7 @@ interface InvoiceLineRow {
   discount_percent: string;
   tax_percent: string;
   amount: string;
+  sac: string | null;
 }
 
 interface LogoRow {
@@ -1106,6 +1136,15 @@ export class PostgresRenderSource implements RenderSource {
                client.display_name AS client_name,
                entity.display_name AS entity_name,
                t.gross::text, t.discount::text, t.net::text, t.tax::text, t.total::text,
+               -- What it says about tax (Q056, 0370), and the TDS (Q057).
+               i.tax_treatment, i.supplier_state_code, i.place_of_supply_state_code,
+               i.place_of_supply_country, i.tds_section, i.tds_percent::text, i.fx_rate::text,
+               t.cgst::text, t.sgst::text, t.utgst::text, t.igst::text, t.tds::text,
+               t.net_payable::text, round(t.tax * i.fx_rate, 2)::text AS tax_inr,
+               lut.reference AS lut_reference, lut.financial_year AS lut_year,
+               ba.account_name AS bank_account_name, ba.account_number AS bank_account_number,
+               ba.bank_name, ba.branch AS bank_branch, ba.ifsc AS bank_ifsc, ba.swift AS bank_swift,
+               ba.iban AS bank_iban,
                -- WHO IT IS FROM AND TO (0334): frozen by Issue, or read live
                -- for a draft as it stands TODAY on its company's calendar
                -- (0337), which is what Issue will freeze. NULL frozen on an invoice issued
@@ -1119,6 +1158,8 @@ export class PostgresRenderSource implements RenderSource {
         JOIN core.party client ON client.id = i.party_id
         JOIN core.party entity ON entity.id = i.entity_party_id
         JOIN crm.invoice_totals t ON t.invoice_id = i.id AND t.tenant_id = i.tenant_id
+        LEFT JOIN crm.firm_entity_lut lut ON lut.id = i.lut_id AND lut.tenant_id = i.tenant_id
+        LEFT JOIN crm.firm_entity_bank_account ba ON ba.id = i.bank_account_id AND ba.tenant_id = i.tenant_id
         WHERE i.id = ${invoiceId}
       `;
       if (!row) return null;
@@ -1140,16 +1181,108 @@ export class PostgresRenderSource implements RenderSource {
       const lines = await db<InvoiceLineRow[]>`
         SELECT l.description, l.quantity::text, l.unit_amount::text,
                l.discount_percent::text, l.tax_percent::text,
-               a.net::text AS amount
+               a.net::text AS amount, l.sac
         FROM crm.invoice_line l
         JOIN crm.invoice_line_amount a ON a.invoice_line_id = l.id
         WHERE l.invoice_id = ${invoiceId}
         ORDER BY l.position
       `;
 
+      // A GST TAX INVOICE (Q056): issued since 0370 by an Indian company with a
+      // GSTIN (a plain or older invoice prints exactly as it did). The SAC-wise
+      // summary is summed here, by Postgres, from the rounded lines.
+      const treatment = row.tax_treatment;
+      const gst =
+        current && treatment !== null && treatment !== "plain" && isTaxTreatment(treatment)
+          ? gstPrint({
+              treatment: treatment as Exclude<TaxTreatment, "plain">,
+              currency: row.currency,
+              money: fmt,
+              countryName,
+              supplierName: parties?.issuer.name ?? row.entity_name,
+              placeOfSupplyStateCode: row.place_of_supply_state_code,
+              placeOfSupplyCountry: row.place_of_supply_country,
+              lines: lines.map((l) => ({
+                description: l.description,
+                sac: l.sac,
+                quantity: l.quantity,
+                unitAmount: l.unit_amount,
+                taxPercent: l.tax_percent,
+                net: l.amount,
+              })),
+              summary: (
+                await db<
+                  { sac: string | null; tax_percent: string; taxable: string; cgst: string; sgst: string; utgst: string; igst: string; tax: string }[]
+                >`
+                  SELECT l.sac, l.tax_percent::text, sum(a.net)::text AS taxable, sum(a.cgst)::text AS cgst,
+                         sum(a.sgst)::text AS sgst, sum(a.utgst)::text AS utgst, sum(a.igst)::text AS igst,
+                         sum(a.tax)::text AS tax
+                    FROM crm.invoice_line l
+                    JOIN crm.invoice_line_amount a ON a.invoice_line_id = l.id
+                   WHERE l.invoice_id = ${invoiceId}
+                   GROUP BY l.sac, l.tax_percent
+                   ORDER BY l.sac NULLS LAST, l.tax_percent
+                `
+              ).map((s) => ({
+                sac: s.sac,
+                taxPercent: s.tax_percent,
+                taxable: s.taxable,
+                cgst: s.cgst,
+                sgst: s.sgst,
+                utgst: s.utgst,
+                igst: s.igst,
+                tax: s.tax,
+              })),
+              totals: {
+                gross: row.gross,
+                discount: row.discount,
+                net: row.net,
+                tax: row.tax,
+                total: row.total,
+                cgst: row.cgst,
+                sgst: row.sgst,
+                utgst: row.utgst,
+                igst: row.igst,
+              },
+              taxInInr:
+                row.currency.toUpperCase() === "INR" ? null : { amount: row.tax_inr, printed: documentMoney(row.tax_inr, "INR", { minorUnits: "always" }), rate: row.fx_rate },
+              lut:
+                row.lut_reference === null || row.lut_year === null
+                  ? null
+                  : { reference: row.lut_reference, yearLabel: financialYearLabel(row.lut_year) },
+              bank:
+                row.bank_account_name === null || row.bank_account_number === null || row.bank_name === null
+                  ? null
+                  : {
+                      accountName: row.bank_account_name,
+                      accountNumber: row.bank_account_number,
+                      bankName: row.bank_name,
+                      branch: row.bank_branch,
+                      ifsc: row.bank_ifsc,
+                      swift: row.bank_swift,
+                      iban: row.bank_iban,
+                    },
+            })
+          : null;
+      // Q057: the client's TDS and the net it remits, on ANY invoice whose
+      // client deducts (a plain one too).
+      const tds =
+        row.tds_section === null || row.tds_percent === null
+          ? []
+          : tdsRows({
+              section: row.tds_section,
+              percent: row.tds_percent,
+              tds: row.tds,
+              netPayable: row.net_payable,
+              money: fmt,
+            });
+      // The state, with its GST code, under each party (Rule 46(e)).
+      const stateLines = (code: string | null): string[] => (gst === null || code === null ? [] : [`State: ${stateLabel(code)}`]);
+
       const meta = [
         { label: "Invoice date", value: longDate(dated) },
         { label: "Due", value: longDate(row.due_on) },
+        ...(gst?.meta ?? []),
       ];
       // The government registry's identifier, when the firm has recorded one.
       // Absent is ordinary — nothing in this product talks to the IRP yet.
@@ -1175,16 +1308,22 @@ export class PostgresRenderSource implements RenderSource {
         reference: row.number ?? "Draft",
         issuer:
           current && parties !== null
-            ? { name: parties.issuer.name, lines: invoicePartyLines(parties.issuer, true) }
+            ? {
+                name: parties.issuer.name,
+                lines: [...invoicePartyLines(parties.issuer, true), ...stateLines(row.supplier_state_code)],
+              }
             : { name: row.entity_name, lines: [] },
         recipient:
           current && parties !== null && parties.recipient !== null
-            ? { name: parties.recipient.name, lines: invoicePartyLines(parties.recipient, false) }
+            ? {
+                name: parties.recipient.name,
+                lines: [...invoicePartyLines(parties.recipient, false), ...stateLines(row.place_of_supply_state_code)],
+              }
             : { name: row.client_name, lines: [] },
         recipientLabel: "Billed to",
         meta,
         sections: [],
-        table: {
+        table: gst?.table ?? {
           columns: [
             { label: "Description", align: "left", weight: 6 },
             { label: "Qty", align: "right", weight: 1 },
@@ -1199,16 +1338,20 @@ export class PostgresRenderSource implements RenderSource {
           ]),
         },
         totals: [
-          { label: "Sub-total", value: fmt(row.gross), emphasis: false },
-          ...(Number(row.discount) > 0
-            ? [{ label: "Discount", value: fmt(row.discount), emphasis: false }]
-            : []),
-          ...(Number(row.tax) > 0
-            ? [{ label: "Tax", value: fmt(row.tax), emphasis: false }]
-            : []),
-          { label: "Total", value: fmt(row.total), emphasis: true },
+          ...(gst?.totals ?? [
+            { label: "Sub-total", value: fmt(row.gross), emphasis: false },
+            ...(Number(row.discount) > 0
+              ? [{ label: "Discount", value: fmt(row.discount), emphasis: false }]
+              : []),
+            ...(Number(row.tax) > 0
+              ? [{ label: "Tax", value: fmt(row.tax), emphasis: false }]
+              : []),
+            { label: "Total", value: fmt(row.total), emphasis: true },
+          ]),
+          ...tds,
         ],
         ...(current ? { amountInWords: amountInWords(row.total, row.currency) } : {}),
+        ...(gst === null ? {} : { taxInvoice: gst.print }),
         footer: current && parties !== null ? parties.issuer.name : row.entity_name,
         logo: await this.logo(db, tenantId, invoiceId, "invoice"),
         issuedOn: dated,

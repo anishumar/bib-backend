@@ -831,6 +831,20 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("POST", "/api/v1/invoices/{invoiceId}/credit-notes"), "invoice:issue" as const],
   [routeKey("GET", "/api/v1/invoices/{invoiceId}/credit-notes"), "party:read" as const],
   [routeKey("GET", "/api/v1/invoices/{invoiceId}/balance"), "party:read" as const],
+  // The GST tax invoice (Q056, Q057): a draft's place of supply and a line's
+  // SAC are draft edits like a line; a client's TDS is a client setting.
+  [routeKey("PUT", "/api/v1/invoices/{invoiceId}/place-of-supply"), "party:write" as const],
+  [routeKey("PUT", "/api/v1/invoices/{invoiceId}/lines/{lineId}/sac"), "party:write" as const],
+  [routeKey("GET", "/api/v1/clients/{partyId}/tds"), "party:read" as const],
+  [routeKey("PUT", "/api/v1/clients/{partyId}/tds"), "party:write" as const],
+  [routeKey("GET", "/api/v1/invoicing/states"), "party:read" as const],
+  // A company's bank accounts and LUTs (0369): the firm's own set-up, as a
+  // company is (tenant:admin to change, party:read to see).
+  [routeKey("GET", "/api/v1/invoicing/companies"), "party:read" as const],
+  [routeKey("POST", "/api/v1/firm-entities/{entityPartyId}/bank-accounts"), "tenant:admin" as const],
+  [routeKey("POST", "/api/v1/firm-entities/{entityPartyId}/bank-accounts/{accountId}/retire"), "tenant:admin" as const],
+  [routeKey("POST", "/api/v1/firm-entities/{entityPartyId}/luts"), "tenant:admin" as const],
+  [routeKey("POST", "/api/v1/firm-entities/{entityPartyId}/luts/{lutId}/retire"), "tenant:admin" as const],
   [routeKey("GET", "/api/v1/receivables"), "party:read" as const],
 
   // BILL DUES (0318). Reading what is owed is `party:read`, with the fee axis

@@ -2018,6 +2018,64 @@ Every rule below came from the audit of 3 October 2026 (`bib/qa/audit-2026-10-03
   The invoice read carries `issueBlocked` (the refusal's own sentence) so the screen says it
   where Issue is offered.
 
+## The GST tax invoice and the TDS line (Q056, Q057, S5, 0369-0371)
+
+10x: BiB's invoice IS the final GST invoice (e-invoicing deferred to S6), and a client that deducts TDS
+sees "Less: TDS" and the net it remits. Every rule below has a test (`tests/invoice/gst*.test.ts`,
+`gst.integration.test.ts`).
+
+- **Who decides what, `domain/invoice/gst.ts` (pure).** Supplier state = the issuing company's GSTIN's
+  first two digits. Place of supply (IGST Act s.12/13) = a state a PERSON chose on the draft, else the
+  client's GSTIN's state, else its billing address's state (`stateCodeOfRegion`: exact names and the
+  usual spellings, never a guess at a city), else, with NO address on record, the supplier's own state
+  (s.12(2)(b)); an address whose state cannot be read is `unknown` and blocks Issue. Treatment:
+  same state CGST + SGST; same union territory without a legislature (04, 26, 31, 35, 38, 97) CGST +
+  UTGST; another state IGST; client outside India + an LUT for the issue date's year zero-rated
+  (`gst_export_lut`), else IGST (`gst_export_igst`); a company outside India or an Indian one with no
+  GSTIN `plain` (one tax figure, as before). `tax_treatment` NULL = an invoice from before 0370.
+- **The arithmetic is done twice and must agree.** `crm.invoice_line_amount` (0370) computes it (only
+  the database adds money); `lineTax` states the same rule; the integration test feeds both 10 lines
+  x 7 treatments x INR/JPY/KWD. Each component rounded per line on the rounded net, half away from
+  zero; CGST and SGST each at half the rate, so 18% on 1,000.05 is 90.00 + 90.00, not 180.01. NULL
+  and `plain` compute exactly as 0325. `crm.invoice_totals` adds `cgst/sgst/utgst/igst`, `tds` (the
+  client's rate on the PRE-TAX net, CBDT Circular 23/2017) and `net_payable`. Rounding is paise, no
+  round-off line (10x asked, unanswered).
+- **A draft follows the world; Issue freezes it.** `InvoiceService.refreshTax` re-decides a draft (and
+  fills empty line SACs from the catalogue) on raise, add line, describe, and after the billing desk
+  writes one (`InvoiceDrafter.refreshTax`). Issue decides for the issue date and writes the snapshot
+  (treatment, both GSTINs, supplier state, place of supply, chosen place, LUT id, bank account id,
+  TDS section + rate) in the numbering UPDATE; `trg_invoice_tax_frozen` refuses any change after.
+  Refusals: `PLACE_OF_SUPPLY_UNKNOWN`, `INVOICE_LINE_NEEDS_SAC` (409, also as `issueBlocked` on the
+  read), `INVALID_SAC`, `INVALID_PLACE_OF_SUPPLY`, `INVALID_TDS` (400).
+- **SAC and rate live on the catalogue service** (`body.tax = { IN: { sac, ratePercent } }`, keyed by
+  the ISSUING company's country so UAE VAT can sit beside it; no migration). A line billing an
+  engagement takes its service's SAC, and its rate when none is typed. `invoice_line.sac` (99 + 4
+  digits) is settable on a draft (`PUT /invoices/{id}/lines/{lineId}/sac`).
+- **Bank accounts and LUTs (0369)** are WRITTEN ONCE (bib_app: INSERT + UPDATE(retired_at) only; the
+  default privileges grant UPDATE of every column, so 0369 REVOKEs first, as 0313 does): a correction
+  retires and inserts in one transaction, and an issued invoice points at the row it printed. One live
+  account per (company, currency) plus one general (currency NULL); the invoice prints its currency's,
+  else the general one. One live LUT per (company, year it starts in). Routes under
+  `/firm-entities/{id}/bank-accounts|luts` (tenant:admin), list `GET /invoicing/companies`.
+- **TDS (0371).** `crm.client_tds` (one row per client, section + rate or both null), `GET/PUT
+  /clients/{id}/tds`. `crm.payment.tds_amount` (signed like amount; a payment may be TDS only);
+  `invoice_balance.tds`; outstanding = invoiced - paid - tds - credited. A cancel is refused with TDS
+  on it; a TDS reversal larger than the TDS recorded is refused. `paid` stays money in the bank.
+- **The PDF** (`domain/invoice/gst-print.ts` decides the words; `RenderableDocument.taxInvoice` draws
+  them): SAC and GST % columns, taxable value, CGST/SGST or IGST rows with the shared rate, Less TDS
+  and Net amount payable (on any invoice whose client deducts), tax in words, SAC-wise summary,
+  "Whether tax is payable on reverse charge: No", the LUT declaration, tax in INR on a foreign
+  invoice charging IGST, bank details, "For <company> / Authorised signatory", "State: X (NN)" under
+  each party. A plain or pre-0370 invoice is byte-identical (its layout hash did not move); the GST
+  layout has its own pinned hash. Rasterize a page after any change.
+- **A company's GSTIN is read on the company's day** (`crm.issuer_zone`), never `current_date`:
+  between 00:00 and 05:30 IST a GSTIN valid from today was invisible (found by the walk).
+- **Readiness** `tax_invoice` (after `services`): an Indian company's GSTIN and bank account, each
+  service's SAC and rate; nothing to check without an Indian company.
+- **Not built:** e-invoicing (IRN/QR, S6; every IRP field is now on the invoice), SEZ recipients,
+  pure-agent reimbursements, Form 16A tracking, GST on credit notes' own PDF, "Original for
+  recipient". The 16-character number rule (Q080) is a warning on the series screen, never a refusal.
+
 ## Billing by company — the one dashboard figure cut by MONTH (Wave 5, 2026-09-29)
 
 `GET /api/v1/dashboard/revenue/by-company?months=12` (1 to 24), behind the fee axis like the

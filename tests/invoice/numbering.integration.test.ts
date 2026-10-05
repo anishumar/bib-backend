@@ -22,6 +22,7 @@
 // series is something an auditor may read as a suppressed sale.
 //
 // Run with:  npm run test:integration   (needs a migrated local database)
+import { NO_TAX_SNAPSHOT } from "../../src/domain/invoice/model";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import postgres from "postgres";
 import { load } from "../../src/config/config";
@@ -184,6 +185,8 @@ describe("the series is consecutive", () => {
       financialYear: 2027,
       fiscalYearStartMonth: 4,
       dueOnIfUnset: null,
+      tax: NO_TAX_SNAPSHOT,
+      fillSacs: [],
     });
     expect(next).toMatchObject({ issued: { financialYear: 2027, issuedOn: "2027-04-03", number: "INV/2027-28/0001" } });
   });

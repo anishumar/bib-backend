@@ -31,7 +31,9 @@ import {
   PAYMENT_METHODS,
 } from "../../domain/invoice/model";
 import { DUNNING_ACTIONS } from "../../domain/config/model";
-import type { InvoiceSummary, InvoiceView } from "../../usecase/invoice/ports";
+import type { BankAccountView, InvoiceSummary, InvoiceView } from "../../usecase/invoice/ports";
+import type { CompanyInvoicingService } from "../../usecase/invoice/company";
+import { INDIAN_STATES, TAX_TREATMENTS, stateByCode } from "../../domain/invoice/gst";
 import type { AuthzService } from "../../usecase/authz/service";
 import type { Principal } from "../../platform/callctx";
 
@@ -52,7 +54,11 @@ export interface InvoiceDeps {
   /** Chasing is its own use case: invoicing answers what a client owes, this
    *  answers what the firm will do about it. They meet at one query. */
   readonly dunning: DunningService;
+  /** A company's bank accounts and LUTs (Q056, 0369). */
+  readonly companies: CompanyInvoicingService;
 }
+
+const TREATMENT_VALUES = [...TAX_TREATMENTS] as [string, ...string[]];
 
 const STATUS_VALUES = [...INVOICE_STATUSES] as [string, ...string[]];
 const PAYMENT_METHOD_VALUES = [...PAYMENT_METHODS] as [string, ...string[]];
@@ -110,6 +116,43 @@ const InvoiceSchema = z
     managerUserId: z.string().uuid().nullable().openapi({
       description: "Whose revenue this invoice is (0318); frozen once issued. Null when nobody was named.",
     }),
+    tax: z
+      .object({
+        treatment: z.enum(TREATMENT_VALUES).nullable().openapi({
+          description:
+            "Which taxes it charges (Q056, 0370): `plain` (one tax figure: a company outside India, or an " +
+            "Indian company with no GSTIN), `gst_intra` (CGST + SGST), `gst_intra_ut` (CGST + UTGST), " +
+            "`gst_inter` (IGST), `gst_export_lut` (zero-rated under an LUT), `gst_export_igst` (IGST on an " +
+            "export). Null: an invoice from before 0370, or a draft whose place of supply cannot be read " +
+            "yet (see issueBlocked). On a draft it follows the client and the company; frozen at issue.",
+        }),
+        supplierGstin: z.string().nullable(),
+        supplierStateCode: z.string().nullable(),
+        recipientGstin: z.string().nullable(),
+        placeOfSupply: z
+          .object({
+            stateCode: z.string().nullable(),
+            stateName: z.string().nullable(),
+            country: z.string().nullable().openapi({ description: "Outside India: the client's country." }),
+          })
+          .nullable()
+          .openapi({ description: "Where the service is supplied (IGST Act s.12/13). Null on a plain invoice." }),
+        chosenPlaceOfSupply: z.string().nullable().openapi({
+          description: "A state a person chose on the draft (PUT /place-of-supply); null follows the client.",
+        }),
+        reverseCharge: z.boolean().openapi({
+          description: "Whether tax is payable on reverse charge (Rule 46(o)). Always false for a firm's fees today.",
+        }),
+        tds: z
+          .object({ section: z.string(), percent: Decimal })
+          .nullable()
+          .openapi({
+            description:
+              "Q057: the TDS the client deducts, as it stood when the draft was read or the invoice issued. A " +
+              "RATE, not redacted.",
+          }),
+      })
+      .openapi("InvoiceTax"),
   })
   .openapi("Invoice");
 
@@ -127,6 +170,16 @@ const TotalsSchema = z
      *  the lines the first time one moved. */
     total: Decimal.nullable(),
     currency: z.string().length(3),
+    cgst: Decimal.nullable(),
+    sgst: Decimal.nullable(),
+    utgst: Decimal.nullable(),
+    igst: Decimal.nullable(),
+    tds: Decimal.nullable().openapi({
+      description:
+        "Q057: what the client is expected to deduct, the TDS rate on `net` (the amount before tax, CBDT " +
+        "Circular 23/2017). \"0\" when the client deducts none. The receivable stays `total`.",
+    }),
+    netPayable: Decimal.nullable().openapi({ description: "`total` less `tds`: what the client remits." }),
   })
   .openapi("InvoiceTotals");
 
@@ -148,8 +201,30 @@ const InvoiceLineSchema = z
     taxPercent: Decimal,
     net: Decimal.nullable(),
     tax: Decimal.nullable(),
+    sac: z.string().nullable().openapi({ description: "The service's SAC (Q056); not a price, never redacted." }),
+    cgst: Decimal.nullable(),
+    sgst: Decimal.nullable(),
+    utgst: Decimal.nullable(),
+    igst: Decimal.nullable(),
   })
   .openapi("InvoiceLine");
+
+/** A bank account's fields, unnamed: the record's nullable copy is inlined
+ *  from this, because `.nullable()` on the NAMED schema makes the shared
+ *  component itself nullable (and every array of it a list of maybe-nulls). */
+const BankAccountFields = z.object({
+  id: z.string().uuid(),
+  accountName: z.string(),
+  accountNumber: z.string(),
+  bankName: z.string(),
+  branch: z.string().nullable(),
+  ifsc: z.string().nullable(),
+  swift: z.string().nullable(),
+  iban: z.string().nullable(),
+  currency: z.string().nullable().openapi({ description: "The invoice currency it is for; null: the general account." }),
+});
+
+const BankAccountSchema = BankAccountFields.openapi("CompanyBankAccount");
 
 const PartyRefSchema = z.object({ id: z.string().uuid(), displayName: z.string() });
 
@@ -178,14 +253,25 @@ const InvoiceRecordSchema = z
           "rate last invoiced on that engagement, else the issuing company's default tax rate (Your " +
           "firm), else none. A tax rate is a statutory fact, not a price: never redacted.",
       }),
+    lut: z
+      .object({ id: z.string().uuid(), reference: z.string(), financialYear: z.number().int() })
+      .nullable()
+      .openapi({ description: "The LUT an export under one names (Q056)." }),
+    /** Where the client pays: the issuing company's account for this
+     *  currency, else its general one. */
+    bankAccount: BankAccountFields.nullable(),
     issueBlocked: z
-      .object({ reason: z.enum(["INVOICE_NUMBER_OUT_OF_ORDER"]), message: z.string() })
+      .object({
+        reason: z.enum(["INVOICE_NUMBER_OUT_OF_ORDER", "PLACE_OF_SUPPLY_UNKNOWN", "INVOICE_LINE_NEEDS_SAC"]),
+        message: z.string(),
+      })
       .nullable()
       .openapi({
         description:
           "Why Issue would be refused today, when the record alone shows it (B51): a draft numbered " +
           "before 0322 whose number is now out of order in its series (a later number of the series " +
-          "has been issued, or today is in another financial year). `message` is the refusal's own " +
+          "has been issued, or today is in another financial year); or, on a GST invoice (Q056), a place " +
+          "of supply that cannot be read or a line with no SAC. `message` is the refusal's own " +
           "sentence, for the screen to show where Issue is offered. Null when nothing on the record " +
           "stops it; the issue call still decides.",
       }),
@@ -202,6 +288,7 @@ const BalanceOnListSchema = z
     paid: Decimal,
     credited: Decimal,
     outstanding: Decimal,
+    tds: Decimal.openapi({ description: "TDS the client deducted (Q057): settles like money, is not money." }),
   })
   .openapi("InvoiceListBalance");
 
@@ -278,7 +365,12 @@ const AddInvoiceLineRequest = z
     quantity: Decimal,
     unitAmount: Decimal,
     discountPercent: Decimal.optional(),
-    taxPercent: Decimal.optional(),
+    taxPercent: Decimal.optional().openapi({
+      description: "Absent: the catalogue service's rate for the issuing company's country, else 0.",
+    }),
+    sac: z.string().optional().openapi({
+      description: "The service's SAC (six digits, 99...). Absent: the catalogue service's, else none.",
+    }),
   })
   .openapi("AddInvoiceLineRequest");
 
@@ -418,7 +510,11 @@ const issueRoute = createRoute({
     "the issue date is refused (DUE_BEFORE_ISSUE, 409: change it with PUT /due-date); one with no " +
     "due date takes the firm's payment terms when it has set them (0327), else stays without one. " +
     "A draft numbered before 0322 keeps its number and is refused when that number would go out of " +
-    "order (INVOICE_NUMBER_OUT_OF_ORDER, 409, B51): cancel it and raise it again.",
+    "order (INVOICE_NUMBER_OUT_OF_ORDER, 409, B51): cancel it and raise it again. Q056: its tax is decided " +
+    "for the issue date and frozen (CGST + SGST, UTGST, IGST, or zero-rated under the company's LUT); an " +
+    "Indian GST invoice is refused while its place of supply cannot be read (PLACE_OF_SUPPLY_UNKNOWN, 409: " +
+    "PUT /place-of-supply) or a line has no SAC (INVOICE_LINE_NEEDS_SAC, 409: PUT /lines/{id}/sac, or the " +
+    "catalogue service's SAC).",
   request: { params: z.object({ invoiceId: z.string().uuid() }), query: CallerDayQuery },
   responses: {
     200: { description: "Issued", content: { "application/json": { schema: InvoiceSchema } } },
@@ -427,8 +523,8 @@ const issueRoute = createRoute({
     404: errorResponse("No such invoice at this firm"),
     400: errorResponse("asOf is not today anywhere"),
     409: errorResponse(
-      "Not a draft, it has no lines, its due date is before today's issue date, or its number " +
-        "(drawn before 0322) would go out of order",
+      "Not a draft, it has no lines, its due date is before today's issue date, its number " +
+        "(drawn before 0322) would go out of order, or (a GST invoice) no place of supply or a line without a SAC",
     ),
   },
 });
@@ -596,6 +692,9 @@ const PaymentSchema = z
     method: z.enum(PAYMENT_METHOD_VALUES),
     reference: z.string().nullable(),
     note: z.string().nullable(),
+    tdsAmount: Decimal.nullable().openapi({
+      description: "Q057: the TDS the client deducted from this remittance; \"0\" for none. Signed like amount.",
+    }),
   })
   .openapi("Payment");
 
@@ -643,6 +742,11 @@ const BalanceSchema = z
      *  0 for a draft or a cancelled one (0326, B22). Never a stored column:
      *  a `paid` flag drifts the first time a payment is corrected. */
     outstanding: Decimal.nullable(),
+    tds: Decimal.nullable().openapi({
+      description:
+        "Q057: TDS the client deducted. Outstanding is invoiced − paid − tds − credited: an invoice is " +
+        "settled when the money and the TDS together cover it.",
+    }),
   })
   .openapi("InvoiceBalance");
 
@@ -653,6 +757,11 @@ const RecordPaymentRequest = z
     method: z.enum(PAYMENT_METHOD_VALUES),
     reference: z.string().max(200).optional(),
     note: z.string().max(2000).optional(),
+    tdsAmount: Decimal.optional().openapi({
+      description:
+        "Q057: the TDS the client deducted from this remittance, recorded beside the money. The amount may be " +
+        "\"0\" when only TDS is recorded. Signed: a negative undoes TDS recorded by mistake.",
+    }),
   })
   .openapi("RecordPaymentRequest");
 
@@ -795,6 +904,279 @@ const outstandingRoute = createRoute({
     },
     401: errorResponse("Not signed in"),
     403: errorResponse("No org selected, or the role does not permit it"),
+  },
+});
+
+// ── The GST tax invoice (Q056, Q057) ───────────────────────────────────────
+
+const setPlaceOfSupplyRoute = createRoute({
+  method: "put",
+  path: "/api/v1/invoices/{invoiceId}/place-of-supply",
+  tags: ["invoices"],
+  summary: "Choose a draft's GST place of supply, or go back to the client's",
+  description:
+    "Drafts only. A GST state code over the one the client's GSTIN or address gives (a client registered " +
+    "in several states, or an address whose state cannot be read); null follows the client again. The " +
+    "tax is decided again at once (CGST + SGST within the issuing company's state, IGST otherwise). " +
+    "Writes `invoice.place_of_supply_set`.",
+  request: {
+    params: z.object({ invoiceId: z.string().uuid() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({ stateCode: z.string().regex(/^\d{2}$/).nullable() }).openapi("SetPlaceOfSupplyRequest"),
+        },
+      },
+      required: true,
+    },
+  },
+  responses: {
+    200: { description: "Saved", content: { "application/json": { schema: InvoiceSchema } } },
+    400: errorResponse("Not a GST state code (INVALID_PLACE_OF_SUPPLY)"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such invoice at this firm"),
+    409: errorResponse("The invoice is no longer a draft"),
+  },
+});
+
+const setLineSacRoute = createRoute({
+  method: "put",
+  path: "/api/v1/invoices/{invoiceId}/lines/{lineId}/sac",
+  tags: ["invoices"],
+  summary: "Set or clear a draft line's SAC",
+  description:
+    "Drafts only. Six digits starting 99 (INVALID_SAC, 400). A GST invoice is refused at issue while a line " +
+    "has none (INVOICE_LINE_NEEDS_SAC); a line billing a catalogued service takes the service's SAC " +
+    "without this. Writes `invoice.line_sac_set`.",
+  request: {
+    params: z.object({ invoiceId: z.string().uuid(), lineId: z.string().uuid() }),
+    body: {
+      content: {
+        "application/json": { schema: z.object({ sac: z.string().nullable() }).openapi("SetLineSacRequest") },
+      },
+      required: true,
+    },
+  },
+  responses: {
+    204: { description: "Saved" },
+    400: errorResponse("Not a SAC"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such invoice or line at this firm"),
+    409: errorResponse("The invoice is no longer a draft"),
+  },
+});
+
+const ClientTdsSchema = z
+  .object({ section: z.string(), percent: Decimal })
+  .nullable()
+  .openapi("ClientTds");
+
+const getClientTdsRoute = createRoute({
+  method: "get",
+  path: "/api/v1/clients/{partyId}/tds",
+  tags: ["invoices"],
+  summary: "The TDS a client deducts on the firm's fees",
+  request: { params: z.object({ partyId: z.string().uuid() }) },
+  responses: {
+    200: {
+      description: "Its setting; `tds` null when it deducts none",
+      content: { "application/json": { schema: z.object({ tds: ClientTdsSchema }) } },
+    },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+  },
+});
+
+const setClientTdsRoute = createRoute({
+  method: "put",
+  path: "/api/v1/clients/{partyId}/tds",
+  tags: ["invoices"],
+  summary: "Set, change or stop the TDS a client deducts",
+  description:
+    "Q057. A section as the Act writes it (194J, 194JB, 194C, 195) and a rate above 0, up to 100 " +
+    "(INVALID_TDS, 400); null stops it. Its invoices then print \"Less: TDS u/s 194J @10% (on the amount " +
+    "before tax)\" and the net payable. Drafts take it when next read; issued invoices keep theirs. " +
+    "Writes `client.tds_set`.",
+  request: {
+    params: z.object({ partyId: z.string().uuid() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z
+            .object({ tds: z.object({ section: z.string().max(12), percent: Decimal }).nullable() })
+            .openapi("SetClientTdsRequest"),
+        },
+      },
+      required: true,
+    },
+  },
+  responses: {
+    200: { description: "Saved", content: { "application/json": { schema: z.object({ tds: ClientTdsSchema }) } } },
+    400: errorResponse("Not a TDS section or rate, or one of the firm's own companies"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such client at this firm"),
+  },
+});
+
+const statesRoute = createRoute({
+  method: "get",
+  path: "/api/v1/invoicing/states",
+  tags: ["invoices"],
+  summary: "India's GST states and union territories, by state code",
+  description: "For a place-of-supply or address picker. The code is a GSTIN's first two digits.",
+  responses: {
+    200: {
+      description: "States",
+      content: {
+        "application/json": {
+          schema: z.object({
+            states: z.array(z.object({ code: z.string(), name: z.string(), utgst: z.boolean() })),
+          }),
+        },
+      },
+    },
+    401: errorResponse("Not signed in"),
+  },
+});
+
+const CompanyInvoicingSchema = z
+  .object({
+    entityPartyId: z.string().uuid(),
+    name: z.string(),
+    country: z.string().nullable(),
+    gstin: z.string().nullable().openapi({
+      description: "Its GSTIN in force today. An Indian company without one issues plain invoices, not GST ones.",
+    }),
+    bankAccounts: z.array(BankAccountSchema),
+    luts: z.array(
+      z.object({
+        id: z.string().uuid(),
+        financialYear: z.number().int(),
+        financialYearLabel: z.string(),
+        reference: z.string(),
+        filedOn: z.string().nullable(),
+      }),
+    ),
+  })
+  .openapi("CompanyInvoicing");
+
+const listCompaniesRoute = createRoute({
+  method: "get",
+  path: "/api/v1/invoicing/companies",
+  tags: ["invoices"],
+  summary: "The firm's companies, with the bank accounts and LUTs their invoices print",
+  responses: {
+    200: {
+      description: "Companies",
+      content: { "application/json": { schema: z.object({ companies: z.array(CompanyInvoicingSchema) }) } },
+    },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+  },
+});
+
+const addBankAccountRoute = createRoute({
+  method: "post",
+  path: "/api/v1/firm-entities/{entityPartyId}/bank-accounts",
+  tags: ["invoices"],
+  summary: "Add where a company is paid, or correct it",
+  description:
+    "Q056, 0369. Written once: the company's live account for the same `currency` (or its general one, " +
+    "for null) is retired in the same write, and invoices issued with it still print it. An invoice prints " +
+    "the account for its currency, else the general one. Writes `firm_entity.bank_account_added`.",
+  request: {
+    params: z.object({ entityPartyId: z.string().uuid() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              accountName: z.string().max(200),
+              accountNumber: z.string().max(40),
+              bankName: z.string().max(200),
+              branch: z.string().max(200).nullable().optional(),
+              ifsc: z.string().max(11).nullable().optional(),
+              swift: z.string().max(11).nullable().optional(),
+              iban: z.string().max(40).nullable().optional(),
+              currency: z.string().length(3).nullable().optional(),
+            })
+            .openapi("AddBankAccountRequest"),
+        },
+      },
+      required: true,
+    },
+  },
+  responses: {
+    201: { description: "Added", content: { "application/json": { schema: z.object({ id: z.string().uuid() }) } } },
+    400: errorResponse("A field is not in the shape a bank writes it (INVALID_COMPANY_INVOICING), or not one of the firm's companies"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+  },
+});
+
+const retireBankAccountRoute = createRoute({
+  method: "post",
+  path: "/api/v1/firm-entities/{entityPartyId}/bank-accounts/{accountId}/retire",
+  tags: ["invoices"],
+  summary: "Take a bank account off a company's invoices",
+  request: { params: z.object({ entityPartyId: z.string().uuid(), accountId: z.string().uuid() }) },
+  responses: {
+    204: { description: "Retired" },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No live account with that id on this company"),
+  },
+});
+
+const addLutRoute = createRoute({
+  method: "post",
+  path: "/api/v1/firm-entities/{entityPartyId}/luts",
+  tags: ["invoices"],
+  summary: "Record a company's Letter of Undertaking for a financial year",
+  description:
+    "Q056, 0369. With one in force for the issue date's year, an Indian company's invoice to a client " +
+    "outside India is zero-rated and prints \"Supply meant for export under LUT without payment of IGST\" " +
+    "with this reference; without one, IGST is charged. Replaces the LUT for the same year. " +
+    "`financialYear` is the year it starts in (2026 = 2026-27). Writes `firm_entity.lut_recorded`.",
+  request: {
+    params: z.object({ entityPartyId: z.string().uuid() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              financialYear: z.number().int(),
+              reference: z.string().max(30),
+              filedOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+            })
+            .openapi("AddLutRequest"),
+        },
+      },
+      required: true,
+    },
+  },
+  responses: {
+    201: { description: "Recorded", content: { "application/json": { schema: z.object({ id: z.string().uuid() }) } } },
+    400: errorResponse("Not a year or an ARN (INVALID_COMPANY_INVOICING), or not one of the firm's companies"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+  },
+});
+
+const retireLutRoute = createRoute({
+  method: "post",
+  path: "/api/v1/firm-entities/{entityPartyId}/luts/{lutId}/retire",
+  tags: ["invoices"],
+  summary: "Take an LUT off a company",
+  request: { params: z.object({ entityPartyId: z.string().uuid(), lutId: z.string().uuid() }) },
+  responses: {
+    204: { description: "Retired" },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No live LUT with that id on this company"),
   },
 });
 
@@ -964,6 +1346,7 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
                   paid: r.balance.paid,
                   credited: r.balance.credited,
                   outstanding: r.balance.outstanding,
+                  tds: r.balance.tds,
                 },
         })),
       },
@@ -1187,6 +1570,110 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
     return c.json({ actions: actions.map(toDunningBody) }, 200);
   });
 
+  app.openapi(setPlaceOfSupplyRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const saved = await deps.service.setPlaceOfSupply(
+      s.tenantId,
+      c.req.valid("param").invoiceId,
+      c.req.valid("json").stateCode,
+      s.actor,
+    );
+    return c.json(toInvoiceBody(saved, seesFees(c.get("principal"))), 200);
+  });
+
+  app.openapi(setLineSacRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const p = c.req.valid("param");
+    const sac = c.req.valid("json").sac;
+    await deps.service.setLineSac(s.tenantId, p.invoiceId, p.lineId, sac === null || sac.trim() === "" ? null : sac.trim(), s.actor);
+    return c.body(null, 204);
+  });
+
+  app.openapi(getClientTdsRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const tds = await deps.service.clientTds(s.tenantId, c.req.valid("param").partyId);
+    return c.json({ tds: tds === null ? null : { section: tds.section, percent: tds.percent } }, 200);
+  });
+
+  app.openapi(setClientTdsRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const tds = await deps.service.setClientTds(
+      s.tenantId,
+      c.req.valid("param").partyId,
+      c.req.valid("json").tds,
+      s.actor,
+    );
+    return c.json({ tds: tds === null ? null : { section: tds.section, percent: tds.percent } }, 200);
+  });
+
+  app.openapi(statesRoute, (c) =>
+    c.json({ states: INDIAN_STATES.map((st) => ({ code: st.code, name: st.name, utgst: st.utgst })) }, 200),
+  );
+
+  app.openapi(listCompaniesRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const companies = await deps.companies.list(s.tenantId);
+    return c.json(
+      {
+        companies: companies.map((co) => ({
+          entityPartyId: co.entityPartyId,
+          name: co.name,
+          country: co.country,
+          gstin: co.gstin,
+          bankAccounts: co.bankAccounts.map(toBankAccountBody),
+          luts: co.luts.map((l) => ({
+            id: l.id,
+            financialYear: l.financialYear,
+            financialYearLabel: financialYearLabel(l.financialYear),
+            reference: l.reference,
+            filedOn: l.filedOn,
+          })),
+        })),
+      },
+      200,
+    );
+  });
+
+  app.openapi(addBankAccountRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const added = await deps.companies.addBankAccount(
+      s.tenantId,
+      c.req.valid("param").entityPartyId,
+      c.req.valid("json"),
+      s.actor,
+    );
+    return c.json({ id: added.id }, 201);
+  });
+
+  app.openapi(retireBankAccountRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const p = c.req.valid("param");
+    await deps.companies.retireBankAccount(s.tenantId, p.entityPartyId, p.accountId, s.actor);
+    return c.body(null, 204);
+  });
+
+  app.openapi(addLutRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const added = await deps.companies.addLut(s.tenantId, c.req.valid("param").entityPartyId, c.req.valid("json"), s.actor);
+    return c.json({ id: added.id }, 201);
+  });
+
+  app.openapi(retireLutRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const p = c.req.valid("param");
+    await deps.companies.retireLut(s.tenantId, p.entityPartyId, p.lutId, s.actor);
+    return c.body(null, 204);
+  });
+
   app.openapi(decideDunningRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
@@ -1222,6 +1709,21 @@ function toPaymentBody(p: Payment, fees: boolean): z.infer<typeof PaymentSchema>
     method: p.method,
     reference: p.reference,
     note: p.note,
+    tdsAmount: fees ? p.tdsAmount : null,
+  };
+}
+
+function toBankAccountBody(b: BankAccountView): z.infer<typeof BankAccountSchema> {
+  return {
+    id: b.id,
+    accountName: b.accountName,
+    accountNumber: b.accountNumber,
+    bankName: b.bankName,
+    branch: b.branch,
+    ifsc: b.ifsc,
+    swift: b.swift,
+    iban: b.iban,
+    currency: b.currency,
   };
 }
 
@@ -1252,6 +1754,7 @@ function toBalanceBody(b: InvoiceBalance, fees: boolean): z.infer<typeof Balance
     paid: fees ? b.paid : null,
     credited: fees ? b.credited : null,
     outstanding: fees ? b.outstanding : null,
+    tds: fees ? b.tds : null,
   };
 }
 
@@ -1275,6 +1778,27 @@ function toInvoiceBody(i: Invoice, fees: boolean): z.infer<typeof InvoiceSchema>
     irnRegisteredAt: i.irnRegisteredAt,
     notes: i.notes,
     managerUserId: i.managerUserId,
+    tax: {
+      treatment: i.tax.treatment,
+      supplierGstin: i.tax.supplierGstin,
+      supplierStateCode: i.tax.supplierStateCode,
+      recipientGstin: i.tax.recipientGstin,
+      placeOfSupply:
+        i.tax.placeOfSupplyStateCode === null && i.tax.placeOfSupplyCountry === null
+          ? null
+          : {
+              stateCode: i.tax.placeOfSupplyStateCode,
+              stateName:
+                i.tax.placeOfSupplyStateCode === null ? null : (stateByCode(i.tax.placeOfSupplyStateCode)?.name ?? null),
+              country: i.tax.placeOfSupplyCountry,
+            },
+      chosenPlaceOfSupply: i.tax.chosenPlaceOfSupply,
+      reverseCharge: false,
+      tds:
+        i.tax.tdsSection === null || i.tax.tdsPercent === null
+          ? null
+          : { section: i.tax.tdsSection, percent: i.tax.tdsPercent },
+    },
   };
 }
 
@@ -1287,6 +1811,12 @@ function toTotalsBody(t: InvoiceTotals, fees: boolean): z.infer<typeof TotalsSch
     tax: fees ? t.tax : null,
     total: fees ? t.total : null,
     currency: t.currency,
+    cgst: fees ? t.cgst : null,
+    sgst: fees ? t.sgst : null,
+    utgst: fees ? t.utgst : null,
+    igst: fees ? t.igst : null,
+    tds: fees ? t.tds : null,
+    netPayable: fees ? t.netPayable : null,
   };
 }
 
@@ -1307,6 +1837,11 @@ function toRecordBody(record: InvoiceView, fees: boolean): z.infer<typeof Invoic
       taxPercent: l.line.taxPercent,
       net: fees ? l.net : null,
       tax: fees ? l.tax : null,
+      sac: l.line.sac,
+      cgst: fees ? l.cgst : null,
+      sgst: fees ? l.sgst : null,
+      utgst: fees ? l.utgst : null,
+      igst: fees ? l.igst : null,
     })),
     totals: toTotalsBody(record.totals, fees),
     manager:
@@ -1321,6 +1856,11 @@ function toRecordBody(record: InvoiceView, fees: boolean): z.infer<typeof Invoic
         taxPercent: t.taxPercent,
       })),
     },
+    lut:
+      record.lut === null
+        ? null
+        : { id: record.lut.id, reference: record.lut.reference, financialYear: record.lut.financialYear },
+    bankAccount: record.bankAccount === null ? null : toBankAccountBody(record.bankAccount),
     issueBlocked:
       record.issueBlocked === null
         ? null

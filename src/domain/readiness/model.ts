@@ -28,8 +28,8 @@
 // never "these days". Nor does it decide which services OUGHT to file: a
 // bookkeeping service may owe nothing, so the rules line asks that the calendar
 // has something confirmed to generate from, and that nothing linked is left
-// unconfirmed. Nor the firm's own GSTIN or PAN: there is nowhere to record
-// them yet, and a line nobody can turn done is noise.
+// unconfirmed. The firm's own GSTIN is checked (since Q056) only where it
+// decides something: an Indian company without one issues plain invoices.
 //
 // Pure: facts in, lines out. The adapter gathers the facts; this decides.
 import { isZoneChosen, zoneForCountries } from "../tenancy/model";
@@ -41,6 +41,7 @@ export const READINESS_KEYS = [
   "staff",
   "deadlines",
   "services",
+  "tax_invoice",
   "standard_terms",
   "reporting_lines",
   "request_routing",
@@ -102,6 +103,10 @@ export interface ReadinessFacts {
     /** ISO 3166-1 alpha-2, or null when the company is not registered. */
     readonly country: string | null;
     readonly hasAddress: boolean;
+    /** A GSTIN in force today (Q056). */
+    readonly hasGstin: boolean;
+    /** A live bank account its invoices print (0369). */
+    readonly hasBankAccount: boolean;
   }[];
   /** `tenancy.tenant.time_zone`. 'UTC' is the default nobody chose (0071). */
   readonly timeZone: string;
@@ -153,6 +158,9 @@ export interface ReadinessFacts {
     readonly processKey: string | null;
     /** Whether that process has a published version. */
     readonly processPublished: boolean;
+    /** The service's Indian SAC and GST rate (Q056), or null each. */
+    readonly sac: string | null;
+    readonly taxRate: string | null;
   }[];
   /** `tenancy.tenant.client_request_routing`: 'none' is the unset default. */
   readonly requestRouting: string;
@@ -226,6 +234,31 @@ export function readinessLines(f: ReadinessFacts): readonly ReadinessLine[] {
     ]),
 
     services: line("services", f.services.length > 0 ? [] : [firm("service")]),
+
+    // A GST TAX INVOICE (Q056): each Indian company has its GSTIN (without one
+    // it issues plain invoices) and the bank account its invoices print, and
+    // each service its SAC and GST rate (an invoice is refused at issue
+    // without a SAC). Only a firm with an Indian company has anything here.
+    tax_invoice: !f.companies.some((c) => c.country === "IN")
+      ? nothingToCheck("tax_invoice")
+      : line("tax_invoice", [
+          ...f.companies
+            .filter((c) => c.country === "IN" && (!c.hasGstin || !c.hasBankAccount))
+            .map((c) => ({
+              id: c.partyId,
+              ref: null,
+              name: c.name,
+              missing: [...(c.hasGstin ? [] : ["gstin"]), ...(c.hasBankAccount ? [] : ["bank_account"])],
+            })),
+          ...f.services
+            .filter((sv) => sv.sac === null || sv.taxRate === null)
+            .map((sv) => ({
+              id: null,
+              ref: sv.key,
+              name: sv.name,
+              missing: [...(sv.sac === null ? ["sac"] : []), ...(sv.taxRate === null ? ["tax_rate"] : [])],
+            })),
+        ]),
 
     // A letter cannot be written without a term in force (CA#3).
     standard_terms: line("standard_terms", f.publishedTerms > 0 ? [] : [firm("standard_terms")]),

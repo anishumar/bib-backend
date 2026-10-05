@@ -395,6 +395,8 @@ describe("reading a stored body back", () => {
       // catalogue points at the firm's current process and the JOB is what pins
       // the version it started on.
       workflowTemplateKey: "gst-monthly-process",
+      // How it is taxed (Q056): not stated in this body.
+      tax: {},
     });
   });
 

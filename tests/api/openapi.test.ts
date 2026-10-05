@@ -142,7 +142,7 @@ import { makeLeadFakes } from "../../src/testfakes/lead";
 import { makeProposalFakes } from "../../src/testfakes/proposal";
 import { FakeEngagementLifecycle, makeEngagementFakes } from "../../src/testfakes/engagement";
 import { makeDocumentFakes, makeFirmEntityFakes } from "../../src/testfakes/document";
-import { FakeFirmEntities, makeInvoiceFakes } from "../../src/testfakes/invoice";
+import { FakeFirmEntities, makeInvoiceFakes, makeCompanyInvoicing } from "../../src/testfakes/invoice";
 import { FakeDunningLadder, FakeDunningRepo } from "../../src/testfakes/dunning";
 import {
   FakeCheckerDirectory,
@@ -656,6 +656,7 @@ function deps(): RouterDeps {
     invoice: {
       authz: new AuthzService({ permissions }),
       service: new InvoiceService(makeInvoiceFakes()),
+      companies: makeCompanyInvoicing(),
       dunning: new DunningService({
         timeZones: new FakeFirmTimeZone(),
         dunning: new FakeDunningRepo(),

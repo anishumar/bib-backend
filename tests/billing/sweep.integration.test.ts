@@ -421,6 +421,7 @@ describe("the billing desk on a real database (0318)", () => {
       prepareDraft: (input) => invoicing.prepareDraft(input),
       prepareLine: (draft, input) => invoicing.prepareLine(draft, input),
       recordRaised: (invoice, actor) => invoicing.recordRaised(invoice, actor),
+      refreshTax: (t, id) => invoicing.refreshTax(t, id),
       find: (t, id) => invoiceRepository.find(t, id),
       issueCreditNote: (input, actor) => invoicing.issueCreditNote(input, actor),
     },

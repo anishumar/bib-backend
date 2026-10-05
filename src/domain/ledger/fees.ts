@@ -31,7 +31,7 @@
 import type { EventVerb } from "./model";
 
 export const MONEY_IN_PAYLOAD: Readonly<Partial<Record<EventVerb, readonly string[]>>> = {
-  "payment.recorded": ["amount"],
+  "payment.recorded": ["amount", "tdsAmount"],
   "credit_note.issued": ["amount"],
   "dunning.escalated": ["outstanding"],
   "billing_due.covered": ["advanceApplied"],

@@ -7,6 +7,7 @@
 // be CONSECUTIVE, because an auditor who finds one missing is entitled to read
 // it as a suppressed sale. The two therefore share no code, deliberately, and
 // the difference is stated in both places rather than in neither.
+import type { TaxTreatment } from "./gst";
 
 /**
  * Where an invoice is in its short life.
@@ -72,7 +73,48 @@ export interface Invoice {
   /** Whose revenue this is (0318): set when raised from bill dues, frozen
    *  once issued. Null when nobody was named. */
   readonly managerUserId: string | null;
+  /** What it says about tax (Q056, 0370): decided on the draft, frozen at
+   *  issue. `treatment: null` is an invoice from before 0370. */
+  readonly tax: InvoiceTaxSnapshot;
 }
+
+/**
+ * The facts a GST tax invoice prints about tax, held on the invoice (0370) so
+ * an issued one never changes when a client's GSTIN, a company's LUT or a
+ * client's TDS setting does.
+ */
+export interface InvoiceTaxSnapshot {
+  readonly treatment: TaxTreatment | null;
+  readonly supplierGstin: string | null;
+  readonly supplierStateCode: string | null;
+  readonly recipientGstin: string | null;
+  /** A state code (a supply in India), or null. */
+  readonly placeOfSupplyStateCode: string | null;
+  /** A country outside India (an export), or null. */
+  readonly placeOfSupplyCountry: string | null;
+  /** A state a PERSON chose on the draft; null follows the client. */
+  readonly chosenPlaceOfSupply: string | null;
+  readonly lutId: string | null;
+  readonly bankAccountId: string | null;
+  /** Q057: the TDS the client deducts, both or neither. */
+  readonly tdsSection: string | null;
+  readonly tdsPercent: string | null;
+}
+
+/** An invoice that has decided nothing about tax yet. */
+export const NO_TAX_SNAPSHOT: InvoiceTaxSnapshot = {
+  treatment: null,
+  supplierGstin: null,
+  supplierStateCode: null,
+  recipientGstin: null,
+  placeOfSupplyStateCode: null,
+  placeOfSupplyCountry: null,
+  chosenPlaceOfSupply: null,
+  lutId: null,
+  bankAccountId: null,
+  tdsSection: null,
+  tdsPercent: null,
+};
 
 export interface InvoiceLine {
   readonly id: string;
@@ -92,6 +134,8 @@ export interface InvoiceLine {
   /** Per LINE, because it is per service: 18% on professional fees and 0% on an
    *  out-of-pocket recharge, on the same invoice. */
   readonly taxPercent: string;
+  /** The service's SAC as this invoice prints it (Q056, 0370), or null. */
+  readonly sac: string | null;
 }
 
 /** Every figure computed by Postgres in `numeric`, never summed in TypeScript.
@@ -104,6 +148,15 @@ export interface InvoiceTotals {
   readonly tax: string;
   readonly total: string;
   readonly currency: string;
+  /** The tax by component (0370): all zero on a plain invoice. */
+  readonly cgst: string;
+  readonly sgst: string;
+  readonly utgst: string;
+  readonly igst: string;
+  /** Q057: what the client is expected to deduct (the rate on `net`), and the
+   *  total less it. `tds` is "0" for a client that deducts none. */
+  readonly tds: string;
+  readonly netPayable: string;
 }
 
 /**
@@ -323,6 +376,9 @@ export interface Payment {
    *  theirs. */
   readonly reference: string | null;
   readonly note: string | null;
+  /** The TDS the client deducted from this remittance (Q057, 0371), signed
+   *  like `amount`; "0" when none. With `amount`, what settles the invoice. */
+  readonly tdsAmount: string;
 }
 
 /**
@@ -379,7 +435,7 @@ export interface CreditNote {
 }
 
 /**
- * What an invoice still owes: invoiced − paid − credited.
+ * What an invoice still owes: invoiced − paid − TDS − credited.
  *
  * DERIVED, never stored. A `paid` flag and an `amount_paid` column are both
  * caches of this addition and both drift the first time a payment is corrected,
@@ -396,6 +452,8 @@ export interface InvoiceBalance {
   readonly paid: string;
   readonly credited: string;
   readonly outstanding: string;
+  /** TDS the client deducted (Q057, 0371): settles like money, is not money. */
+  readonly tds: string;
 }
 
 /** The `document_type` half of a series key. Two legal series that must not
