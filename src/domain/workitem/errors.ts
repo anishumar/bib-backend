@@ -56,6 +56,7 @@ export type WorkItemErrorCode =
   | "REVIEWER_NOT_ELIGIBLE"
   | "CHECKLIST_OPEN"
   | "JOB_STEPS_OPEN"
+  | "JOB_PERIOD_NOT_ENDED"
   | "REVIEW_RULE_NEEDED"
   | "NOTE_REQUIRED"
   | "NOTE_TOO_LONG";
@@ -450,6 +451,25 @@ export class JobStepsOpen extends WorkItemError {
         (to === "doer"
           ? "Finish them on the job page, or skip a step that does not apply, first."
           : "Send it back, or finish the steps on the job page, before approving."),
+    );
+  }
+}
+
+/**
+ * A period job's task is being finished before the period it is for has ended
+ * (S7, Shrestha 2026-10-05). Finishing it files the period's returns, and a
+ * return for September is filed in October: its steps are laid out when the
+ * period ends, so before then the steps gate holds nothing and "done" would
+ * file returns no process ran for.
+ */
+export class JobPeriodNotEnded extends WorkItemError {
+  constructor(periodEnd: string, to: "doer" | "checker") {
+    super(
+      "JOB_PERIOD_NOT_ENDED",
+      `This job is for a period that ends on ${periodEnd}. ` +
+        (to === "doer"
+          ? "It can be marked done once that day has passed."
+          : "It can be approved once that day has passed."),
     );
   }
 }

@@ -65,6 +65,7 @@ import {
   BlockReasonRequired,
   ChecklistItemDone,
   ChecklistOpen,
+  JobPeriodNotEnded,
   JobStepsOpen,
   ChecklistItemNotFound,
   ConflictingStateFlags,
@@ -1466,13 +1467,20 @@ export class WorkItemService {
     return updated;
   }
 
-  /** Refuse finishing a job's task while the job has steps open (Q063). */
+  /** Refuse finishing a job's task while the job has steps open (Q063), or
+   *  before the period a period job is for has ended (S7): staff work, so on
+   *  the FIRM's day. */
   private async assertJobStepsSettled(
     tenantId: string,
     jobId: string | null,
     to: "doer" | "checker",
   ): Promise<void> {
     if (jobId === null) return;
+    const periodEnd = await this.deps.jobSteps.periodEndOf(tenantId, jobId);
+    if (periodEnd !== null) {
+      const today = dayInZone(this.deps.clock.now().toISOString(), await this.deps.timeZones.timeZoneFor(tenantId));
+      if (today <= periodEnd) throw new JobPeriodNotEnded(periodEnd, to);
+    }
     const open = await this.deps.jobSteps.openStepLabels(tenantId, jobId);
     if (open.length > 0) throw new JobStepsOpen(open, to);
   }

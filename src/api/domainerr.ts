@@ -664,6 +664,7 @@ export function mapError(err: unknown): MappedError {
       case "REVIEW_ALREADY_DECIDED":
       case "CHECKLIST_OPEN": // a line on the task's own list is open (CA#30)
       case "JOB_STEPS_OPEN": // the job's process still has steps open (Q063)
+      case "JOB_PERIOD_NOT_ENDED": // a period job's period has not ended (S7)
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

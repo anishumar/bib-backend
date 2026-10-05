@@ -332,6 +332,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         orchestrator.adoptUnheldSteps(tenantId, jobId, from, to, actor),
       openStepLabels: (tenantId, jobId): Promise<readonly string[]> =>
         orchestrator.openStepLabels(tenantId, jobId),
+      periodEndOf: (tenantId, jobId): Promise<string | null> => orchestrator.periodEndOf(tenantId, jobId),
     },
     axes: serviceAxisRepository,
     policies: configRepository,

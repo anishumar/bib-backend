@@ -2319,6 +2319,22 @@ describe("a job's task waits for the job's steps (Q063)", () => {
     expect(back.decision).toBe("rejected");
   });
 
+  it("refuses Done and Approve before the period the job is for has ended (S7)", async () => {
+    const { h, item, done } = await jobTask();
+    h.jobSteps.open.set(JOB, []);
+    // The clock is inside this period: its returns are not due to be filed yet.
+    const today = NOW.slice(0, 10);
+    h.jobSteps.periodEnds.set(JOB, today);
+    const refused = h.service.moveToState({ tenantId: FIRM, workItemId: item.id, stateId: done.id }, ACTOR);
+    await expect(refused).rejects.toMatchObject({ code: "JOB_PERIOD_NOT_ENDED" });
+    await expect(refused).rejects.toThrow(`ends on ${today}`);
+    expect(h.filings.calls).toEqual([]);
+    // The day after it ends, it is taken.
+    h.jobSteps.periodEnds.set(JOB, "2000-01-31");
+    await h.service.moveToState({ tenantId: FIRM, workItemId: item.id, stateId: done.id }, ACTOR);
+    expect(h.filings.calls).toContainEqual({ workItemId: item.id, discharged: true });
+  });
+
   it("asks nothing of a task with no job", async () => {
     const h = await harness();
     const item = await h.service.create({ tenantId: FIRM, clientPartyId: CLIENT, title: "x" }, ACTOR);

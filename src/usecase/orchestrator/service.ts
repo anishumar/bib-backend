@@ -560,6 +560,12 @@ export class OrchestratorService {
       .map((s) => s.label);
   }
 
+  /** The period a period job is for ends on this day; null for any other job. */
+  async periodEndOf(tenantId: string, jobId: string): Promise<string | null> {
+    const job = await this.deps.jobs.findById(tenantId, jobId);
+    return job?.sourceKind === "engagement_period" ? job.periodEnd : null;
+  }
+
   async stepsOf(tenantId: string, jobId: string): Promise<readonly JobStep[]> {
     const job = await this.deps.jobs.findById(tenantId, jobId);
     if (!job) throw new JobNotFound(jobId);

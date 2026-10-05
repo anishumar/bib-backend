@@ -670,6 +670,11 @@ export interface JobStepHandover {
    * process has not started yet (its steps are laid out when the period ends).
    */
   openStepLabels(tenantId: string, jobId: string): Promise<readonly string[]>;
+  /**
+   * The last day of the period a period job is FOR (0300), or null for any
+   * other job (S7): a job's task is not finished before its period ends.
+   */
+  periodEndOf(tenantId: string, jobId: string): Promise<string | null>;
 }
 
 /** One task the catch-up may re-decide. See `listCatchUpCandidates`. */

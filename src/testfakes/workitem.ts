@@ -1013,4 +1013,11 @@ export class FakeJobStepHandover implements JobStepHandover {
   openStepLabels(_tenantId: string, jobId: string): Promise<readonly string[]> {
     return Promise.resolve(this.open.get(jobId) ?? []);
   }
+
+  /** A period job's last day by job id; a job not named is no period job. */
+  readonly periodEnds = new Map<string, string>();
+
+  periodEndOf(_tenantId: string, jobId: string): Promise<string | null> {
+    return Promise.resolve(this.periodEnds.get(jobId) ?? null);
+  }
 }

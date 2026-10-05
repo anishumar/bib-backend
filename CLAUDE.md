@@ -2487,6 +2487,16 @@ CRM, HubSpot), Clio an originating attorney per matter, Karbon and TaxDome a cli
   note, a fee-group line through its bill, drafts/cancelled/another firm, the store's defaults and
   wall). Walk: `bdr-walk.mjs q049` (29) on `bdr-rev-fixture.mjs`.
 
+## A period job's task waits for its period to end (S7, 2026-10-05)
+
+S3's limit, closed on Shrestha's word: a period job's steps are laid out when its period ENDS, so
+before then `JOB_STEPS_OPEN` held nothing and a task finished inside its own month filed that
+month's returns with no checklist run. `assertJobStepsSettled` now asks `periodEndOf` first (the
+orchestrator: a job's `period_end` when it is an `engagement_period` job, else null) and refuses
+Done and Approve while the FIRM's day (staff work) is on or before it: `JOB_PERIOD_NOT_ENDED`
+(409, "This job is for a period that ends on …"). Cancelling is never held. Test:
+`tests/workitem/service.test.ts`.
+
 ## A quarterly service on the client's own tax quarter (Q071 d, S7, 2026-10-05)
 
 Ashish: a quarterly service like UAE VAT is billed on "the client's VAT return quarter". A
