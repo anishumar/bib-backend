@@ -755,3 +755,24 @@ describe("Work vs Billing: filings, fee groups and the window", () => {
     expect(meera.rows.map((r) => r.period?.label)).toEqual(["Sep 2026"]);
   });
 });
+
+describe("the expected bill on the client's own quarter (Q071 d)", () => {
+  it("is the sweep's: the client's quarter, by its months, on its last day", () => {
+    const s = subject({
+      frequency: "quarterly",
+      billingFrom: "2026-02-01",
+      firstInvoiceOn: "2026-03-31",
+      yearStartMonth: 1,
+      assignedQuarterMonth: 2,
+      engagements: [
+        { engagementId: A, status: "active", effectiveFrom: "2026-02-01", endsOn: null, pausedOn: null, resumedOn: null },
+      ],
+    });
+    expect(expectedBill(s, "2026-03-15", 1, [], 2)).toEqual({
+      period: { start: "2026-02-01", end: "2026-04-30", label: "Feb-Apr 2026" },
+      billOn: "2026-04-30",
+    });
+    // Without it, the company's quarter, as before.
+    expect(expectedBill(s, "2026-03-15", 1)).toMatchObject({ period: { start: "2026-01-01", end: "2026-03-31" } });
+  });
+});

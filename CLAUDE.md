@@ -2487,6 +2487,22 @@ CRM, HubSpot), Clio an originating attorney per matter, Karbon and TaxDome a cli
   note, a fee-group line through its bill, drafts/cancelled/another firm, the store's defaults and
   wall). Walk: `bdr-walk.mjs q049` (29) on `bdr-rev-fixture.mjs`.
 
+## A quarterly service on the client's own tax quarter (Q071 d, S7, 2026-10-05)
+
+Ashish: a quarterly service like UAE VAT is billed on "the client's VAT return quarter". A
+quarterly subject whose service carries an AUTHORITY-ASSIGNED rule (0359) is cut on the quarter
+the client company has recorded for that rule's tax (`rp.tax = upper(module)`, not cleared):
+`ASSIGNED_QUARTER_MONTH` (`infrastructure/postgres/assigned-quarter.ts`) is one SQL fragment read
+by the sweep's subjects and Work vs Billing's. `assignedQuarterStart` (domain) decides: quarterly
+only, and NEVER over quarters already billed (0338's rule; a quarter recorded after the first bill
+leaves the service on the quarters it was billed on). `billingPeriods` (`usecase/billing/
+periods.ts`) is the one cut for the sweep, bill-early and Work vs Billing; such a period is called
+by its months ("Feb-Apr 2026"), and is billed on its last day, never before the schedule's first
+invoice date (`billingDues({ onClientQuarter })`): the schedule was set on the company's quarters,
+so its first date is no anchor. Tests: `tests/billing/model.test.ts`, `work-vs-billing.test.ts`,
+integration `vat-quarter` (the VAT service on Feb-Apr / May-Jul, bookkeeping of the same client on
+the company's quarters, a cleared quarter no longer governs).
+
 ## The ad-hoc advance: money taken before the letter (Q044-Q048, 0363-0364, 2026-10-05)
 
 Ashish: in 5-10% of cases the advance comes BEFORE the engagement letter. It is raised now as a

@@ -27,6 +27,7 @@ import type {
   WorkBillingFacts,
 } from "../../usecase/billing/ports";
 import { isoInstant } from "./instant";
+import { ASSIGNED_QUARTER_MONTH } from "./assigned-quarter";
 
 /** A ceiling per fact list. Far past a year of any firm's book; a ceiling, not
  *  pagination (see `db/limits.ts`). */
@@ -45,6 +46,7 @@ interface EngagementRow {
   first_invoice_on: string | null;
   issuing_entity_party_id: string;
   year_start_month: number | null;
+  assigned_quarter_month: number | null;
   status: string;
   effective_from: string;
   ends_on: string | null;
@@ -159,6 +161,7 @@ export class PostgresWorkBillingFacts implements WorkBillingFacts {
                coalesce(g.billing_frequency, ll.billing_frequency) AS frequency,
                e.billing_from::text AS billing_from, e.first_invoice_on::text AS first_invoice_on,
                l.issuing_entity_party_id, e.year_start_month,
+               ${db.unsafe(ASSIGNED_QUARTER_MONTH)} AS assigned_quarter_month,
                e.status, e.effective_from::text AS effective_from, e.ends_on::text AS ends_on,
                e.paused_on::text AS paused_on, e.resumed_on::text AS resumed_on,
                l.id AS letter_id, l.ref AS letter_ref
@@ -397,6 +400,7 @@ function assemble(
         billingFrom: earliest(seen.billingFrom, e.billing_from),
         firstInvoiceOn: earliest(seen.firstInvoiceOn, e.first_invoice_on),
         yearStartMonth: seen.yearStartMonth ?? e.year_start_month,
+        assignedQuarterMonth: seen.assignedQuarterMonth ?? e.assigned_quarter_month,
         engagements: [...seen.engagements, engagement],
       });
       continue;
@@ -417,6 +421,7 @@ function assemble(
       firstInvoiceOn: e.first_invoice_on,
       issuingEntityPartyId: e.issuing_entity_party_id,
       yearStartMonth: e.year_start_month,
+      assignedQuarterMonth: e.assigned_quarter_month,
       engagements: [engagement],
       keyManager: km.get(e.party_id) ?? null,
       handInvoices: { count: invoices.length, last: invoices[0] ?? null },

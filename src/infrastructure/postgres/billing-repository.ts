@@ -29,6 +29,7 @@ import type {
   NewBillingDue,
 } from "../../usecase/billing/ports";
 import { keyManagerOn } from "./work-owner";
+import { ASSIGNED_QUARTER_MONTH } from "./assigned-quarter";
 
 interface SubjectRow {
   engagement_id: string;
@@ -40,6 +41,7 @@ interface SubjectRow {
   billing_from: string;
   first_invoice_on: string;
   year_start_month: number | null;
+  assigned_quarter_month: number | null;
   full_amount: string | null;
   status: string;
   effective_from: string;
@@ -64,6 +66,7 @@ export class PostgresBillingDueWriter implements BillingDueWriter {
                e.billing_from::text     AS billing_from,
                e.first_invoice_on::text AS first_invoice_on,
                e.year_start_month,
+               ${db.unsafe(ASSIGNED_QUARTER_MONTH)} AS assigned_quarter_month,
                CASE
                  WHEN g.id IS NOT NULL THEN g.amount::text
                  WHEN ll.unit_amount IS NULL THEN NULL
@@ -134,6 +137,7 @@ export class PostgresBillingDueWriter implements BillingDueWriter {
             billingFrom: r.billing_from < seen.billingFrom ? r.billing_from : seen.billingFrom,
             firstInvoiceOn: r.first_invoice_on < seen.firstInvoiceOn ? r.first_invoice_on : seen.firstInvoiceOn,
             yearStartMonth: seen.yearStartMonth ?? r.year_start_month,
+            assignedQuarterMonth: seen.assignedQuarterMonth ?? r.assigned_quarter_month,
             engagements: [...seen.engagements, engagement],
           });
           continue;
@@ -148,6 +152,7 @@ export class PostgresBillingDueWriter implements BillingDueWriter {
           billingFrom: r.billing_from,
           firstInvoiceOn: r.first_invoice_on,
           yearStartMonth: r.year_start_month,
+          assignedQuarterMonth: r.assigned_quarter_month,
           fullAmount: r.full_amount,
           engagements: [engagement],
           duePeriodStarts: starts.get(key) ?? [],

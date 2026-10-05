@@ -28,9 +28,16 @@ import { SYSTEM_ACTOR } from "../../domain/ledger/model";
 import type { EventSink } from "../ledger/ports";
 import { dayInZone } from "../../domain/scheduler/zone";
 import { yearStartOfCompany, zoneOfCompany } from "../../domain/calendar/model";
-import { monthsPerPeriod, periodsFrom, recurrenceOfService } from "../../domain/scheduler/model";
-import { billLabel, billingDues, endsBeforeGoLive, serviceWindowOf } from "../../domain/billing/model";
+import { monthsPerPeriod, recurrenceOfService } from "../../domain/scheduler/model";
+import {
+  assignedQuarterStart,
+  billLabel,
+  billingDues,
+  endsBeforeGoLive,
+  serviceWindowOf,
+} from "../../domain/billing/model";
 import { billingManagerFor, type ManagerCache } from "./manager";
+import { billingPeriods } from "./periods";
 import type {
   AutoBillingFirms,
   BillingDueWriter,
@@ -121,7 +128,10 @@ export class BillingService {
       const fiscalYearStartMonth =
         subject.yearStartMonth ?? yearStartOfCompany(calendars, subject.issuingEntityPartyId, firmYearStart);
       const today = dayInZone(now, zoneOfCompany(calendars, subject.issuingEntityPartyId, firmZone));
-      if (recurrence !== "monthly" && fiscalYearStartMonth === null) {
+      // A quarterly service on a quarter the tax authority gave the client
+      // (Q071 d, UAE VAT) is cut on that quarter instead.
+      const quarter = assignedQuarterStart(recurrence, subject.assignedQuarterMonth, subject.duePeriodStarts);
+      if (recurrence !== "monthly" && fiscalYearStartMonth === null && quarter === null) {
         awaitingFiscalYear += 1;
         continue;
       }
@@ -137,7 +147,7 @@ export class BillingService {
       // place in the schedule or by its filing; then the ones whose date has
       // come and not billed yet, oldest first, at most MAX a pass.
       const count = Math.max(1, Math.floor(monthsBetween(subject.billingFrom, today) / span) + 1);
-      const periods = periodsFrom(subject.billingFrom, recurrence, count, fiscalYearStartMonth ?? 1);
+      const periods = billingPeriods(subject.billingFrom, recurrence, count, fiscalYearStartMonth, quarter);
       const billed = new Set(subject.duePeriodStarts);
       const dues = billingDues({
         periods,
@@ -146,6 +156,7 @@ export class BillingService {
         today,
         windows: subject.engagements.map(serviceWindowOf),
         filings,
+        onClientQuarter: quarter !== null,
       })
         .filter((d) => !billed.has(d.period.start) && !endsBeforeGoLive(d.period.end, goLive))
         .slice(0, MAX_PERIODS_PER_SUBJECT);

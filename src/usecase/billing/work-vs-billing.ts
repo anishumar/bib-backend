@@ -31,6 +31,7 @@
 // before the client's billing began (billed the old way).
 import {
   addMonthsClamped,
+  assignedQuarterStart,
   billLabel,
   billingDues,
   endsBeforeGoLive,
@@ -42,7 +43,7 @@ import type { CompanyCalendars } from "../../domain/calendar/model";
 import { daysBetween } from "../../domain/obligation/model";
 import { compareAmounts } from "../../domain/money/model";
 import { dayInZone } from "../../domain/scheduler/zone";
-import { monthsPerPeriod, periodsFrom, recurrenceOfService } from "../../domain/scheduler/model";
+import { monthsPerPeriod, recurrenceOfService } from "../../domain/scheduler/model";
 import type { Clock } from "../../platform/clock";
 import type {
   DueStatus,
@@ -57,6 +58,7 @@ import type {
   WbSubject,
   WorkBillingFacts,
 } from "./ports";
+import { billingPeriods } from "./periods";
 
 /** A draft invoice left this long after its bill date is a bill nobody sent:
  *  the same week the desk escalates an unraised bill after. */
@@ -288,6 +290,14 @@ export function assembleRows(facts: WbFacts, ctx: Ctx): WorkBillingRow[] {
         periodEnd: f.periodEnd,
         periodLabel: f.periodLabel,
       }));
+  // The client's assigned quarter when it governs a subject (Q071 d): the
+  // sweep's choice, over the period bills this answer can see.
+  const quarterOf = (s: WbSubject): number | null => {
+    const recurrence = recurrenceOfService(s.frequency);
+    if (recurrence === null) return null;
+    const billed = facts.bills.filter((b) => b.subjectKey === s.key && b.kind === "period").map((b) => b.periodStart);
+    return assignedQuarterStart(recurrence, s.assignedQuarterMonth, billed);
+  };
   const rows = new Map<string, Draft>();
   // The rows of each subject, so a job or a filing finds its own in one look.
   const bySubject = new Map<string, Draft[]>();
@@ -366,7 +376,7 @@ export function assembleRows(facts: WbFacts, ctx: Ctx): WorkBillingRow[] {
         (r) => r.kind === "period" && r.period !== null && r.period.start <= start && start <= r.period.end,
       );
       if (draft === undefined) {
-        const expected = expectedBill(s, start, yearStartOf(s, ctx), filingsOf(s.key));
+        const expected = expectedBill(s, start, yearStartOf(s, ctx), filingsOf(s.key), quarterOf(s));
         const period =
           expected !== null && expected !== "not_served"
             ? expected.period
@@ -438,6 +448,8 @@ export function expectedBill(
   day: string,
   fiscalYearStartMonth: number | null,
   filings: readonly StatutoryFiling[] = [],
+  /** The client's assigned quarter when it governs (Q071 d), else null. */
+  quarterStartMonth: number | null = null,
 ):
   | {
       readonly period: { start: string; end: string; label: string };
@@ -447,11 +459,12 @@ export function expectedBill(
   | null {
   const recurrence = recurrenceOfService(s.frequency);
   if (recurrence === null || s.billingFrom === null || s.firstInvoiceOn === null) return null;
-  if (recurrence !== "monthly" && fiscalYearStartMonth === null) return null;
+  const quarter = recurrence === "quarterly" ? quarterStartMonth : null;
+  if (recurrence !== "monthly" && fiscalYearStartMonth === null && quarter === null) return null;
   if (day < s.billingFrom) return null;
   const span = monthsPerPeriod(recurrence);
   const count = Math.floor(monthsBetween(s.billingFrom, day) / span) + 2;
-  const periods = periodsFrom(s.billingFrom, recurrence, count, fiscalYearStartMonth ?? 1);
+  const periods = billingPeriods(s.billingFrom, recurrence, count, fiscalYearStartMonth, quarter);
   const k = periods.findIndex((p) => p.start <= day && day <= p.end);
   const period = periods[k];
   if (period === undefined) return null;
@@ -462,6 +475,7 @@ export function expectedBill(
     today: "9999-12-31",
     windows: s.engagements.map(serviceWindowOf),
     filings,
+    onClientQuarter: quarter !== null,
   }).find((p) => p.period.start === period.start);
   if (planned === undefined) return "not_served";
   return {

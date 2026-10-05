@@ -293,6 +293,11 @@ export function billingDues(input: {
    *  schedule on the period's last day: a letter that chose the year's start
    *  or its own date keeps it, because a person's choice beats a derived one. */
   readonly filings?: readonly StatutoryFiling[];
+  /** The periods are the client's assigned quarters (Q071 d): each is billed
+   *  on its own last day (Q042, 10x's "the period's last day"), never before
+   *  the schedule's first invoice date. The schedule was set on the company's
+   *  quarters, so its first date is no anchor for the client's. */
+  readonly onClientQuarter?: boolean;
 }): readonly BillingDuePlan[] {
   const dues: BillingDuePlan[] = [];
   // ON EACH PERIOD'S LAST DAY (Q042) when the first bill is the first
@@ -309,15 +314,55 @@ export function billingDues(input: {
     const billOn =
       datedBy !== null
         ? datedBy.dueOn
-        : onLastDay
-          ? period.end
-          : addMonthsClamped(input.firstInvoiceOn, k * input.spanMonths);
+        : input.onClientQuarter === true
+          ? later(period.end, input.firstInvoiceOn)
+          : onLastDay
+            ? period.end
+            : addMonthsClamped(input.firstInvoiceOn, k * input.spanMonths);
     if (billOn > input.today) return;
     const served = Math.max(0, ...input.windows.map((w) => servedDays(period, w)));
     if (served === 0) return;
     dues.push({ period, billOn, servedDays: served, periodDays: dayCount(period.start, period.end), datedBy });
   });
   return dues;
+}
+
+// ── A quarter the tax authority gave the client (Q071 d) ───────────────────
+//
+// 10x (Ashish, 4 Oct 2026): a quarterly service like UAE VAT is billed on
+// "the client's VAT return quarter", not the firm's company's quarter. The
+// FTA gives each client its own (Feb-Apr, Mar-May ...), recorded on the
+// client company per tax (Q073, 0359). A quarterly service whose catalogue
+// entry carries an authority-assigned rule is cut on that quarter.
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/**
+ * The month a quarterly service's quarters start in when the client's
+ * assigned quarter governs it, or null when it does not: not quarterly, no
+ * quarter recorded, or periods already billed on other quarters. Bills
+ * already written are never re-cut (0338's rule for a year change): a
+ * quarter recorded after the first bill leaves the service on the quarters
+ * it was billed on, and the firm sees why on Work vs Billing.
+ */
+export function assignedQuarterStart(
+  frequency: "monthly" | "quarterly" | "half_yearly" | "annual",
+  firstMonth: number | null | undefined,
+  billedPeriodStarts: readonly string[],
+): number | null {
+  if (frequency !== "quarterly" || firstMonth === null || firstMonth === undefined) return null;
+  const aligned = (start: string): boolean => (Number(start.slice(5, 7)) - firstMonth + 12) % 3 === 0;
+  return billedPeriodStarts.every(aligned) ? firstMonth : null;
+}
+
+/** "Feb-Apr 2026", or "Dec 2026-Feb 2027" across a year end: a quarter on no
+ *  financial year has no "Q2" to be called by. */
+export function quarterRangeLabel(period: Pick<BillingPeriod, "start" | "end">): string {
+  const [sy = 0, sm = 1] = period.start.split("-").map(Number);
+  const [ey = 0, em = 1] = period.end.split("-").map(Number);
+  const from = MONTHS[sm - 1] ?? "";
+  const to = MONTHS[em - 1] ?? "";
+  return sy === ey ? `${from}-${to} ${String(ey)}` : `${from} ${String(sy)}-${to} ${String(ey)}`;
 }
 
 /** What a bill is called: the filing's year when a filing dated it (the audit

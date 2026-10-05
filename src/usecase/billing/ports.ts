@@ -43,6 +43,11 @@ export interface BillingSubject {
    *  company's filings, not withdrawn, of the rules its services carry.
    *  Absent or empty for every other frequency. */
   readonly statutoryFilings?: readonly StatutoryFiling[];
+  /** The client company's assigned QUARTER (Q071 d): the month (1-3) its
+   *  quarters start in, for a quarterly subject whose service carries an
+   *  authority-assigned rule (0359) and whose client has that tax's quarter
+   *  recorded. Absent or null otherwise. `assignedQuarterStart` decides. */
+  readonly assignedQuarterMonth?: number | null;
 }
 
 export interface BilledEngagement {
@@ -790,6 +795,8 @@ export interface WbSubject {
   /** The year start pinned on the engagement when it was first cut (0338),
    *  which wins over the company's current one, as in the sweep. */
   readonly yearStartMonth: number | null;
+  /** The client's assigned quarter (Q071 d), as on `BillingSubject`. */
+  readonly assignedQuarterMonth?: number | null;
   readonly engagements: readonly WbEngagement[];
   /** The client's Key Manager in force today, active staff. */
   readonly keyManager: WbPerson | null;

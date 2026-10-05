@@ -11,6 +11,8 @@
 //   - revenue belongs to the manager of the client's SPOC for that service.
 import { describe, expect, it } from "vitest";
 import {
+  assignedQuarterStart,
+  quarterRangeLabel,
   addMonthsClamped,
   billingDues,
   scheduleNotice,
@@ -391,5 +393,38 @@ describe("scheduleNotice: a Bill from before the work started is said, not hidde
   it("says nothing when billing starts on or after the work's first day", () => {
     expect(scheduleNotice("2026-10-01", "2026-10-01")).toBeNull();
     expect(scheduleNotice("2026-11-01", "2026-10-03")).toBeNull();
+  });
+});
+
+describe("the client's assigned quarter (Q071 d)", () => {
+  it("governs a quarterly service only, and never re-cuts quarters already billed", () => {
+    expect(assignedQuarterStart("quarterly", 2, [])).toBe(2);
+    expect(assignedQuarterStart("quarterly", 2, ["2026-02-01", "2026-05-01"])).toBe(2);
+    // Billed on January quarters before the client's quarter was recorded.
+    expect(assignedQuarterStart("quarterly", 2, ["2026-01-01"])).toBeNull();
+    expect(assignedQuarterStart("monthly", 2, [])).toBeNull();
+    expect(assignedQuarterStart("annual", 2, [])).toBeNull();
+    expect(assignedQuarterStart("quarterly", null, [])).toBeNull();
+  });
+
+  it("calls a quarter by its months, across a year end too", () => {
+    expect(quarterRangeLabel({ start: "2026-02-01", end: "2026-04-30" })).toBe("Feb-Apr 2026");
+    expect(quarterRangeLabel({ start: "2026-11-01", end: "2027-01-31" })).toBe("Nov 2026-Jan 2027");
+  });
+
+  it("bills each client quarter on its last day, never before the schedule's first date", () => {
+    const periods = [
+      { start: "2026-02-01", end: "2026-04-30", label: "Feb-Apr 2026" },
+      { start: "2026-05-01", end: "2026-07-31", label: "May-Jul 2026" },
+    ];
+    const window = { from: "2026-02-01", to: null, pausedFrom: null, pausedTo: null };
+    const on = (firstInvoiceOn: string) =>
+      billingDues({ periods, spanMonths: 3, firstInvoiceOn, today: "2026-12-31", windows: [window], onClientQuarter: true }).map(
+        (d) => d.billOn,
+      );
+    // The schedule was set on the company's quarter (31 Mar): no anchor here.
+    expect(on("2026-03-31")).toEqual(["2026-04-30", "2026-07-31"]);
+    // A first date the firm chose later still holds.
+    expect(on("2026-06-15")).toEqual(["2026-06-15", "2026-07-31"]);
   });
 });

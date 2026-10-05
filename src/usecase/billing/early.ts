@@ -20,8 +20,9 @@ import type { Actor } from "../../domain/ledger/model";
 import type { EventSink } from "../ledger/ports";
 import { dayInZone } from "../../domain/scheduler/zone";
 import { yearStartOfCompany, zoneOfCompany } from "../../domain/calendar/model";
-import { monthsPerPeriod, periodsFrom, recurrenceOfService } from "../../domain/scheduler/model";
+import { monthsPerPeriod, recurrenceOfService } from "../../domain/scheduler/model";
 import {
+  assignedQuarterStart,
   billLabel,
   billingDues,
   serviceWindowOf,
@@ -30,6 +31,7 @@ import {
 } from "../../domain/billing/model";
 import { AutoBillingOff, BillEarlyRefused, BillingEngagementNotFound } from "../../domain/billing/errors";
 import { billingManagerFor, type ManagerCache } from "./manager";
+import { billingPeriods } from "./periods";
 import type {
   AutoBillingSetting,
   BillingDueWriter,
@@ -282,7 +284,8 @@ export class EarlyBiller {
       if (recurrence === null) continue;
       const fiscalYear =
         subject.yearStartMonth ?? yearStartOfCompany(calendars, subject.issuingEntityPartyId, firmYearStart);
-      if (recurrence !== "monthly" && fiscalYear === null) continue;
+      const quarter = assignedQuarterStart(recurrence, subject.assignedQuarterMonth, subject.duePeriodStarts);
+      if (recurrence !== "monthly" && fiscalYear === null && quarter === null) continue;
       const companyToday = dayInZone(now, zoneOfCompany(calendars, subject.issuingEntityPartyId, firmZone));
       const ids = new Set(subject.engagements.map((e) => e.engagementId));
       const mine = work.filter((w) => w.engagementIds.some((id) => ids.has(id)));
@@ -290,7 +293,7 @@ export class EarlyBiller {
 
       const span = monthsPerPeriod(recurrence);
       const count = Math.max(1, Math.floor(monthsBetween(subject.billingFrom, companyToday) / span) + 1);
-      const periods = periodsFrom(subject.billingFrom, recurrence, count, fiscalYear ?? 1).filter(
+      const periods = billingPeriods(subject.billingFrom, recurrence, count, fiscalYear, quarter).filter(
         (p) => p.start <= companyToday,
       );
       // Every period's planned bill, as if every date had come: the sweep's
@@ -302,6 +305,7 @@ export class EarlyBiller {
         today: "9999-12-31",
         windows: subject.engagements.map(serviceWindowOf),
         filings: subject.statutoryFilings ?? [],
+        onClientQuarter: quarter !== null,
       });
       const billed = new Set(subject.duePeriodStarts);
       for (const plan of plans) {
