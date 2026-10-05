@@ -29,6 +29,9 @@ describe("the owner credential on the request path", () => {
       appUrl: "postgres://bib_app:x@127.0.0.1:1/never",
       appPassword: "x",
       appPoolSize: 1,
+      statementTimeoutMs: 30_000,
+      idleInTransactionTimeoutMs: 60_000,
+      connectTimeoutSeconds: 10,
     });
     expect(Object.keys(pools).sort()).toEqual(["app", "close"]);
     await pools.close();

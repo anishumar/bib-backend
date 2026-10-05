@@ -39,6 +39,15 @@ const EnvSchema = z.object({
   BIB_DATABASE_URL: z.string().min(1),
   BIB_APP_DATABASE_URL: z.string().min(1),
   BIB_DB_POOL_APP: z.coerce.number().int().positive().default(10),
+  // F-06-2 (audit 2026-09-23): a request may not hold a database connection
+  // forever. `withTenant` keeps one transaction open for its whole callback,
+  // so a statement that never returns, or a transaction left idle, would pin a
+  // pool slot until the instance died; ten of them and the API is down. The
+  // server ends a statement after this long and a transaction left idle after
+  // that one; connecting gives up after the third. Milliseconds, seconds.
+  BIB_DB_STATEMENT_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+  BIB_DB_IDLE_IN_TRANSACTION_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
+  BIB_DB_CONNECT_TIMEOUT_S: z.coerce.number().int().positive().default(10),
   // Serve the OpenAPI spec + Swagger UI. Unset ⇒ on for local dev, off for
   // production-like — the spec lists every endpoint, so a public environment
   // opts in explicitly rather than leaking it by default.
@@ -251,6 +260,12 @@ export interface DbConfig {
   /** Parsed out of appUrl so cmd/migrate can set the role's password. */
   readonly appPassword: string;
   readonly appPoolSize: number;
+  /** F-06-2: the server's statement_timeout and
+   *  idle_in_transaction_session_timeout for every app connection, in ms. */
+  readonly statementTimeoutMs: number;
+  readonly idleInTransactionTimeoutMs: number;
+  /** Seconds before an attempt to connect gives up. */
+  readonly connectTimeoutSeconds: number;
 }
 
 export interface AuthConfig {
@@ -511,6 +526,9 @@ export function load(): Config {
       appUrl: env.BIB_APP_DATABASE_URL,
       appPassword,
       appPoolSize: env.BIB_DB_POOL_APP,
+      statementTimeoutMs: env.BIB_DB_STATEMENT_TIMEOUT_MS,
+      idleInTransactionTimeoutMs: env.BIB_DB_IDLE_IN_TRANSACTION_TIMEOUT_MS,
+      connectTimeoutSeconds: env.BIB_DB_CONNECT_TIMEOUT_S,
     },
   };
 }

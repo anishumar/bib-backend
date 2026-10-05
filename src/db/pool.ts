@@ -30,7 +30,17 @@ export interface Pools {
  * `tests/architecture/owner-pool.test.ts` keeps it that way.
  */
 export function createPools(cfg: DbConfig): Pools {
-  const app = postgres(cfg.appUrl, { max: cfg.appPoolSize });
+  // F-06-2: every connection starts with the server-side limits, so a stuck
+  // statement or an idle transaction is ended by Postgres itself and its pool
+  // slot comes back, whatever the code holding it does.
+  const app = postgres(cfg.appUrl, {
+    max: cfg.appPoolSize,
+    connect_timeout: cfg.connectTimeoutSeconds,
+    connection: {
+      statement_timeout: cfg.statementTimeoutMs,
+      idle_in_transaction_session_timeout: cfg.idleInTransactionTimeoutMs,
+    },
+  });
   return {
     app,
     close: async () => {

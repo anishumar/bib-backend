@@ -426,6 +426,13 @@ punctuation here and there is a concrete correctness argument against it.
 
 ## 7. Connection budget
 
+Every app connection starts with Postgres's own limits (F-06-2, S7): `statement_timeout`
+`BIB_DB_STATEMENT_TIMEOUT_MS` (default 30000) and `idle_in_transaction_session_timeout`
+`BIB_DB_IDLE_IN_TRANSACTION_TIMEOUT_MS` (default 60000), sent as connection parameters, so a stuck
+statement or a transaction left idle is ended by the server and its pool slot returns; connecting
+gives up after `BIB_DB_CONNECT_TIMEOUT_S` (default 10). The migrator's own connection does not
+carry them.
+
 Each API or worker instance opens up to `BIB_DB_POOL_APP` (default 10) app connections and
 nothing else: the owner pool it used to build and never dial is gone (B37, section 3c), and
 `BIB_DB_POOL_OWNER` is no longer read. Budget 12 per instance anyway, for headroom.
