@@ -110,6 +110,7 @@ const drafter = {
   find: (t: string, id: string) => invoiceRepository.find(t, id),
   issueCreditNote: (input: Parameters<InvoiceService["issueCreditNote"]>[0], actor: Actor) =>
     invoicing.issueCreditNote(input, actor),
+  refreshTax: (t: string, id: string) => invoicing.refreshTax(t, id),
 };
 const desk = new BillingDeskService({
   desk: deskAdapter,

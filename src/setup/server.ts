@@ -677,6 +677,7 @@ export function wire(cfg: Config, log: Logger): Wired {
       recordRaised: (invoice, actor) => invoices.recordRaised(invoice, actor),
       find: (tenantId, invoiceId) => invoiceRepository.find(tenantId, invoiceId),
       issueCreditNote: (input, actor) => invoices.issueCreditNote(input, actor),
+      refreshTax: (tenantId, invoiceId) => invoices.refreshTax(tenantId, invoiceId),
     },
     taxDefaults,
     managers: new PostgresBillingManagerFacts(pools.app),

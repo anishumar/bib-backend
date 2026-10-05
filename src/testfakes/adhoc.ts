@@ -5,7 +5,7 @@
 // what bills took and frees the rest.
 import { compareAmounts, subtractAmounts } from "../domain/money/model";
 import { addAmounts, minAmount, sumAmounts } from "../domain/billing/adhoc-advance";
-import type { Invoice } from "../domain/invoice/model";
+import { NO_TAX_SNAPSHOT, type Invoice } from "../domain/invoice/model";
 import type { NewInvoice, NewInvoiceLine } from "../usecase/invoice/ports";
 import type {
   AdhocAdvanceFilters,
@@ -94,6 +94,7 @@ export class FakeAdhocAdvanceStore implements AdhocAdvanceStore {
       irnRegisteredAt: null,
       notes: plan.draft.notes,
       managerUserId: plan.draft.managerUserId,
+      tax: NO_TAX_SNAPSHOT,
       createdAt: "2026-10-05T00:00:00.000Z",
     } as Invoice);
   }

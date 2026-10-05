@@ -761,6 +761,7 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
       recordRaised: (invoice, actor) => invoices.recordRaised(invoice, actor),
       find: (tenantId, invoiceId) => invoiceRepository.find(tenantId, invoiceId),
       issueCreditNote: (input, actor) => invoices.issueCreditNote(input, actor),
+      refreshTax: (tenantId, invoiceId) => invoices.refreshTax(tenantId, invoiceId),
     },
     taxDefaults,
     managers: new PostgresBillingManagerFacts(pools.app),

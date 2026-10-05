@@ -173,6 +173,9 @@ export class AdhocAdvanceService {
     });
 
     await this.deps.invoices.recordRaised(invoice, actor);
+    // The draft's GST split and TDS (Q056), as the billing desk does after it
+    // writes one: an advance is a tax invoice like any other.
+    await this.deps.invoices.refreshTax(input.tenantId, invoice.id);
     await this.deps.events.recordEvent({
       tenantId: input.tenantId,
       verb: "adhoc_advance.raised",
