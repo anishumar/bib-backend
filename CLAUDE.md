@@ -2487,6 +2487,36 @@ CRM, HubSpot), Clio an originating attorney per matter, Karbon and TaxDome a cli
   note, a fee-group line through its bill, drafts/cancelled/another firm, the store's defaults and
   wall). Walk: `bdr-walk.mjs q049` (29) on `bdr-rev-fixture.mjs`.
 
+## Release hardening (S7, 2026-10-05): what changed under the gates
+
+`release/2026-10-final` = `release/2026-10-05` + S1-S5, then hardening only (feature freeze until
+10x finishes UAT). What a later session must know:
+
+- **Smoke paces itself.** `scripts/smoke.sh` sends every request through a `curl()` wrapper that
+  keeps a sliding window in a temp file and waits once `SMOKE_BUDGET` (250) fall inside a minute.
+  The product's limit is not raised. Sections may be added again. Smoke **refuses a remote API**
+  unless `SMOKE_WRITES_TO_A_DEPLOYED_API=yes`; after a deploy run `scripts/postdeploy-check.sh`,
+  which only reads (F-18-6).
+- **Slow tests get room per file**, never globally: the PDF render files, `auth-coverage` and the
+  architecture test set `vi.setConfig({ testTimeout: 30_000 })` with the reason beside it.
+- **Every app connection carries server-side limits** (F-06-2): `statement_timeout`
+  (`BIB_DB_STATEMENT_TIMEOUT_MS`, 30 s), `idle_in_transaction_session_timeout` (60 s), connect
+  10 s. A legitimately long statement must be made shorter, not the limit longer.
+- **An upload's bytes must be its type** (F-14-1): `contentMatchesType` in the filestore domain;
+  `CONTENT_NOT_OF_TYPE`. A test fixture that uploads must carry the signature of the type it
+  claims (`%PDF-`, the PNG header…).
+- **The xlsx reader is bounded** (F-9-2): 50 MB a part, 100 MB a workbook, 1,000 columns,
+  20,000 rows of content.
+- **`uuid` is overridden for gaxios** (`package.json` `overrides`); keep it until
+  `@google-cloud/storage` stops pinning gaxios 6.
+- **`GET/PUT /tenancy/firm-signatory` are deprecated** (spec flag + `Deprecation` header); the
+  demo seed uses the list. Remove them once the tools outside the repo have moved.
+- **A GST tax invoice prints "Original for recipient"** (`RenderableDocument.copyMark`); other
+  documents' bytes do not move.
+- Merge follow-ups that a textual merge missed, now fixed: the ad-hoc advance's invoice gets
+  `refreshTax` like the desk's; Setup counts sixteen lines; the revenue report reads
+  `invoice_manager_share` and follows an advance's allocations to their letters.
+
 ## A period job's task waits for its period to end (S7, 2026-10-05)
 
 S3's limit, closed on Shrestha's word: a period job's steps are laid out when its period ENDS, so
