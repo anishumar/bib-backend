@@ -41,7 +41,7 @@ const byKey = (lines: readonly ReadinessLine[], key: ReadinessLine["key"]): Read
 };
 
 describe("the lines", () => {
-  it("are the thirteen, in the order a firm sets itself up", () => {
+  it("are the fourteen, in the order a firm sets itself up", () => {
     expect(readinessLines(qaFirm()).map((l) => l.key)).toEqual([...READINESS_KEYS]);
     expect(READINESS_KEYS).toEqual([
       "company_details",
@@ -57,6 +57,7 @@ describe("the lines", () => {
       "ladders",
       "account_team",
       "portal_contacts",
+      "return_periods",
     ]);
   });
 
@@ -71,6 +72,7 @@ describe("the lines", () => {
       "processes",
       "account_team",
       "portal_contacts",
+      "return_periods",
     ]);
     expect(lines.filter((l) => l.state === "to_do").map((l) => l.key)).toEqual([
       "company_details",
@@ -247,6 +249,6 @@ describe("the service", () => {
     const r = await service.readiness("00000000-0000-4000-8000-000000000001");
     expect(r.asOf).toBe("2026-09-28");
     expect(facts.askedOn).toEqual(["2026-09-28"]);
-    expect(r.lines).toHaveLength(13);
+    expect(r.lines).toHaveLength(14);
   });
 });

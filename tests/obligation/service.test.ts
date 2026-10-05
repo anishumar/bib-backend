@@ -2498,3 +2498,81 @@ describe("a rule may cut its periods on the CLIENT's year end (Q070 Part B, 0358
     ).rejects.toMatchObject({ code: "INVALID_PERIOD_BASIS" });
   });
 });
+
+describe("a rule on the period the tax authority assigned (Q073, 0359)", () => {
+  const FEB = "00000000-0000-4000-8000-0000000aef01";
+  const MONTHLY = "00000000-0000-4000-8000-0000000aef02";
+  const NONE = "00000000-0000-4000-8000-0000000aef03";
+  let h: H;
+  beforeEach(() => {
+    h = harness();
+  });
+
+  async function uaeVat() {
+    await h.service.seedDefaultStates(FIRM, ACTOR);
+    h.services.keys.set(SERVICE, "uae-vat");
+    const { rule } = await h.service.createRule(
+      {
+        tenantId: FIRM,
+        jurisdiction: "AE",
+        serviceEntryIds: [SERVICE],
+        module: "VAT",
+        name: "VAT return",
+        recurrence: "quarterly",
+        fiscalYearStartMonth: 1,
+        periodBasis: "authority_assigned",
+        dueRule: { kind: "days_after", dueDaysAfter: 28 },
+        leadTimeDays: 0,
+        rulePack: "ae@test",
+      },
+      ACTOR,
+    );
+    const subject = (entityPartyId: string, n: number, returnPeriods: { tax: string; frequency: "monthly" | "quarterly"; firstMonth: number | null }[]) =>
+      h.calendarSource.subjects.push({
+        entityPartyId,
+        engagementId: `00000000-0000-4000-8000-0000000ae${String(n).padStart(3, "0")}`,
+        effectiveFrom: "2026-01-01",
+        jurisdiction: "AE",
+        entityType: null,
+        serviceEntryId: SERVICE,
+        returnPeriods,
+      });
+    subject(FEB, 1, [{ tax: "VAT", frequency: "quarterly", firstMonth: 2 }]);
+    subject(MONTHLY, 2, [{ tax: "VAT", frequency: "monthly", firstMonth: null }]);
+    subject(NONE, 3, []);
+    return rule;
+  }
+  const rows = (e: string) =>
+    h.instances.rows.filter((r) => r.entityPartyId === e).sort((a, b) => a.periodStart.localeCompare(b.periodStart));
+
+  it("cuts each client's own period, labels the stagger, and gives a client with none nothing", async () => {
+    await uaeVat();
+    await h.service.generate(FIRM, { from: "2026-02-01", to: "2026-07-31" }, ACTOR);
+    expect(rows(FEB).map((r) => [r.periodLabel, r.periodEnd, r.statutoryDueOn, r.periodBasis])).toEqual([
+      ["Feb-Apr 2026", "2026-04-30", "2026-05-28", "authority_assigned"],
+      ["May-Jul 2026", "2026-07-31", "2026-08-28", "authority_assigned"],
+    ]);
+    expect(rows(MONTHLY).map((r) => r.periodLabel)).toEqual(["Feb 2026", "Mar 2026", "Apr 2026", "May 2026", "Jun 2026", "Jul 2026"]);
+    expect(rows(NONE)).toEqual([]);
+  });
+
+  it("needs the tax it is matched on", async () => {
+    await h.service.seedDefaultStates(FIRM, ACTOR);
+    await expect(
+      h.service.createRule(
+        {
+          tenantId: FIRM,
+          jurisdiction: "AE",
+          name: "VAT return",
+          recurrence: "quarterly",
+          fiscalYearStartMonth: 1,
+          periodBasis: "authority_assigned",
+          dueRule: { kind: "days_after", dueDaysAfter: 28 },
+          leadTimeDays: 0,
+          rulePack: "ae@test",
+        },
+        ACTOR,
+      ),
+    ).rejects.toMatchObject({ code: "ASSIGNED_PERIOD_NEEDS_TAX" });
+  });
+});

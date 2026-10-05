@@ -937,13 +937,21 @@ export class PostgresCalendarSource implements CalendarSource {
         {
           entity_party_id: string; engagement_id: string; effective_from: string;
           service_entry_id: string; ends_on: string | null; financial_year_end: string | null;
+          return_periods: { tax: string; frequency: string; firstMonth: number | null }[];
         }[]
       >`
         SELECT DISTINCT le.party_id AS entity_party_id, e.id AS engagement_id,
                e.effective_from::text AS effective_from,
                pinned.entry_id AS service_entry_id,
                e.ends_on::text AS ends_on,
-               le.financial_year_end
+               le.financial_year_end,
+               -- What its authorities assigned it (0359), for an
+               -- authority_assigned rule. Ordered so DISTINCT sees one value.
+               (SELECT COALESCE(jsonb_agg(jsonb_build_object(
+                         'tax', rp.tax, 'frequency', rp.frequency, 'firstMonth', rp.first_month)
+                         ORDER BY rp.tax), '[]'::jsonb)
+                  FROM core.legal_entity_return_period rp
+                 WHERE rp.tenant_id = le.tenant_id AND rp.entity_party_id = le.party_id) AS return_periods
         FROM core.legal_entity le
         JOIN crm.engagement e
           ON e.entity_party_id = le.party_id AND e.tenant_id = le.tenant_id
@@ -984,6 +992,11 @@ export class PostgresCalendarSource implements CalendarSource {
         serviceEntryId: r.service_entry_id,
         endsOn: r.ends_on,
         financialYearEnd: r.financial_year_end,
+        returnPeriods: r.return_periods.map((p) => ({
+          tax: p.tax,
+          frequency: p.frequency === "monthly" ? ("monthly" as const) : ("quarterly" as const),
+          firstMonth: p.firstMonth,
+        })),
       }));
     });
   }

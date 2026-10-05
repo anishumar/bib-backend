@@ -224,6 +224,8 @@ The authoritative list is `EVENT_VERBS`; this table is its rendering.
 | `party.unarchived` | party | An archived party was brought back into the pickers and lists. |
 | `firm_entity.edited` | party | One of the firm's OWN companies had its name, entity type or registered address changed (T6.18). Payload: `fields` (which of `name`, `entityType`, `registeredAddress`, and since 0337 `timeZone` and `fiscalYearStart` (its own year and clock) changed) — never the name or the address, which the row keeps. |
 | `legal_entity.registered` | legal_entity | An organization was registered in a jurisdiction. |
+| `legal_entity.return_period_set` | legal_entity | A client company's return period for one tax, as its authority assigned it, was recorded or changed (Q073, 0359). Payload: `tax`, `frequency`, `firstMonth`. |
+| `legal_entity.return_period_removed` | legal_entity | A recorded return period was taken off (0359); filings already generated stay. Payload: `tax`. |
 | `party_identifier.added` | party_identifier | A PAN / GSTIN / handle was attached to a party. Since the audit of 2026-10-03 also when one of the firm's OWN companies has its tax registration, PAN, phone or email set from its company form (`PATCH /firm-entities/{id}`), with `party_identifier.voided` for the one it replaced. Payload `partyId`, `identifierType`; never the value. |
 | `party_relationship.recorded` | party_relationship | An effective-dated relationship was recorded. |
 | `party_relationship.ended` | party_relationship | A relationship was closed with a valid_to date. |

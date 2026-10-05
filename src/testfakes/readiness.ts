@@ -23,6 +23,8 @@ export function emptyFacts(): Omit<ReadinessFacts, "day"> {
     linkedUnconfirmedRules: [],
     services: [],
     requestRouting: "none",
+    assignedPeriodRules: 0,
+    companiesWithoutReturnPeriod: [],
   };
 }
 

@@ -24,6 +24,7 @@ import type {
   ObligationTemplate,
   ResolutionOption,
 } from "../../domain/obligation/model.js";
+import type { ReturnPeriod } from "../../domain/obligation/period-basis";
 
 // ── rules ──────────────────────────────────────────────────────────────────
 
@@ -519,6 +520,9 @@ export interface CalendarSubject {
   /** The entity's own financial year end (`MM-DD`), or null: what a
    *  `client_year_end` rule cuts this subject's periods on (0358). */
   readonly financialYearEnd?: string | null | undefined;
+  /** The entity's return periods as its tax authorities assigned them: what
+   *  an `authority_assigned` rule cuts this subject's periods on (0359). */
+  readonly returnPeriods?: readonly ReturnPeriod[] | undefined;
 }
 
 /**

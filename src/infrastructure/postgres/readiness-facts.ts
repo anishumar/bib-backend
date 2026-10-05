@@ -203,7 +203,46 @@ export class PostgresReadinessFacts implements ReadinessFactSource {
          WHERE en.kind = 'clause'
       `;
 
+      // ── Authority-assigned periods (Q073, 0359) ──────────────────────────
+      // The rules that cut on them, and every client company such a rule
+      // reaches (its country, a live engagement whose service carries the
+      // rule) with no period recorded for the rule's tax.
+      const [assigned] = await db<{ n: number }[]>`
+        SELECT count(*)::int AS n
+          FROM delivery.obligation_template t
+         WHERE t.is_active AND t.status = 'confirmed' AND t.period_basis = 'authority_assigned'
+           AND EXISTS (SELECT 1 FROM delivery.obligation_rule_service l
+                        WHERE l.tenant_id = t.tenant_id AND l.lineage_id = t.lineage_id
+                          AND l.unlinked_at IS NULL)
+      `;
+      const unassigned = await db<{ party_id: string; name: string; taxes: string[] }[]>`
+        SELECT le.party_id, p.display_name AS name,
+               array_agg(DISTINCT upper(btrim(t.module)) ORDER BY upper(btrim(t.module))) AS taxes
+          FROM delivery.obligation_template t
+          JOIN delivery.obligation_rule_service l
+            ON l.tenant_id = t.tenant_id AND l.lineage_id = t.lineage_id AND l.unlinked_at IS NULL
+          JOIN config.version pinned
+            ON pinned.entry_id = l.service_entry_id AND pinned.tenant_id = l.tenant_id
+          JOIN crm.engagement_letter_line ln
+            ON ln.service_version_id = pinned.id AND ln.tenant_id = pinned.tenant_id
+          JOIN crm.engagement e
+            ON e.engagement_letter_line_id = ln.id AND e.tenant_id = ln.tenant_id AND e.status = 'active'
+          JOIN core.legal_entity le
+            ON le.party_id = e.entity_party_id AND le.tenant_id = e.tenant_id
+           AND le.jurisdiction = t.jurisdiction
+          JOIN core.party p
+            ON p.id = le.party_id AND p.tenant_id = le.tenant_id AND p.archived_at IS NULL
+         WHERE t.is_active AND t.status = 'confirmed' AND t.period_basis = 'authority_assigned'
+           AND NOT EXISTS (SELECT 1 FROM core.legal_entity_return_period rp
+                            WHERE rp.tenant_id = le.tenant_id AND rp.entity_party_id = le.party_id
+                              AND rp.tax = upper(btrim(t.module)))
+         GROUP BY le.party_id, p.display_name
+         ORDER BY p.display_name
+      `;
+
       return {
+        assignedPeriodRules: assigned?.n ?? 0,
+        companiesWithoutReturnPeriod: unassigned.map((c) => ({ partyId: c.party_id, name: c.name, taxes: c.taxes })),
         companies: companies.map((c) => ({
           partyId: c.party_id,
           name: c.name,

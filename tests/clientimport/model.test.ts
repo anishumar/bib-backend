@@ -68,6 +68,8 @@ function client(over: Partial<ClientRow> = {}): ClientRow {
     entityType: "private_limited",
     incorporatedOn: null,
     financialYearEnd: "03-31",
+    returnPeriodCell: null,
+    returnPeriods: [],
     registeredAddress: null,
     identifiers: [{ type: "pan", value: "AAACC1234F" }],
     keyManagerEmail: "anita@firm.test",

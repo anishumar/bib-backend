@@ -957,6 +957,7 @@ export class FakeCalendarSource implements CalendarSource {
           serviceEntryId: s.serviceEntryId,
           endsOn: s.endsOn ?? null,
           financialYearEnd: s.financialYearEnd ?? null,
+          returnPeriods: s.returnPeriods ?? [],
         })),
     );
   }

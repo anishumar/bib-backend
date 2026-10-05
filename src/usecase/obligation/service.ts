@@ -41,7 +41,6 @@ import {
   type DueRuleException,
   type IsoDate,
   type ObligationState,
-  type InstancePeriodBasis,
   type ObligationTemplate,
 } from "../../domain/obligation/model.js";
 import {
@@ -52,6 +51,7 @@ import {
   IncompleteDueRule,
   InvalidFiscalYearStart,
   InvalidPeriodBasis,
+  AssignedPeriodNeedsTax,
   InvalidJurisdiction,
   InvalidLeadTime,
   InvalidPeriodEndMonth,
@@ -117,7 +117,7 @@ import type {
 } from "./ports.js";
 import type { FirmTimeZone } from "./ports.js";
 import { dayInZone } from "../../domain/scheduler/zone.js";
-import { periodYearFor } from "../../domain/obligation/period-basis";
+import { assignedQuarterLabel, periodCutFor, type PeriodCut } from "../../domain/obligation/period-basis";
 import { isCountryCode } from "../../domain/country";
 
 const SYSTEM_ACTOR: Actor = { type: "system", id: null };
@@ -763,6 +763,12 @@ export class ObligationService {
     }
     const periodBasis = input.periodBasis ?? "rule_calendar";
     if (!isPeriodBasis(periodBasis)) throw new InvalidPeriodBasis(periodBasis);
+    if (
+      periodBasis === "authority_assigned" &&
+      ((input.module ?? "").trim() === "" || input.recurrence === "event")
+    ) {
+      throw new AssignedPeriodNeedsTax();
+    }
     const rulePack = input.rulePack.trim();
     if (rulePack.length === 0) throw new InvalidRulePack(input.rulePack);
 
@@ -1158,6 +1164,10 @@ export class ObligationService {
     if (!isRuleStatus(String(status))) throw new InvalidRuleStatus(String(status));
     const periodBasis = edit.periodBasis ?? current.periodBasis;
     if (!isPeriodBasis(periodBasis)) throw new InvalidPeriodBasis(periodBasis);
+    const moduleAfter = edit.module === undefined ? current.module : trimToNull(edit.module);
+    if (periodBasis === "authority_assigned" && (moduleAfter === null || recurrence === "event")) {
+      throw new AssignedPeriodNeedsTax();
+    }
 
     // ── THE PERIOD SHAPE IS PART OF THE IDENTITY ONCE ROWS EXIST ───────────
     //
@@ -1831,31 +1841,39 @@ export class ObligationService {
       }
       for (const s of subjects) serviceOf.set(s.engagementId, s.serviceEntryId);
 
-      // WHOSE YEAR THE PERIODS ARE CUT ON (0358). A rule on its own year cuts
-      // one set for everybody; a rule on the client's year end cuts one set
-      // per year start its subjects hold, and a subject with no year end
-      // recorded takes the rule's own month, marked `rule_fallback`. Subjects
-      // keep their order inside each group, so the first-subject-per-entity
-      // promise below holds: one entity has one year end, so it is in one
-      // group.
-      const byYear = new Map<number, { basis: InstancePeriodBasis; subjects: CalendarSubject[] }>();
+      // HOW THE PERIODS ARE CUT (0358, 0359). A rule on its own year cuts one
+      // set for everybody; a rule on the client's year end cuts one set per
+      // year start its subjects hold (a subject with no year end recorded
+      // takes the rule's own month, marked `rule_fallback`); a rule on an
+      // authority-assigned period cuts each client's own (monthly, or a
+      // quarter stagger) and skips a client with none: no filing is guessed,
+      // and Setup lists it. Subjects keep their order inside each group, so
+      // the first-subject-per-entity promise below holds: one entity has one
+      // cut per rule, so it is in one group.
+      const byCut = new Map<string, { cut: PeriodCut; subjects: CalendarSubject[] }>();
       for (const s of subjects) {
-        const y = periodYearFor(template, s.financialYearEnd ?? null);
-        // The month, and whether it is a fallback: a client on the rule's own
-        // month by its OWN year end is not a client with none recorded.
-        const key = y.startMonth * 10 + (y.basis === "rule_fallback" ? 1 : 0);
-        const group = byYear.get(key) ?? { basis: y.basis, subjects: [] };
+        const cut = periodCutFor(template, {
+          financialYearEnd: s.financialYearEnd ?? null,
+          returnPeriods: s.returnPeriods ?? [],
+        });
+        if (cut === null) continue;
+        const key = `${cut.recurrence}|${String(cut.startMonth)}|${cut.basis}`;
+        const group = byCut.get(key) ?? { cut, subjects: [] };
         group.subjects.push(s);
-        byYear.set(key, group);
+        byCut.set(key, group);
       }
 
-      for (const [yearKey, group] of byYear) {
+      for (const group of byCut.values()) {
         if (full) break;
         const periods = periodsBetween(
-          template.recurrence,
-          Math.floor(yearKey / 10),
+          group.cut.recurrence,
+          group.cut.startMonth,
           window.from,
           window.to,
+        ).map((p) =>
+          group.cut.basis === "authority_assigned" && group.cut.recurrence === "quarterly"
+            ? { ...p, label: assignedQuarterLabel(p) }
+            : p,
         );
 
         for (const period of periods) {
@@ -1914,7 +1932,7 @@ export class ObligationService {
               statutoryDueOn: schedule.statutoryDueOn,
               internalTargetOn: schedule.internalTargetOn,
               stateId: start.id,
-              periodBasis: group.basis,
+              periodBasis: group.cut.basis,
             });
           }
         }

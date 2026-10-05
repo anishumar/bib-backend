@@ -55,6 +55,12 @@ import type {
 } from "./ports";
 import { countryCodeProblem, isCountryCode } from "../../domain/country";
 import { isTimeZone } from "../../domain/tenancy/model";
+import {
+  isReturnFrequency,
+  normalizeTax,
+  returnPeriodProblem,
+  type ReturnPeriod,
+} from "../../domain/obligation/period-basis";
 
 export interface Deps {
   readonly parties: PartyRepository;
@@ -148,6 +154,8 @@ export interface PartyProfile {
   readonly organization: Organization | null;
   readonly person: Person | null;
   readonly legalEntities: readonly LegalEntity[];
+  /** Its return periods as its tax authorities assigned them (0359). */
+  readonly returnPeriods: readonly ReturnPeriod[];
   readonly identifiers: readonly PartyIdentifier[];
   /** Joined to the party at the other end — see RelationshipRecord. */
   readonly relationships: readonly RelationshipRecord[];
@@ -496,7 +504,7 @@ export class PartyService {
     // The subtype is fetched by KIND rather than both-and-discard: a person has
     // no organization row and asking for one is a query that can only ever
     // return nothing.
-    const [organization, person, legalEntities, identifiers, relationships] = await Promise.all([
+    const [organization, person, legalEntities, identifiers, relationships, returnPeriods] = await Promise.all([
       party.kind === "organization"
         ? this.deps.parties.findOrganization(tenantId, partyId)
         : Promise.resolve(null),
@@ -508,6 +516,9 @@ export class PartyService {
         : Promise.resolve([]),
       this.deps.identifiers.listForParty(tenantId, partyId),
       this.deps.relationships.listForParty(tenantId, partyId),
+      party.kind === "organization"
+        ? this.deps.parties.listReturnPeriods(tenantId, partyId)
+        : Promise.resolve([]),
     ]);
 
     return {
@@ -515,6 +526,7 @@ export class PartyService {
       organization,
       person,
       legalEntities,
+      returnPeriods,
       identifiers,
       relationships: asOf
         ? relationships.filter((r) => isInForceOn(r.relationship, asOf))
@@ -702,6 +714,71 @@ export class PartyService {
       payload: { fields: ["timeZone"], jurisdiction: updated.jurisdiction, entityType: updated.entityType },
     });
     return updated;
+  }
+
+  /**
+   * A client company's return period for one tax, as its tax authority
+   * assigned it (Q073, 0359): monthly, or quarterly from its first month (the
+   * UAE VAT stagger). An `authority_assigned` filing rule for that tax cuts
+   * this company's periods on it; with none recorded it gets no filing and
+   * Setup lists it. Changing it keeps the filings already generated.
+   */
+  async setReturnPeriod(
+    input: {
+      readonly tenantId: string;
+      readonly partyId: string;
+      readonly tax: string;
+      readonly frequency: string;
+      readonly firstMonth?: number | null | undefined;
+    },
+    actor: Actor,
+  ): Promise<readonly ReturnPeriod[]> {
+    const [entity] = await this.deps.parties.listLegalEntities(input.tenantId, input.partyId);
+    if (!entity) throw new NotALegalEntity();
+    if (!isReturnFrequency(input.frequency)) {
+      throw new InvalidPartyDetails("A return period is monthly or quarterly.");
+    }
+    const period: ReturnPeriod = {
+      tax: normalizeTax(input.tax),
+      frequency: input.frequency,
+      firstMonth: input.frequency === "monthly" ? null : (input.firstMonth ?? null),
+    };
+    const problem = returnPeriodProblem(period);
+    if (problem !== null) throw new InvalidPartyDetails(problem);
+    const current = (await this.deps.parties.listReturnPeriods(input.tenantId, input.partyId)).find(
+      (p) => p.tax === period.tax,
+    );
+    if (current !== undefined && current.frequency === period.frequency && current.firstMonth === period.firstMonth) {
+      throw new NothingToChange();
+    }
+    await this.deps.parties.setReturnPeriod(input.tenantId, input.partyId, period);
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "legal_entity.return_period_set",
+      objectId: input.partyId,
+      actor,
+      payload: { tax: period.tax, frequency: period.frequency, firstMonth: period.firstMonth },
+    });
+    return this.deps.parties.listReturnPeriods(input.tenantId, input.partyId);
+  }
+
+  /** Take one tax's assigned period off (0359). Filings already made stay. */
+  async removeReturnPeriod(
+    input: { readonly tenantId: string; readonly partyId: string; readonly tax: string },
+    actor: Actor,
+  ): Promise<readonly ReturnPeriod[]> {
+    const tax = normalizeTax(input.tax);
+    if (!(await this.deps.parties.removeReturnPeriod(input.tenantId, input.partyId, tax))) {
+      throw new NothingToChange();
+    }
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "legal_entity.return_period_removed",
+      objectId: input.partyId,
+      actor,
+      payload: { tax },
+    });
+    return this.deps.parties.listReturnPeriods(input.tenantId, input.partyId);
   }
 
   /** An identifier stopped being in force on `validTo` (a GSTIN cancelled). */

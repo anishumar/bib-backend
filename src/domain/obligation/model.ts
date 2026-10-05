@@ -102,9 +102,11 @@ export function isDueRuleKind(v: string): v is DueRuleKind {
  * financial year end (`client_year_end`), which is how UAE corporate tax and
  * Singapore's annual filings run. See `period-basis.ts`.
  */
-export type PeriodBasis = "rule_calendar" | "client_year_end";
+export type PeriodBasis = "rule_calendar" | "client_year_end" | "authority_assigned";
 
-export const PERIOD_BASES: readonly PeriodBasis[] = ["rule_calendar", "client_year_end"];
+/** `authority_assigned` (Q073, 0359): the client's own return period for the
+ *  rule's module, as the tax authority assigned it (the UAE VAT stagger). */
+export const PERIOD_BASES: readonly PeriodBasis[] = ["rule_calendar", "client_year_end", "authority_assigned"];
 
 export function isPeriodBasis(v: string): v is PeriodBasis {
   return (PERIOD_BASES as readonly string[]).includes(v);

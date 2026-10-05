@@ -33,13 +33,16 @@ export interface ObligationDeps {
 
 // ── Shared vocabulary ───────────────────────────────────────────────────────
 
-const PeriodBasisSchema = z.enum(["rule_calendar", "client_year_end"]).openapi("ObligationPeriodBasis", {
+const PeriodBasisSchema = z.enum(["rule_calendar", "client_year_end", "authority_assigned"]).openapi("ObligationPeriodBasis", {
   description:
     "Whose year a quarter, half-year or year is cut on (0358): the rule's own " +
     "(fiscalYearStartMonth, every rule before this) or the CLIENT's financial year end, which " +
     "is how UAE corporate tax and Singapore's annual filings run. A client with no year end " +
-    "recorded falls back to the rule's month, and the calendar says so. Part of the period " +
-    "shape: editable only while the rule has produced nothing. Monthly is a month either way.",
+    "recorded falls back to the rule's month, and the calendar says so. authority_assigned " +
+    "(0359): each client's return period for the rule's module as its tax authority assigned " +
+    "it (monthly, or a quarter stagger, e.g. UAE VAT); a client with none gets no filing and " +
+    "is listed on Setup. Needs a module. Part of the period shape: editable only while the " +
+    "rule has produced nothing. Monthly is a month either way on the first two.",
 });
 
 const Recurrence = z
@@ -411,7 +414,7 @@ const CalendarRowSchema = z
         "Today in that zone. The statutory date has passed when it is before this; the " +
         "internal target stays on the firm's day.",
     }),
-    periodBasis: z.enum(["rule_calendar", "client_year_end", "rule_fallback"]).openapi({
+    periodBasis: z.enum(["rule_calendar", "client_year_end", "rule_fallback", "authority_assigned"]).openapi({
       description:
         "What this row's period followed (0358). rule_fallback: the rule follows the client's " +
         "year end and none was recorded, so the rule's own month (ruleYearStartMonth) was used.",

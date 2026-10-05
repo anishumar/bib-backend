@@ -49,6 +49,8 @@ export const READINESS_KEYS = [
   "ladders",
   "account_team",
   "portal_contacts",
+  // LAST, so a line added beside it in another branch merges cleanly.
+  "return_periods",
 ] as const;
 
 export type ReadinessKey = (typeof READINESS_KEYS)[number];
@@ -139,6 +141,15 @@ export interface ReadinessFacts {
   }[];
   /** `tenancy.tenant.client_request_routing`: 'none' is the unset default. */
   readonly requestRouting: string;
+  /** Confirmed, linked rules on an authority-assigned period (0359). */
+  readonly assignedPeriodRules: number;
+  /** Client companies such a rule reaches with no period recorded for its
+   *  tax: they get no filing for it until one is (Q073). */
+  readonly companiesWithoutReturnPeriod: readonly {
+    readonly partyId: string;
+    readonly name: string;
+    readonly taxes: readonly string[];
+  }[];
 }
 
 function line(key: ReadinessKey, gaps: readonly ReadinessGap[], context: readonly string[] = []): ReadinessLine {
@@ -270,6 +281,22 @@ export function readinessLines(f: ReadinessFacts): readonly ReadinessLine[] {
             f.activeClients
               .filter((c) => !c.hasPortalLogin)
               .map((c) => ({ id: c.partyId, ref: null, name: c.name, missing: ["portal_login"] })),
+          ),
+
+    // A filing on the period the tax authority assigned (the UAE VAT stagger)
+    // is generated only for a company whose period is recorded; the rest get
+    // nothing, never a guess, and are listed here by tax (Q073, 0359).
+    return_periods:
+      f.assignedPeriodRules === 0
+        ? nothingToCheck("return_periods")
+        : line(
+            "return_periods",
+            f.companiesWithoutReturnPeriod.map((c) => ({
+              id: c.partyId,
+              ref: null,
+              name: c.name,
+              missing: c.taxes.map((t) => `return_period:${t}`),
+            })),
           ),
   };
   return READINESS_KEYS.map((k) => lines[k]);

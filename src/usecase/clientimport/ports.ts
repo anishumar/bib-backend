@@ -270,6 +270,18 @@ export interface PartyWriter {
     },
     actor: Actor,
   ): Promise<unknown>;
+  /** A company's return period for one tax, as its authority assigned it
+   *  (Q073, 0359). */
+  setReturnPeriod(
+    input: {
+      readonly tenantId: string;
+      readonly partyId: string;
+      readonly tax: string;
+      readonly frequency: string;
+      readonly firstMonth: number | null;
+    },
+    actor: Actor,
+  ): Promise<unknown>;
   addIdentifier(
     input: {
       readonly tenantId: string;

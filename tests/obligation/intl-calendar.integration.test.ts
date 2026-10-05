@@ -19,6 +19,8 @@ import {
   PostgresObligationInstanceRepository,
 } from "../../src/infrastructure/postgres/obligation-instance-repository";
 import type { NewObligationInstance } from "../../src/usecase/obligation/ports";
+import { PostgresReadinessFacts } from "../../src/infrastructure/postgres/readiness-facts";
+import { PostgresPartyRepository } from "../../src/infrastructure/postgres/party-repository";
 
 const cfg = load();
 const owner = postgres(cfg.db.ownerUrl, { max: 2 });
@@ -255,5 +257,102 @@ describe("B2: periods on the client's year end", () => {
         VALUES (${tenant}, 'SG', 'Bad', 'annual', 4, 'day_of_month', 1, 28, ${`bad-${stamp}`}, 'confirmed', 'the_moon')
       `,
     ).rejects.toThrow(/obligation_template_period_basis_check/);
+  });
+});
+
+describe("Q073: periods the tax authority assigned (0359)", () => {
+  it("hands each subject its assigned periods, and Setup lists a company with none", async () => {
+    const feb = await company("Desert Rose Trading LLC", "AE");
+    const none = await company("Palm Logistics FZE", "AE");
+    const parties = new PostgresPartyRepository(app);
+    await parties.setReturnPeriod(tenant, feb, { tax: "VAT", frequency: "quarterly", firstMonth: 2 });
+    expect(await parties.listReturnPeriods(tenant, feb)).toEqual([{ tax: "VAT", frequency: "quarterly", firstMonth: 2 }]);
+
+    const [entry] = await owner<{ id: string }[]>`
+      INSERT INTO config.entry (tenant_id, kind, key) VALUES (${tenant}, 'service', ${`uae-vat-${stamp}`}) RETURNING id
+    `;
+    if (!entry) throw new Error("entry seed failed");
+    const [version] = await owner<{ id: string }[]>`
+      INSERT INTO config.version (tenant_id, entry_id, version, body, status, published_at)
+      VALUES (${tenant}, ${entry.id}, 1, ${owner.json({ name: "UAE VAT" })}, 'published', now()) RETURNING id
+    `;
+    if (!version) throw new Error("version seed failed");
+    const [r] = await owner<{ id: string }[]>`
+      INSERT INTO delivery.obligation_template
+        (tenant_id, jurisdiction, module, name, recurrence, fiscal_year_start_month,
+         due_rule, due_days_after, rule_pack, status, period_basis)
+      VALUES (${tenant}, 'AE', 'VAT', 'VAT return', 'quarterly', 1, 'days_after', 28,
+              ${`vat-${stamp}`}, 'confirmed', 'authority_assigned')
+      RETURNING id
+    `;
+    if (!r) throw new Error("rule seed failed");
+    await owner`
+      INSERT INTO delivery.obligation_rule_service (tenant_id, lineage_id, service_entry_id, linked_by_user_id)
+      VALUES (${tenant}, ${r.id}, ${entry.id}, ${userId})
+    `;
+    let n = 10;
+    for (const entity of [feb, none]) {
+      n += 1;
+      const [letter] = await owner<{ id: string }[]>`
+        INSERT INTO crm.engagement_letter
+          (tenant_id, party_id, status, currency, fx_rate, fx_rate_date, ref, issuing_entity_party_id, jurisdiction, title)
+        VALUES (${tenant}, ${client}, 'draft', 'INR', 1, CURRENT_DATE, ${`EL-2026-${String(n).padStart(4, "0")}`},
+                ${entity}, 'AE', 'VAT')
+        RETURNING id
+      `;
+      if (!letter) throw new Error("letter seed failed");
+      const [line] = await owner<{ id: string }[]>`
+        INSERT INTO crm.engagement_letter_line
+          (tenant_id, engagement_letter_id, position, service_version_id, quantity, unit_amount, currency,
+           discount_percent, billing_frequency, entity_party_id, description, pricing_note)
+        VALUES (${tenant}, ${letter.id}, 1, ${version.id}, 1, 5000, 'INR', 0, 'quarterly', ${entity}, 'VAT', 'Priced')
+        RETURNING id
+      `;
+      if (!line) throw new Error("line seed failed");
+      await owner`
+        UPDATE crm.engagement_letter
+           SET status = 'signed', sent_at = now(), signed_at = now(), signed_by_name = 'A Director',
+               signature_method = 'attested', signed_content_hash = ${"a".repeat(64)}
+         WHERE id = ${letter.id}
+      `;
+      await owner`
+        INSERT INTO crm.engagement
+          (tenant_id, party_id, entity_party_id, engagement_letter_id, engagement_letter_line_id,
+           effective_from, status, activated_at)
+        VALUES (${tenant}, ${client}, ${entity}, ${letter.id}, ${line.id}, '2026-01-01', 'active', now())
+      `;
+    }
+
+    const subjects = await calendarSource.subjectsFor(tenant, { lineageId: r.id, jurisdiction: "AE", entityType: null });
+    const by = new Map(subjects.map((s) => [s.entityPartyId, s.returnPeriods]));
+    expect(by.get(feb)).toEqual([{ tax: "VAT", frequency: "quarterly", firstMonth: 2 }]);
+    expect(by.get(none)).toEqual([]);
+
+    const facts = await new PostgresReadinessFacts(app).factsFor(tenant, "2026-10-05");
+    expect(facts.assignedPeriodRules).toBe(1);
+    expect(facts.companiesWithoutReturnPeriod).toEqual([{ partyId: none, name: "Palm Logistics FZE", taxes: ["VAT"] }]);
+
+    expect(await parties.removeReturnPeriod(tenant, feb, "VAT")).toBe(true);
+    expect(await parties.removeReturnPeriod(tenant, feb, "VAT")).toBe(false);
+  });
+
+  it("holds the shape: quarter months only on a quarterly period, a module on an assigned rule", async () => {
+    const e = await company("Oasis Foods LLC", "AE");
+    await expect(
+      owner`INSERT INTO core.legal_entity_return_period (tenant_id, entity_party_id, tax, frequency, first_month)
+            VALUES (${tenant}, ${e}, 'VAT', 'monthly', 2)`,
+    ).rejects.toThrow(/legal_entity_return_period_first_month/);
+    await expect(
+      owner`INSERT INTO core.legal_entity_return_period (tenant_id, entity_party_id, tax, frequency, first_month)
+            VALUES (${tenant}, ${e}, 'VAT', 'quarterly', 4)`,
+    ).rejects.toThrow(/legal_entity_return_period_first_month/);
+    await expect(
+      owner`
+        INSERT INTO delivery.obligation_template
+          (tenant_id, jurisdiction, name, recurrence, fiscal_year_start_month, due_rule, due_days_after,
+           rule_pack, status, period_basis)
+        VALUES (${tenant}, 'AE', 'No module', 'quarterly', 1, 'days_after', 28, ${`nm-${stamp}`}, 'confirmed', 'authority_assigned')
+      `,
+    ).rejects.toThrow(/obligation_template_assigned_needs_module/);
   });
 });

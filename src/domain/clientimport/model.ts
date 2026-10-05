@@ -24,6 +24,7 @@
 // question for the firm, not something to resolve silently in favour of the
 // newer file — somebody may have corrected a name here on purpose.
 
+import { isTaxCode, normalizeTax, type ReturnPeriod } from "../obligation/period-basis";
 import { isBillingFrequency, type BillingFrequency } from "../document/model";
 import { isAmount, isCurrencyCode, normalizeCurrency } from "../money/model";
 import {
@@ -161,6 +162,7 @@ export const CLIENT_COLUMNS: readonly SheetColumn[] = [
   { header: "Entity Type", required: true, hint: "private_limited, llp, partnership, pte_ltd, fzco, c_corp", about: "private_limited, llp, pte_ltd, fzco, c_corp… the firm's own word. Required with Country." },
   { header: "Incorporated On", required: false, hint: "YYYY-MM-DD", about: "2019-06-11 or 11-Jun-2019. Never 11/06/2019." },
   { header: "Financial Year End", required: false, hint: "MM-DD, e.g. 03-31", about: "MM-DD. Every statutory deadline is computed from it." },
+  { header: "Tax Return Period", required: false, hint: "e.g. VAT quarterly Feb, or VAT monthly", about: "The return period a tax authority assigned the company (UAE VAT). Quarterly names the month its quarters start in: Jan, Feb or Mar. Several taxes: separate with ;." },
   { header: "Registered Address", required: false, hint: "one cell, as on the certificate", about: "" },
   ...IDENTIFIER_COLUMNS.map((c) => ({ header: c.header, required: false, hint: c.hint, about: "" })),
   { header: "Key Manager", required: false, hint: "login email of the colleague who owns this client", about: "The email of the staff member who owns the relationship." },
@@ -250,6 +252,9 @@ export interface ClientRow {
   readonly entityType: string | null;
   readonly incorporatedOn: string | null;
   readonly financialYearEnd: string | null;
+  /** The cell as typed, and what it reads as (Q073, 0359). */
+  readonly returnPeriodCell: string | null;
+  readonly returnPeriods: readonly ReturnPeriod[];
   readonly registeredAddress: string | null;
   readonly identifiers: readonly ImportIdentifier[];
   readonly keyManagerEmail: string | null;
@@ -406,6 +411,8 @@ export function clientRowsOf(rows: readonly SheetRow[]): readonly ClientRow[] {
       entityType: blankToNull(r.cell("Entity Type")),
       incorporatedOn: blankToNull(r.cell("Incorporated On")),
       financialYearEnd: monthDayOf(blankToNull(r.cell("Financial Year End"))),
+      returnPeriodCell: blankToNull(r.cell("Tax Return Period")),
+      returnPeriods: readReturnPeriods(r.cell("Tax Return Period")).periods,
       registeredAddress: blankToNull(r.cell("Registered Address")),
       identifiers: IDENTIFIER_COLUMNS.flatMap((c) => {
         const value = r.cell(c.header);
@@ -496,6 +503,55 @@ export function parsePortalInvite(raw: string | null): boolean | null {
   if (w === "TRUE") return true;
   if (w === "FALSE") return false;
   return null;
+}
+
+const QUARTER_STARTS: Readonly<Record<string, number>> = {
+  jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3,
+};
+
+/**
+ * A "Tax Return Period" cell (Q073): "VAT quarterly Feb", "VAT monthly",
+ * several separated by ";". Quarterly names the month its quarters START in
+ * (Jan, Feb or Mar: the three UAE staggers); a later month of the same
+ * stagger ("May") is read as its first ("Feb"), since the stagger is the same.
+ * Never a guess: anything else is a problem in words.
+ */
+export function readReturnPeriods(cell: string): {
+  readonly periods: readonly ReturnPeriod[];
+  readonly problems: readonly string[];
+} {
+  const periods: ReturnPeriod[] = [];
+  const problems: string[] = [];
+  for (const part of cell.split(";").map((p) => p.trim()).filter((p) => p !== "")) {
+    const words = part.split(/\s+/);
+    const tax = normalizeTax(words[0] ?? "");
+    const frequency = (words[1] ?? "").toLowerCase();
+    const say = `Tax Return Period "${part}"`;
+    if (!isTaxCode(tax)) {
+      problems.push(`${say} should start with the tax, e.g. VAT quarterly Feb`);
+      continue;
+    }
+    if (frequency === "monthly" && words.length === 2) {
+      periods.push({ tax, frequency: "monthly", firstMonth: null });
+      continue;
+    }
+    if (frequency === "quarterly" && words.length === 3) {
+      const month = (words[2] ?? "").toLowerCase().replace(/[^a-z]/g, "");
+      const index = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+        .indexOf(month.slice(0, 3));
+      const first = QUARTER_STARTS[month] ?? (index >= 0 ? (index % 3) + 1 : undefined);
+      if (first === undefined) {
+        problems.push(`${say}: name the month its quarters start in, Jan, Feb or Mar`);
+        continue;
+      }
+      periods.push({ tax, frequency: "quarterly", firstMonth: first });
+      continue;
+    }
+    problems.push(`${say} is not "<tax> monthly" or "<tax> quarterly <month>", e.g. VAT quarterly Feb`);
+  }
+  const taxes = periods.map((p) => p.tax);
+  if (new Set(taxes).size !== taxes.length) problems.push("Tax Return Period names the same tax twice");
+  return { periods, problems };
 }
 
 /**
@@ -893,6 +949,10 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
     }
     if (row.financialYearEnd !== null && !isMonthDay(row.financialYearEnd)) {
       bad(`Financial Year End "${row.financialYearEnd}" is not MM-DD`);
+    }
+    if (row.returnPeriodCell !== null) {
+      for (const problem of readReturnPeriods(row.returnPeriodCell).problems) bad(problem);
+      if (!registered) bad("a Tax Return Period needs the company's Country and Entity Type");
     }
     if (row.clientSince !== null && parseSheetDate(row.clientSince) === null) {
       bad(`Client Since "${row.clientSince}" is not a date this can read. Use 2026-08-23 or 13-Feb-1995`);

@@ -4,6 +4,7 @@
 // one tenant context. Date columns are cast to ::text so they return as ISO
 // YYYY-MM-DD strings (postgres.js would otherwise hand back Date objects),
 // keeping effective-dating a lexicographic string compare end to end.
+import type { ReturnPeriod } from "../../domain/obligation/period-basis";
 import { postalAddressJson, readPostalAddress } from "../../domain/party/address";
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
@@ -282,6 +283,43 @@ export class PostgresPartyRepository implements PartyRepository, ClientDirectory
                   financial_year_end, time_zone, registered_address, status
       `;
       return row ? toLegalEntity(row) : null;
+    });
+  }
+
+  async listReturnPeriods(tenantId: string, partyId: string): Promise<readonly ReturnPeriod[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<{ tax: string; frequency: string; first_month: number | null }[]>`
+        SELECT tax, frequency, first_month FROM core.legal_entity_return_period
+        WHERE entity_party_id = ${partyId}
+        ORDER BY tax
+      `;
+      return rows.map((r) => ({
+        tax: r.tax,
+        frequency: r.frequency === "monthly" ? ("monthly" as const) : ("quarterly" as const),
+        firstMonth: r.first_month,
+      }));
+    });
+  }
+
+  async setReturnPeriod(tenantId: string, partyId: string, p: ReturnPeriod): Promise<void> {
+    await withTenant(this.app, tenantId, async (db) => {
+      await db`
+        INSERT INTO core.legal_entity_return_period (tenant_id, entity_party_id, tax, frequency, first_month)
+        VALUES (${tenantId}, ${partyId}, ${p.tax}, ${p.frequency}, ${p.firstMonth})
+        ON CONFLICT (tenant_id, entity_party_id, tax)
+        DO UPDATE SET frequency = EXCLUDED.frequency, first_month = EXCLUDED.first_month
+      `;
+    });
+  }
+
+  async removeReturnPeriod(tenantId: string, partyId: string, tax: string): Promise<boolean> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<{ id: string }[]>`
+        DELETE FROM core.legal_entity_return_period
+        WHERE entity_party_id = ${partyId} AND tax = ${tax}
+        RETURNING id
+      `;
+      return rows.length > 0;
     });
   }
 

@@ -2,6 +2,7 @@
 // compile-time assertion) so business rules can be tested with zero
 // infrastructure. They do NOT enforce RLS — tenant isolation is a database
 // property, proven separately against real Postgres, not here.
+import type { ReturnPeriod } from "../domain/obligation/period-basis";
 import type {
   ClientStructure,
   LegalEntity,
@@ -112,6 +113,30 @@ export class FakePartyRepo implements PartyRepository {
     };
     this.legalEntities[i] = next;
     return Promise.resolve(next);
+  }
+
+  /** Return periods by `${tenantId}|${partyId}` (0359). */
+  readonly returnPeriods = new Map<string, ReturnPeriod[]>();
+
+  listReturnPeriods(tenantId: string, partyId: string): Promise<readonly ReturnPeriod[]> {
+    return Promise.resolve(
+      [...(this.returnPeriods.get(`${tenantId}|${partyId}`) ?? [])].sort((a, b) => a.tax.localeCompare(b.tax)),
+    );
+  }
+
+  setReturnPeriod(tenantId: string, partyId: string, period: ReturnPeriod): Promise<void> {
+    const key = `${tenantId}|${partyId}`;
+    const rest = (this.returnPeriods.get(key) ?? []).filter((p) => p.tax !== period.tax);
+    this.returnPeriods.set(key, [...rest, period]);
+    return Promise.resolve();
+  }
+
+  removeReturnPeriod(tenantId: string, partyId: string, tax: string): Promise<boolean> {
+    const key = `${tenantId}|${partyId}`;
+    const before = this.returnPeriods.get(key) ?? [];
+    const after = before.filter((p) => p.tax !== tax);
+    this.returnPeriods.set(key, after);
+    return Promise.resolve(after.length !== before.length);
   }
 
   setLegalEntityTimeZone(tenantId: string, partyId: string, timeZone: string | null): Promise<LegalEntity | null> {

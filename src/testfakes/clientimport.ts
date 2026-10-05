@@ -286,6 +286,10 @@ export class RecordingPartyWriter extends Recorder implements PartyWriter {
     this.record("addIdentifier", input);
     return Promise.resolve();
   }
+  setReturnPeriod(input: Parameters<PartyWriter["setReturnPeriod"]>[0], _actor: Actor) {
+    this.record("setReturnPeriod", input);
+    return Promise.resolve();
+  }
   addRelationship(input: Parameters<PartyWriter["addRelationship"]>[0], _actor: Actor) {
     this.record("addRelationship", input);
     return Promise.resolve();

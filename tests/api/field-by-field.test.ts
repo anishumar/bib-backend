@@ -62,7 +62,7 @@ function app(register: (app: OpenAPIHono<AppEnv>) => void) {
 
 const ORG = { partyId: PARTY, tenantId: TENANT, legalName: "Cobalt Foods", tradeName: null, industry: null, website: null, isFirmSelf: false, ...LEAK };
 const PERSON = { partyId: PARTY, tenantId: TENANT, fullName: "Meera Menon", nationality: null, dateOfBirth: null, ...LEAK };
-const ENTITY = { partyId: PARTY, tenantId: TENANT, jurisdiction: "IN", entityType: "private_limited", incorporatedOn: null, financialYearEnd: null, registeredAddress: null, status: "active", ...LEAK };
+const ENTITY = { partyId: PARTY, tenantId: TENANT, jurisdiction: "IN", entityType: "private_limited", incorporatedOn: null, financialYearEnd: null, timeZone: null, registeredAddress: null, status: "active", ...LEAK };
 const IDENTIFIER = { id: ID, tenantId: TENANT, partyId: PARTY, type: "pan", value: "AABCC1234F", jurisdiction: "IN", isPrimary: true, validFrom: "2026-01-01", validTo: null, voidedAt: null, ...LEAK };
 const RELATIONSHIP = { id: ID, tenantId: TENANT, fromPartyId: PARTY, toPartyId: OTHER, type: "director_of", validFrom: "2026-01-01", validTo: null, attributes: {}, ...LEAK };
 const PARTY_ROW = { id: PARTY, tenantId: TENANT, kind: "organization", displayName: "Cobalt Foods", archivedAt: null, isOwnCompany: false, billingAddress: null, ...LEAK };
@@ -86,6 +86,7 @@ describe("party.ts answers field by field", () => {
         organization: ORG,
         person: null,
         legalEntities: [ENTITY],
+        returnPeriods: [{ tax: "VAT", frequency: "quarterly", firstMonth: 2, ...LEAK }],
         identifiers: [IDENTIFIER],
         relationships: [
           { relationship: RELATIONSHIP, counterparty: { id: OTHER, kind: "person", displayName: "Meera", ...LEAK }, direction: "outgoing", ...LEAK },
