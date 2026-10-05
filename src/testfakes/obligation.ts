@@ -14,6 +14,8 @@ import {
   type ResolutionOption,
 } from "../domain/obligation/model";
 import type { Actor } from "../domain/ledger/model";
+import { filingDay } from "../domain/obligation/filing-zone";
+import { dayInZone } from "../domain/scheduler/zone";
 import type {
   CalendarQuery,
   CalendarRow,
@@ -102,7 +104,7 @@ export class FakeObligationTemplateRepo implements ObligationTemplateRepository 
         new Error("FakeObligationTemplateRepo was handed links but has no link store: wire `links`"),
       );
     }
-    const row: ObligationTemplate = { ...t, lineageId, isActive: true };
+    const row: ObligationTemplate = { ...t, periodBasis: t.periodBasis ?? "rule_calendar", lineageId, isActive: true };
     this.rows.push(row);
     // The links in the SAME act, as the adapter writes them in one transaction.
     for (const link of links) {
@@ -148,6 +150,7 @@ export class FakeObligationTemplateRepo implements ObligationTemplateRepository 
 
     const successor: ObligationTemplate = {
       ...t,
+      periodBasis: t.periodBasis ?? "rule_calendar",
       supersedesId: predecessorId,
       // The chain carries over, and with it every service link (0309).
       lineageId: predecessor.lineageId,
@@ -517,10 +520,29 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
         }
         continue;
       }
+      // A period cut on the client's year never overlaps one already held
+      // (0358), the adapter's NOT EXISTS, modelled.
+      if (
+        (r.periodBasis ?? "rule_calendar") !== "rule_calendar" &&
+        this.rows.some(
+          (x) =>
+            x.tenantId === r.tenantId &&
+            this.lineage(x.templateId) === lineage &&
+            x.entityPartyId === r.entityPartyId &&
+            x.periodStart !== r.periodStart &&
+            x.periodStart <= r.periodEnd &&
+            x.periodEnd >= r.periodStart &&
+            x.withdrawnAt === null,
+        )
+      ) {
+        continue;
+      }
       this.rows.push({
         ...r,
+        periodBasis: r.periodBasis ?? "rule_calendar",
         workItemId: null,
         filedOn: null,
+        filedByWorkItemId: null,
         resolutionOptionId: null,
         resolutionReason: null,
         resolvedAt: null,
@@ -547,10 +569,11 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
     );
   }
 
-  calendar(tenantId: string, _query: CalendarQuery): Promise<readonly CalendarRow[]> {
+  calendar(tenantId: string, query: CalendarQuery): Promise<readonly CalendarRow[]> {
     return Promise.resolve(
       this.rows
         .filter((r) => r.tenantId === tenantId && r.withdrawnAt === null)
+        .filter((r) => query.filedByWorkItemId === undefined || r.filedByWorkItemId === query.filedByWorkItemId)
         .map(
           (r): CalendarRow => ({
             id: r.id,
@@ -569,6 +592,12 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
             needsDecision: false,
             workItemId: r.workItemId,
             filedOn: r.filedOn,
+            filedByWorkItemId: r.filedByWorkItemId,
+            filedByTitle: null,
+            periodBasis: r.periodBasis,
+            ruleYearStartMonth: this.templates?.rows.find((t) => t.id === r.templateId)?.fiscalYearStartMonth ?? 4,
+            filingZone: this.filingZones.get(r.id) ?? this.firmZone,
+            filingToday: dayInZone(query.now ?? new Date().toISOString(), this.filingZones.get(r.id) ?? this.firmZone),
             resolutionOptionId: r.resolutionOptionId,
             resolutionName: null,
             resolutionReason: r.resolutionReason,
@@ -640,22 +669,72 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
     obligationId: string,
     filedOn: string,
     stateId: string,
+    filedByWorkItemId: string,
   ): Promise<boolean> {
     const i = this.rows.findIndex((r) => r.tenantId === tenantId && r.id === obligationId);
     const row = this.rows[i];
     // `AND filed_on IS NULL`, modelled — the guard that makes a second
     // completion of the same task write no second event.
     if (!row || row.filedOn !== null) return Promise.resolve(false);
-    this.rows[i] = { ...row, filedOn, stateId };
+    this.rows[i] = { ...row, filedOn, stateId, filedByWorkItemId };
     return Promise.resolve(true);
   }
 
-  clearFiled(tenantId: string, obligationId: string, stateId: string): Promise<boolean> {
+  clearFiled(
+    tenantId: string,
+    obligationId: string,
+    stateId: string,
+    filedByWorkItemId: string,
+  ): Promise<boolean> {
     const i = this.rows.findIndex((r) => r.tenantId === tenantId && r.id === obligationId);
     const row = this.rows[i];
-    if (!row || row.filedOn === null) return Promise.resolve(false);
-    this.rows[i] = { ...row, filedOn: null, stateId };
+    // `AND filed_by_work_item_id = $task`, modelled (0357).
+    if (!row || row.filedOn === null || row.filedByWorkItemId !== filedByWorkItemId) {
+      return Promise.resolve(false);
+    }
+    this.rows[i] = { ...row, filedOn: null, stateId, filedByWorkItemId: null };
     return Promise.resolve(true);
+  }
+
+  listFiledBy(tenantId: string, workItemId: string): Promise<readonly ObligationInstance[]> {
+    return Promise.resolve(
+      this.rows.filter((r) => r.tenantId === tenantId && r.filedByWorkItemId === workItemId),
+    );
+  }
+
+  /**
+   * A period job's task, as the adapter reads it from `delivery.job` and the
+   * task's engagement (Q063): the company, the job's period, and the rules its
+   * service carries. Set by a test; an unknown task is not a period job's.
+   */
+  jobTasks = new Map<
+    string,
+    {
+      readonly entityPartyId: string;
+      readonly periodStart: string;
+      readonly periodEnd: string;
+      readonly templateIds: ReadonlySet<string>;
+    }
+  >();
+  /** States the adapter reads as finished off `obligation_state`. */
+  terminalStateIds = new Set<string>();
+
+  listJobFilingsForTask(tenantId: string, workItemId: string): Promise<readonly ObligationInstance[]> {
+    const t = this.jobTasks.get(workItemId);
+    if (t === undefined) return Promise.resolve([]);
+    return Promise.resolve(
+      this.rows.filter(
+        (r) =>
+          r.tenantId === tenantId &&
+          r.entityPartyId === t.entityPartyId &&
+          r.periodStart >= t.periodStart &&
+          r.periodEnd <= t.periodEnd &&
+          t.templateIds.has(r.templateId) &&
+          r.filedOn === null &&
+          r.withdrawnAt === null &&
+          !this.terminalStateIds.has(r.stateId),
+      ),
+    );
   }
 
   /**
@@ -667,17 +746,23 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
    * what decide, never a code.
    */
   states: ObligationState[] = [];
+  /** A filing's zone, by row id, as the adapter resolves it (Q070 Part B);
+   *  a row not named is on the firm's zone. */
+  readonly filingZones = new Map<string, string>();
+  firmZone = "UTC";
 
   listMissable(
     tenantId: string,
     asOf: string,
     floor: string | null,
     limit: number,
+    now: string,
   ): Promise<readonly MissableObligation[]> {
+    const dayOf = (id: string) => filingDay(asOf, now, this.filingZones.get(id) ?? this.firmZone, this.firmZone);
     const out = this.rows
       .filter((r) => {
         if (r.tenantId !== tenantId) return false;
-        if (r.statutoryDueOn >= asOf) return false;
+        if (r.statutoryDueOn >= dayOf(r.id)) return false;
         if (r.filedOn !== null) return false;
         if (r.resolvedAt !== null) return false;
         if (r.withdrawnAt !== null) return false;
@@ -695,6 +780,8 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
           templateName: r.templateId,
           periodLabel: r.periodLabel,
           workItemId: r.workItemId,
+          filingDay: dayOf(r.id),
+          filingZone: this.filingZones.get(r.id) ?? this.firmZone,
         }),
       );
     return Promise.resolve(out);
@@ -869,6 +956,8 @@ export class FakeCalendarSource implements CalendarSource {
           effectiveFrom: s.effectiveFrom,
           serviceEntryId: s.serviceEntryId,
           endsOn: s.endsOn ?? null,
+          financialYearEnd: s.financialYearEnd ?? null,
+          returnPeriods: s.returnPeriods ?? [],
         })),
     );
   }

@@ -40,6 +40,7 @@ import type {
   SpawnedInstance,
   UnstartedInstance,
 } from "../../usecase/obligation/ports";
+import { filingCountryZones } from "../../domain/obligation/filing-zone";
 import { isoInstant } from "./instant";
 import { lockChainsForWrite } from "./obligation-chain-lock";
 
@@ -93,6 +94,29 @@ const STILL_LINKED = `(
   )
 )`;
 
+/**
+ * THE ZONE A FILING'S DAY IS READ IN (Q070 Part B, B1): `filingZone` in the
+ * domain, in SQL, over a row aliased `oi` with its rule `t`, its entity's
+ * registration `le` (LEFT) and its firm `ten`. The client entity's own zone;
+ * else the filing country's one zone (the domain's table, with New York for
+ * the United States); else the firm's own company registered in that country;
+ * else the firm's.
+ *
+ * The country table is the domain's and is inlined as a literal: zone names
+ * and country codes only (`[A-Za-z0-9/_+-]`), so a constant fragment with no
+ * parameters, which is what makes `db.unsafe` safe to put it in.
+ */
+const COUNTRY_ZONES = JSON.stringify(filingCountryZones()).replace(/'/g, "''");
+const FILING_ZONE = `COALESCE(
+  le.time_zone,
+  ('${COUNTRY_ZONES}'::jsonb ->> t.jurisdiction),
+  (SELECT fle.time_zone FROM core.legal_entity fle
+    WHERE fle.tenant_id = oi.tenant_id AND fle.jurisdiction = t.jurisdiction
+      AND fle.time_zone IS NOT NULL
+      AND crm.is_firm_entity(fle.tenant_id, fle.party_id)
+    ORDER BY fle.party_id LIMIT 1),
+  ten.time_zone)`;
+
 interface InstanceRow {
   id: string;
   tenant_id: string;
@@ -107,20 +131,23 @@ interface InstanceRow {
   state_id: string;
   work_item_id: string | null;
   filed_on: string | null;
+  filed_by_work_item_id: string | null;
   resolution_option_id: string | null;
   resolution_reason: string | null;
   resolved_at: string | null;
   withdrawn_at: string | null;
   withdrawn_by_user_id: string | null;
   withdrawn_reason: string | null;
+  period_basis: string;
 }
 
 const INSTANCE_COLUMNS =
   "id, tenant_id, template_id, entity_party_id, engagement_id, period_start::text, " +
   "period_end::text, period_label, statutory_due_on::text, internal_target_on::text, " +
-  "state_id, work_item_id, filed_on::text, resolution_option_id, resolution_reason, " +
+  "state_id, work_item_id, filed_on::text, filed_by_work_item_id, resolution_option_id, " +
+  "resolution_reason, " +
   isoInstant("resolved_at", "resolved_at") + ", " +
-  isoInstant("withdrawn_at", "withdrawn_at") + ", withdrawn_by_user_id, withdrawn_reason";
+  isoInstant("withdrawn_at", "withdrawn_at") + ", withdrawn_by_user_id, withdrawn_reason, period_basis";
 
 function toInstance(r: InstanceRow): ObligationInstance {
   return {
@@ -137,12 +164,14 @@ function toInstance(r: InstanceRow): ObligationInstance {
     stateId: r.state_id,
     workItemId: r.work_item_id,
     filedOn: r.filed_on,
+    filedByWorkItemId: r.filed_by_work_item_id,
     resolutionOptionId: r.resolution_option_id,
     resolutionReason: r.resolution_reason,
     resolvedAt: r.resolved_at,
     withdrawnAt: r.withdrawn_at,
     withdrawnByUserId: r.withdrawn_by_user_id,
     withdrawnReason: r.withdrawn_reason === null ? null : (r.withdrawn_reason as WithdrawnReason),
+    periodBasis: r.period_basis as ObligationInstance["periodBasis"],
   };
 }
 
@@ -231,10 +260,11 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
       >`
         INSERT INTO delivery.obligation_instance
           (id, tenant_id, template_id, entity_party_id, engagement_id, period_start, period_end,
-           period_label, statutory_due_on, internal_target_on, state_id)
+           period_label, statutory_due_on, internal_target_on, state_id, period_basis)
         SELECT r.id, r."tenantId", r."templateId", r."entityPartyId", r."engagementId",
                r."periodStart"::date, r."periodEnd"::date, r."periodLabel",
-               r."statutoryDueOn"::date, r."internalTargetOn"::date, r."stateId"
+               r."statutoryDueOn"::date, r."internalTargetOn"::date, r."stateId",
+               COALESCE(r."periodBasis", 'rule_calendar')
         -- The DOUBLE CAST is load-bearing. postgres.js
         -- infers a JSON type for a string parameter and encodes it AGAIN, so a
         -- plain ::jsonb produced a jsonb STRING rather than an array and every
@@ -246,8 +276,28 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
         FROM jsonb_to_recordset(${proposals}::text::jsonb)
           AS r(id uuid, "tenantId" uuid, "templateId" uuid, "entityPartyId" uuid,
                "engagementId" uuid, "periodStart" text, "periodEnd" text, "periodLabel" text,
-               "statutoryDueOn" text, "internalTargetOn" text, "stateId" uuid)
+               "statutoryDueOn" text, "internalTargetOn" text, "stateId" uuid,
+               "periodBasis" text)
         WHERE ${db.unsafe(STILL_LINKED)}
+          -- A PERIOD CUT ON THE CLIENT'S YEAR NEVER OVERLAPS ONE ALREADY HELD
+          -- (0358, Q078's default). A client whose year end changed would
+          -- otherwise get the new cut's period beside the old one's for the
+          -- same months: two returns for one stretch. The rows already
+          -- generated stay; the new cut starts where they leave off. A rule
+          -- on its own year cannot produce an overlap (its shape is locked
+          -- once rows exist), so it is not asked.
+          AND (COALESCE(r."periodBasis", 'rule_calendar') = 'rule_calendar'
+               OR NOT EXISTS (
+                 SELECT 1
+                   FROM delivery.obligation_template ot
+                   JOIN delivery.obligation_instance x
+                     ON x.tenant_id = ot.tenant_id AND x.lineage_id = ot.lineage_id
+                  WHERE ot.id = r."templateId" AND ot.tenant_id = r."tenantId"
+                    AND x.entity_party_id = r."entityPartyId"
+                    AND x.period_start <> r."periodStart"::date
+                    AND x.period_start <= r."periodEnd"::date
+                    AND x.period_end >= r."periodStart"::date
+                    AND x.withdrawn_at IS NULL))
         -- THE LINEAGE, not the template (0303). The template key is implied by
         -- it, and it also refuses a period an EARLIER rule in the chain already
         -- holds — the row a supersession could not hand over because somebody
@@ -301,6 +351,9 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
           rule_pack: string; resolution_option_id: string | null;
           resolution_name: string | null; resolution_reason: string | null;
           resolved_at: string | null;
+          filed_by_work_item_id: string | null; filed_by_title: string | null;
+          filing_zone: string; filing_today: string;
+          period_basis: string; rule_year_start_month: number;
         }[]
       >`
         SELECT oi.id,
@@ -316,12 +369,24 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
                oi.work_item_id, oi.filed_on::text,
                oi.resolution_option_id, ro.name AS resolution_name,
                oi.resolution_reason, ${db.unsafe(isoInstant("oi.resolved_at", "resolved_at"))},
-               t.status AS rule_status, t.rule_pack
+               t.status AS rule_status, t.rule_pack,
+               oi.filed_by_work_item_id, fb.title AS filed_by_title,
+               z.zone AS filing_zone,
+               oi.period_basis, t.fiscal_year_start_month AS rule_year_start_month,
+               (COALESCE(${query.now ?? null}::timestamptz, now()) AT TIME ZONE z.zone)::date::text
+                 AS filing_today
         FROM delivery.obligation_instance oi
         JOIN delivery.obligation_template t
           ON t.id = oi.template_id AND t.tenant_id = oi.tenant_id
         JOIN delivery.obligation_state s
           ON s.id = oi.state_id AND s.tenant_id = oi.tenant_id
+        JOIN tenancy.tenant ten
+          ON ten.id = oi.tenant_id
+        LEFT JOIN core.legal_entity le
+          ON le.party_id = oi.entity_party_id AND le.tenant_id = oi.tenant_id
+        CROSS JOIN LATERAL (SELECT ${db.unsafe(FILING_ZONE)} AS zone) z
+        LEFT JOIN delivery.work_item fb
+          ON fb.id = oi.filed_by_work_item_id AND fb.tenant_id = oi.tenant_id
         LEFT JOIN core.party ep
           ON ep.id = oi.entity_party_id AND ep.tenant_id = oi.tenant_id
         LEFT JOIN crm.engagement e
@@ -335,6 +400,8 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
           AND (${query.entityPartyId ?? null}::uuid IS NULL OR oi.entity_party_id = ${query.entityPartyId ?? null}::uuid)
           AND (${query.module ?? null}::text IS NULL OR t.module = ${query.module ?? null}::text)
           AND (${query.includeSettled ?? false} OR NOT s.is_terminal)
+          AND (${query.filedByWorkItemId ?? null}::uuid IS NULL
+               OR oi.filed_by_work_item_id = ${query.filedByWorkItemId ?? null}::uuid)
           -- A WITHDRAWN filing is off the calendar whatever else is asked
           -- (0309). It is not a flavour of "settled": it was never filed or
           -- decided, and includeSettled must not bring it back.
@@ -360,6 +427,12 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
           needsDecision: r.needs_decision,
           workItemId: r.work_item_id,
           filedOn: r.filed_on,
+          filedByWorkItemId: r.filed_by_work_item_id,
+          filedByTitle: r.filed_by_title,
+          filingZone: r.filing_zone,
+          filingToday: r.filing_today,
+          periodBasis: r.period_basis as CalendarRow["periodBasis"],
+          ruleYearStartMonth: r.rule_year_start_month,
           resolutionOptionId: r.resolution_option_id,
           resolutionName: r.resolution_name,
           resolutionReason: r.resolution_reason,
@@ -461,6 +534,7 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
     obligationId: string,
     filedOn: IsoDate,
     stateId: string,
+    filedByWorkItemId: string,
   ): Promise<boolean> {
     return withTenant(this.app, tenantId, async (db) => {
       // `AND filed_on IS NULL` is what makes this safe to call twice. Two
@@ -470,7 +544,8 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
       // the other request has already committed.
       const rows = await db<{ id: string }[]>`
         UPDATE delivery.obligation_instance
-        SET filed_on = ${filedOn}::date, state_id = ${stateId}
+        SET filed_on = ${filedOn}::date, state_id = ${stateId},
+            filed_by_work_item_id = ${filedByWorkItemId}
         WHERE id = ${obligationId} AND filed_on IS NULL
         RETURNING id
       `;
@@ -478,15 +553,82 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
     });
   }
 
-  async clearFiled(tenantId: string, obligationId: string, stateId: string): Promise<boolean> {
+  async clearFiled(
+    tenantId: string,
+    obligationId: string,
+    stateId: string,
+    filedByWorkItemId: string,
+  ): Promise<boolean> {
     return withTenant(this.app, tenantId, async (db) => {
+      // The task in the WHERE (0357): a reopened task un-files only what it
+      // filed, decided by the database between the read and the write.
       const rows = await db<{ id: string }[]>`
         UPDATE delivery.obligation_instance
-        SET filed_on = NULL, state_id = ${stateId}
+        SET filed_on = NULL, state_id = ${stateId}, filed_by_work_item_id = NULL
         WHERE id = ${obligationId} AND filed_on IS NOT NULL
+          AND filed_by_work_item_id = ${filedByWorkItemId}
         RETURNING id
       `;
       return rows.length > 0;
+    });
+  }
+
+  async listFiledBy(tenantId: string, workItemId: string): Promise<readonly ObligationInstance[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<InstanceRow[]>`
+        SELECT ${db.unsafe(INSTANCE_COLUMNS)} FROM delivery.obligation_instance
+        WHERE filed_by_work_item_id = ${workItemId}
+        ORDER BY statutory_due_on, id
+      `;
+      return rows.map(toInstance);
+    });
+  }
+
+  async listJobFilingsForTask(
+    tenantId: string,
+    workItemId: string,
+  ): Promise<readonly ObligationInstance[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // THE JOB'S PERIOD, THE TASK'S COMPANY, THE TASK'S SERVICE (Q063). The
+      // service half is `earliestFilingDue`'s (obligation-coverage.ts), the
+      // rule CA#11 already applies to the same task's due date: a live link
+      // from the row's chain to the entry the task's letter line pinned, or
+      // the row owed under this very engagement. CONTAINED in the period, so
+      // a month's task never files the quarter it falls in.
+      const rows = await db<InstanceRow[]>`
+        SELECT ${db.unsafe(INSTANCE_COLUMNS)} FROM delivery.obligation_instance
+        WHERE id IN (
+          SELECT oi.id
+            FROM delivery.work_item wi
+            JOIN delivery.job j
+              ON j.id = wi.job_id AND j.tenant_id = wi.tenant_id
+            JOIN crm.engagement e
+              ON e.id = wi.engagement_id AND e.tenant_id = wi.tenant_id
+            JOIN crm.engagement_letter_line ln
+              ON ln.id = e.engagement_letter_line_id AND ln.tenant_id = e.tenant_id
+            JOIN config.version pinned
+              ON pinned.id = ln.service_version_id AND pinned.tenant_id = ln.tenant_id
+            JOIN delivery.obligation_instance oi
+              ON oi.tenant_id = wi.tenant_id AND oi.entity_party_id = e.entity_party_id
+            JOIN delivery.obligation_state os
+              ON os.id = oi.state_id AND os.tenant_id = oi.tenant_id
+           WHERE wi.id = ${workItemId}
+             AND j.period_start IS NOT NULL
+             AND oi.period_start >= j.period_start
+             AND oi.period_end <= j.period_end
+             AND oi.filed_on IS NULL
+             AND oi.withdrawn_at IS NULL
+             AND NOT os.is_terminal
+             AND (oi.engagement_id = e.id
+                  OR EXISTS (SELECT 1 FROM delivery.obligation_rule_service k
+                              WHERE k.tenant_id = oi.tenant_id
+                                AND k.lineage_id = oi.lineage_id
+                                AND k.service_entry_id = pinned.entry_id
+                                AND k.unlinked_at IS NULL))
+        )
+        ORDER BY statutory_due_on, id
+      `;
+      return rows.map(toInstance);
     });
   }
 
@@ -495,6 +637,7 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
     asOf: string,
     floor: string | null,
     limit: number,
+    now: string,
   ): Promise<readonly MissableObligation[]> {
     return withTenant(this.app, tenantId, async (db) => {
       // Every condition `shouldBeFlaggedMissed` names, in SQL, because the sweep
@@ -505,20 +648,36 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
       // the whole module keeps. A row already in the missed state carries
       // `needs_decision`, so it does not come back on the next sweep, and that
       // is the entire idempotency story.
+      //
+      // THE FILING'S DAY, NOT THE FIRM'S (Q070 Part B): the firm's day moved
+      // by however many days the filing's zone is ahead of or behind the
+      // firm's at this instant (`filingDay` in the domain).
       const rows = await db<
         {
           id: string; statutory_due_on: string; entity_party_id: string;
           template_name: string; period_label: string; work_item_id: string | null;
+          filing_day: string; filing_zone: string;
         }[]
       >`
         SELECT oi.id, oi.statutory_due_on::text, oi.entity_party_id,
-               t.name AS template_name, oi.period_label, oi.work_item_id
+               t.name AS template_name, oi.period_label, oi.work_item_id,
+               fd.filing_day::text, z.zone AS filing_zone
         FROM delivery.obligation_instance oi
         JOIN delivery.obligation_template t
           ON t.id = oi.template_id AND t.tenant_id = oi.tenant_id
         JOIN delivery.obligation_state s
           ON s.id = oi.state_id AND s.tenant_id = oi.tenant_id
-        WHERE oi.statutory_due_on < ${asOf}::date
+        JOIN tenancy.tenant ten
+          ON ten.id = oi.tenant_id
+        LEFT JOIN core.legal_entity le
+          ON le.party_id = oi.entity_party_id AND le.tenant_id = oi.tenant_id
+        CROSS JOIN LATERAL (SELECT ${db.unsafe(FILING_ZONE)} AS zone) z
+        CROSS JOIN LATERAL (
+          SELECT ${asOf}::date
+                 + ((${now}::timestamptz AT TIME ZONE z.zone)::date
+                    - (${now}::timestamptz AT TIME ZONE ten.time_zone)::date) AS filing_day
+        ) fd
+        WHERE oi.statutory_due_on < fd.filing_day
           AND oi.filed_on IS NULL
           AND oi.resolved_at IS NULL
           -- A withdrawn filing is never MISSED (0309). It was upcoming when it
@@ -540,6 +699,8 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
           templateName: r.template_name,
           periodLabel: r.period_label,
           workItemId: r.work_item_id,
+          filingDay: r.filing_day,
+          filingZone: r.filing_zone,
         }),
       );
     });
@@ -775,13 +936,23 @@ export class PostgresCalendarSource implements CalendarSource {
       const rows = await db<
         {
           entity_party_id: string; engagement_id: string; effective_from: string;
-          service_entry_id: string; ends_on: string | null;
+          service_entry_id: string; ends_on: string | null; financial_year_end: string | null;
+          return_periods: { tax: string; frequency: string; firstMonth: number | null }[];
         }[]
       >`
         SELECT DISTINCT le.party_id AS entity_party_id, e.id AS engagement_id,
                e.effective_from::text AS effective_from,
                pinned.entry_id AS service_entry_id,
-               e.ends_on::text AS ends_on
+               e.ends_on::text AS ends_on,
+               le.financial_year_end,
+               -- What its authorities assigned it (0359), for an
+               -- authority_assigned rule. Ordered so DISTINCT sees one value.
+               (SELECT COALESCE(jsonb_agg(jsonb_build_object(
+                         'tax', rp.tax, 'frequency', rp.frequency, 'firstMonth', rp.first_month)
+                         ORDER BY rp.tax), '[]'::jsonb)
+                  FROM core.legal_entity_return_period rp
+                 WHERE rp.tenant_id = le.tenant_id AND rp.entity_party_id = le.party_id
+                   AND rp.cleared_at IS NULL) AS return_periods
         FROM core.legal_entity le
         JOIN crm.engagement e
           ON e.entity_party_id = le.party_id AND e.tenant_id = le.tenant_id
@@ -821,6 +992,12 @@ export class PostgresCalendarSource implements CalendarSource {
         effectiveFrom: r.effective_from,
         serviceEntryId: r.service_entry_id,
         endsOn: r.ends_on,
+        financialYearEnd: r.financial_year_end,
+        returnPeriods: r.return_periods.map((p) => ({
+          tax: p.tax,
+          frequency: p.frequency === "monthly" ? ("monthly" as const) : ("quarterly" as const),
+          firstMonth: p.firstMonth,
+        })),
       }));
     });
   }

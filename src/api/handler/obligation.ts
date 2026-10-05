@@ -33,6 +33,18 @@ export interface ObligationDeps {
 
 // ── Shared vocabulary ───────────────────────────────────────────────────────
 
+const PeriodBasisSchema = z.enum(["rule_calendar", "client_year_end", "authority_assigned"]).openapi("ObligationPeriodBasis", {
+  description:
+    "Whose year a quarter, half-year or year is cut on (0358): the rule's own " +
+    "(fiscalYearStartMonth, every rule before this) or the CLIENT's financial year end, which " +
+    "is how UAE corporate tax and Singapore's annual filings run. A client with no year end " +
+    "recorded falls back to the rule's month, and the calendar says so. authority_assigned " +
+    "(0359): each client's return period for the rule's module as its tax authority assigned " +
+    "it (monthly, or a quarter stagger, e.g. UAE VAT); a client with none gets no filing and " +
+    "is listed on Setup. Needs a module. Part of the period shape: editable only while the " +
+    "rule has produced nothing. Monthly is a month either way on the first two.",
+});
+
 const Recurrence = z
   .enum(["monthly", "quarterly", "half_yearly", "annual", "event"])
   .openapi({
@@ -223,6 +235,7 @@ const RuleSchema = z
       description: "4 for India. An Indian quarter runs Apr-Jun, so leaving this at 1 would " +
         "put every quarterly filing in the wrong period.",
     }),
+    periodBasis: PeriodBasisSchema,
     dueRule: DueRuleSchema.nullable(),
     unresolvedReason: z.string().nullable().openapi({
       description:
@@ -385,6 +398,28 @@ const CalendarRowSchema = z
         "started' — a year of those is the calendar's normal state, not a backlog.",
     }),
     filedOn: z.string().nullable(),
+    filedByWorkItemId: z.string().uuid().nullable().openapi({
+      description:
+        "The task that filed it (Q063): its own task, or the period job's task that covered " +
+        "it. Null while unfiled.",
+    }),
+    filedByTitle: z.string().nullable().openapi({ description: "That task's title, e.g. 'GST · Sep 2026'." }),
+    filingZone: z.string().openapi({
+      description:
+        "The zone this filing's day is read in (Q070 Part B): the client entity's own, else its " +
+        "country's (New York for the US), else the firm's company there, else the firm's.",
+    }),
+    filingToday: z.string().openapi({
+      description:
+        "Today in that zone. The statutory date has passed when it is before this; the " +
+        "internal target stays on the firm's day.",
+    }),
+    periodBasis: z.enum(["rule_calendar", "client_year_end", "rule_fallback", "authority_assigned"]).openapi({
+      description:
+        "What this row's period followed (0358). rule_fallback: the rule follows the client's " +
+        "year end and none was recorded, so the rule's own month (ruleYearStartMonth) was used.",
+    }),
+    ruleYearStartMonth: z.number().int().min(1).max(12),
     resolutionOptionId: z.string().uuid().nullable(),
     resolutionName: z.string().nullable().openapi({
       description:
@@ -512,6 +547,7 @@ function ruleToWire(r: RuleView): z.infer<typeof RuleSchema> {
     authority: t.authority,
     recurrence: t.recurrence,
     fiscalYearStartMonth: t.fiscalYearStartMonth,
+    periodBasis: t.periodBasis,
     dueRule: dueRuleToWire(t),
     unresolvedReason: t.unresolvedReason,
     leadTimeDays: t.leadTimeDays,
@@ -566,6 +602,7 @@ const CreateRuleRequest = z
     authority: z.string().nullable().optional(),
     recurrence: Recurrence,
     fiscalYearStartMonth: z.number().int().min(1).max(12).default(4),
+    periodBasis: PeriodBasisSchema.optional(),
     dueRule: DueRuleSchema.nullable(),
     unresolvedReason: z.string().nullable().optional(),
     leadTimeDays: z.number().int().min(0).default(0),
@@ -581,6 +618,7 @@ const UpdateRuleRequest = z
     authority: z.string().nullable().optional(),
     recurrence: Recurrence.optional(),
     fiscalYearStartMonth: z.number().int().min(1).max(12).optional(),
+    periodBasis: PeriodBasisSchema.optional(),
     dueRule: DueRuleSchema.nullable().optional(),
     unresolvedReason: z.string().nullable().optional(),
     leadTimeDays: z.number().int().min(0).optional(),
@@ -729,6 +767,26 @@ const seedRulesRoute = createRoute({
     "record what they are still waiting on. Idempotent on the rule's identity, so running it " +
     "twice adds nothing and never overwrites a rule a partner has confirmed or given a lead " +
     "time to. New firms get this automatically at creation.",
+  responses: {
+    200: {
+      description: "How many rules were added",
+      content: { "application/json": { schema: z.object({ created: z.number().int() }) } },
+    },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not administer the firm"),
+  },
+});
+
+const seedCountryPackRoute = createRoute({
+  method: "post",
+  path: "/api/v1/obligation-rules/seed-pack/{country}",
+  tags: ["obligations"],
+  summary: "Load a draft country rule pack: AE, SG or US",
+  description:
+    "Q074: the UAE, Singapore and US filings prepared from official sources for the firm to " +
+    "confirm. Every rule arrives UNCONFIRMED and on NO service, so nothing reaches the calendar " +
+    "until the firm adds a rule to a service in the catalogue. Idempotent on the rule's identity.",
+  request: { params: z.object({ country: z.enum(["AE", "SG", "US"]) }) },
   responses: {
     200: {
       description: "How many rules were added",
@@ -1372,6 +1430,14 @@ export function registerObligationRoutes(app: OpenAPIHono<AppEnv>, deps: Obligat
     return c.json({ created }, 200);
   });
 
+  app.openapi(seedCountryPackRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { country } = c.req.valid("param");
+    const created = await deps.service.seedCountryRulePack(s.tenantId, country, s.actor);
+    return c.json({ created }, 200);
+  });
+
   app.openapi(createRuleRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
@@ -1596,6 +1662,12 @@ export function registerObligationRoutes(app: OpenAPIHono<AppEnv>, deps: Obligat
           needsDecision: r.needsDecision,
           workItemId: r.workItemId,
           filedOn: r.filedOn,
+          filedByWorkItemId: r.filedByWorkItemId,
+          filedByTitle: r.filedByTitle,
+          filingZone: r.filingZone,
+          filingToday: r.filingToday,
+          periodBasis: r.periodBasis,
+          ruleYearStartMonth: r.ruleYearStartMonth,
           resolutionOptionId: r.resolutionOptionId,
           resolutionName: r.resolutionName,
           resolutionReason: r.resolutionReason,

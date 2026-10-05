@@ -16,12 +16,15 @@
 import type { Actor } from "../../domain/ledger/model.js";
 import type {
   DueRuleException,
+  InstancePeriodBasis,
   IsoDate,
   ObligationInstance,
+  PeriodBasis,
   ObligationState,
   ObligationTemplate,
   ResolutionOption,
 } from "../../domain/obligation/model.js";
+import type { ReturnPeriod } from "../../domain/obligation/period-basis";
 
 // ── rules ──────────────────────────────────────────────────────────────────
 
@@ -34,6 +37,8 @@ import type {
 export interface NewObligationTemplate {
   readonly id: string;
   readonly tenantId: string;
+  /** Absent is the rule's own year, as every rule before 0358. */
+  readonly periodBasis?: PeriodBasis | undefined;
   readonly jurisdiction: string;
   readonly entityType: string | null;
   readonly module: string | null;
@@ -71,6 +76,9 @@ export interface TemplateEdit {
   readonly authority?: string | null | undefined;
   readonly recurrence?: ObligationTemplate["recurrence"] | undefined;
   readonly fiscalYearStartMonth?: number | undefined;
+  /** Part of the period shape: editable only while the rule has produced
+   *  nothing (0358). */
+  readonly periodBasis?: string | undefined;
   readonly dueRule?: ObligationTemplate["dueRule"] | undefined;
   readonly unresolvedReason?: string | null | undefined;
   readonly leadTimeDays?: number | undefined;
@@ -124,6 +132,7 @@ export interface TemplateRecord {
  * a real edit that COALESCE cannot express.
  */
 export interface TemplatePatch {
+  readonly periodBasis: PeriodBasis;
   readonly entityType: string | null;
   readonly module: string | null;
   readonly authority: string | null;
@@ -508,6 +517,12 @@ export interface CalendarSubject {
    * begins after it is not the firm's. Null while it has not been ended.
    */
   readonly endsOn: IsoDate | null;
+  /** The entity's own financial year end (`MM-DD`), or null: what a
+   *  `client_year_end` rule cuts this subject's periods on (0358). */
+  readonly financialYearEnd?: string | null | undefined;
+  /** The entity's return periods as its tax authorities assigned them: what
+   *  an `authority_assigned` rule cuts this subject's periods on (0359). */
+  readonly returnPeriods?: readonly ReturnPeriod[] | undefined;
 }
 
 /**
@@ -618,6 +633,8 @@ export interface NewObligationInstance {
   readonly statutoryDueOn: IsoDate;
   readonly internalTargetOn: IsoDate;
   readonly stateId: string;
+  /** What the period followed (0358). Absent is the rule's own year. */
+  readonly periodBasis?: InstancePeriodBasis | undefined;
 }
 
 /** One calendar row as a screen needs it — every name joined, because a list
@@ -640,6 +657,24 @@ export interface CalendarRow {
   readonly needsDecision: boolean;
   readonly workItemId: string | null;
   readonly filedOn: IsoDate | null;
+  /** The task that filed it (0357) and its title: its own task, or the period
+   *  job's task that covered it (Q063). Null while unfiled. */
+  readonly filedByWorkItemId: string | null;
+  readonly filedByTitle: string | null;
+  /**
+   * The zone this filing's day is read in, and today in it (Q070 Part B):
+   * the client entity's own zone, else its country's, else the firm's company
+   * there, else the firm's. "Past the statutory date" is judged on
+   * `filingToday`; the internal target (staff work) stays on the firm's day.
+   */
+  readonly filingZone: string;
+  readonly filingToday: IsoDate;
+  /**
+   * What the period followed (0358), and the rule's own year-start month: a
+   * `rule_fallback` row reads "Using April: no year end recorded for ...".
+   */
+  readonly periodBasis: InstancePeriodBasis;
+  readonly ruleYearStartMonth: number;
   /** What was decided about it, once somebody has. `resolutionName` is joined
    *  rather than left as an id for the reason every read model in this codebase
    *  joins its names: a list returning uuids is one somebody fetches per row. */
@@ -731,6 +766,10 @@ export interface MissableObligation {
   readonly templateName: string;
   readonly periodLabel: string;
   readonly workItemId: string | null;
+  /** The day it is for THIS filing (Q070 Part B): the swept firm day moved to
+   *  the filing's zone. What it was judged missed on. */
+  readonly filingDay: IsoDate;
+  readonly filingZone: string;
 }
 
 export interface CalendarQuery {
@@ -741,6 +780,10 @@ export interface CalendarQuery {
   /** Whether to include rows that have reached a terminal state. Off by
    *  default: within a year the filed ones are almost the whole table. */
   readonly includeSettled?: boolean | undefined;
+  /** Only rows this task filed (0357): what a period job's task page lists. */
+  readonly filedByWorkItemId?: string | undefined;
+  /** The instant `filingToday` is read at; the database's clock when absent. */
+  readonly now?: string | undefined;
   readonly limit?: number | undefined;
 }
 
@@ -852,15 +895,40 @@ export interface ObligationInstanceRepository {
     obligationId: string,
     filedOn: IsoDate,
     stateId: string,
+    /** The task whose completion files it (0357): its own, or a period
+     *  job's task (Q063). Written with `filed_on`, never apart from it. */
+    filedByWorkItemId: string,
   ): Promise<boolean>;
   /**
    * Take a recorded filing back and return the obligation to `stateId`.
-   * Returns false if it was not filed to begin with.
+   * Returns false if it was not filed to begin with, or was filed by a task
+   * other than `filedByWorkItemId`.
    *
    * Same shape and same reason as `markFiled`: the caller writes
-   * `obligation.filing_reversed` only when a filing really was withdrawn.
+   * `obligation.filing_reversed` only when a filing really was withdrawn. The
+   * task is in the WHERE (0357): a task reopening un-files only what IT filed,
+   * so a job's task reopened leaves a return filed through its own task alone,
+   * and a filing's own task reopened leaves one the job filed alone.
    */
-  clearFiled(tenantId: string, obligationId: string, stateId: string): Promise<boolean>;
+  clearFiled(
+    tenantId: string,
+    obligationId: string,
+    stateId: string,
+    filedByWorkItemId: string,
+  ): Promise<boolean>;
+  /** Every row this task filed (0357), withdrawn or not: what reopening the
+   *  task takes back. */
+  listFiledBy(tenantId: string, workItemId: string): Promise<readonly ObligationInstance[]>;
+  /**
+   * THE FILINGS A PERIOD JOB'S TASK FILES (Q063): when the task is a period
+   * job's (`delivery.job.period_start`), every row of that task's company
+   * whose period lies INSIDE the job's period (contained, never merely
+   * overlapping: July's task does not file the July-September quarter), on a
+   * chain the task's engagement's service carries (a live catalogue link, or
+   * the row's own engagement), not filed, not withdrawn, not in a finished
+   * state. Empty for a task that is not a period job's.
+   */
+  listJobFilingsForTask(tenantId: string, workItemId: string): Promise<readonly ObligationInstance[]>;
   /**
    * Everything whose statutory date has passed with nothing filed, nobody
    * having decided, and whose state can still be missed.
@@ -872,9 +940,16 @@ export interface ObligationInstanceRepository {
    */
   listMissable(
     tenantId: string,
+    /** The FIRM's day being swept. */
     asOf: IsoDate,
     floor: IsoDate | null,
     limit: number,
+    /**
+     * The instant of the sweep (Q070 Part B). Each row is judged on ITS
+     * filing's day: `asOf` moved by how far the filing's zone is ahead of or
+     * behind the firm's at this instant (`filingDay`, `filingZone`).
+     */
+    now: string,
   ): Promise<readonly MissableObligation[]>;
   /**
    * Move one obligation into the firm's missed state. Returns false if it had

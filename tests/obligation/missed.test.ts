@@ -140,12 +140,14 @@ function harness(opts: { now?: string; zone?: string } = {}) {
       stateId: byCode(opts.stateCode ?? "pending").id,
       workItemId: null,
       filedOn: opts.filedOn ?? null,
+      filedByWorkItemId: null,
       resolutionOptionId: null,
       resolutionReason: null,
       resolvedAt: null,
       withdrawnAt: opts.withdrawnAt ?? null,
       withdrawnByUserId: null,
       withdrawnReason: opts.withdrawnAt ? "service_unlinked" : null,
+      periodBasis: "rule_calendar",
     });
     return id;
   };
@@ -511,5 +513,60 @@ describe("the decision queue's today (audit 2026-10-03, B44)", () => {
     const h = harness({ now: "2026-10-02T20:00:00Z", zone: "Asia/Kolkata" });
     expect(await h.service.decisionDay(TENANT)).toBe("2026-10-03");
     expect(await h.service.decisionDay(TENANT, "2026-10-02")).toBe("2026-10-02");
+  });
+});
+
+describe("which day it is, for the FILING (Q070 Part B)", () => {
+  // 10x: "Respective country time zone basis." An Indian firm, and filings in
+  // Dubai, New York and Singapore, each judged on its own country's midnight.
+  function indianFirm(now: string) {
+    const h = harness({ now, zone: "Asia/Kolkata" });
+    h.instances.firmZone = "Asia/Kolkata";
+    return h;
+  }
+
+  it("a UAE filing is missed on Dubai's day, not India's", async () => {
+    // 19:00 UTC on the 28th: 00:30 on the 29th in India, 23:00 on the 28th
+    // in Dubai. India's own filing has passed; the UAE one is still due today.
+    const h = indianFirm("2026-10-28T19:00:00Z");
+    const india = h.given({ statutoryDueOn: "2026-10-28" });
+    const uae = h.given({ statutoryDueOn: "2026-10-28" });
+    h.instances.filingZones.set(uae, "Asia/Dubai");
+
+    expect((await h.service.sweepTenant(TENANT, ACTOR)).missed).toBe(1);
+    expect(h.stateOf(india)).toBe("missed");
+    expect(h.stateOf(uae)).toBe("pending");
+    const ev = h.events.recorded.find((e) => e.verb === "obligation.missed");
+    expect(ev?.payload).toMatchObject({ asOf: "2026-10-29", filingZone: "Asia/Kolkata", daysLate: 1 });
+  });
+
+  it("and once Dubai's midnight has passed, it is", async () => {
+    const h = indianFirm("2026-10-28T20:30:00Z");
+    const uae = h.given({ statutoryDueOn: "2026-10-28" });
+    h.instances.filingZones.set(uae, "Asia/Dubai");
+    expect((await h.service.sweepTenant(TENANT, ACTOR)).missed).toBe(1);
+    const ev = h.events.recorded.find((e) => e.verb === "obligation.missed");
+    expect(ev?.payload).toMatchObject({ asOf: "2026-10-29", filingZone: "Asia/Dubai", daysLate: 1 });
+  });
+
+  it("a US filing is judged on New York's day, a whole India morning later", async () => {
+    // 02:00 UTC on the 29th: 07:30 on the 29th in India, 22:00 on the 28th in
+    // New York, so a return due on the 28th is still due today.
+    const h = indianFirm("2026-10-29T02:00:00Z");
+    const us = h.given({ statutoryDueOn: "2026-10-28" });
+    h.instances.filingZones.set(us, "America/New_York");
+    expect((await h.service.sweepTenant(TENANT, ACTOR)).missed).toBe(0);
+    expect(h.stateOf(us)).toBe("pending");
+  });
+
+  it("a Singapore filing is missed BEFORE India's midnight", async () => {
+    // 17:00 UTC on the 28th: 22:30 in India, 01:00 on the 29th in Singapore.
+    const h = indianFirm("2026-10-28T17:00:00Z");
+    const india = h.given({ statutoryDueOn: "2026-10-28" });
+    const sg = h.given({ statutoryDueOn: "2026-10-28" });
+    h.instances.filingZones.set(sg, "Asia/Singapore");
+    expect((await h.service.sweepTenant(TENANT, ACTOR)).missed).toBe(1);
+    expect(h.stateOf(sg)).toBe("missed");
+    expect(h.stateOf(india)).toBe("pending");
   });
 });

@@ -119,6 +119,9 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // Correcting a client's master data (V2.5): the gate that created it.
   [routeKey("PATCH", "/api/v1/parties/{partyId}"), "party:write" as const],
   [routeKey("PATCH", "/api/v1/parties/{partyId}/legal-entity"), "party:write" as const],
+  [routeKey("PUT", "/api/v1/parties/{partyId}/legal-entity/time-zone"), "party:write" as const],
+  [routeKey("PUT", "/api/v1/parties/{partyId}/return-periods"), "party:write" as const],
+  [routeKey("DELETE", "/api/v1/parties/{partyId}/return-periods/{tax}"), "party:write" as const],
   [routeKey("POST", "/api/v1/parties/{partyId}/identifiers/{identifierId}/end"), "party:write" as const],
   [routeKey("POST", "/api/v1/parties/{partyId}/identifiers/{identifierId}/void"), "party:write" as const],
   [routeKey("POST", "/api/v1/parties/relationships"), "party:write" as const],
@@ -683,6 +686,7 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("GET", "/api/v1/obligation-rules"), "party:read" as const],
   [routeKey("POST", "/api/v1/obligation-rules"), "tenant:admin" as const],
   [routeKey("POST", "/api/v1/obligation-rules/seed-india"), "tenant:admin" as const],
+  [routeKey("POST", "/api/v1/obligation-rules/seed-pack/{country}"), "tenant:admin" as const],
   [routeKey("PATCH", "/api/v1/obligation-rules/{ruleId}"), "tenant:admin" as const],
   // Superseding is `tenant:admin` like every other rule write, and it is the
   // sharpest of them: it decides which rule a return is due under from a

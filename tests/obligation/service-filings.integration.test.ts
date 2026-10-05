@@ -456,7 +456,7 @@ describe("a withdrawn filing is in NO reader", () => {
   });
 
   it("is never MISSED, however far past its date the sweep runs", async () => {
-    const missable = await instances.listMissable(tenantId, "2027-12-31", null, 500);
+    const missable = await instances.listMissable(tenantId, "2027-12-31", null, 500, "2027-12-31T12:00:00Z");
     expect(missable.some((r) => r.id === withdrawnRow)).toBe(false);
     const states = await service.listStates(tenantId);
     const missed = states.find((s) => s.isMissed);

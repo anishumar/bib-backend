@@ -4,6 +4,7 @@
 // one tenant context. Date columns are cast to ::text so they return as ISO
 // YYYY-MM-DD strings (postgres.js would otherwise hand back Date objects),
 // keeping effective-dating a lexicographic string compare end to end.
+import type { ReturnPeriod } from "../../domain/obligation/period-basis";
 import { postalAddressJson, readPostalAddress } from "../../domain/party/address";
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
@@ -63,6 +64,7 @@ interface LegalEntityRow {
   entity_type: string;
   incorporated_on: string | null;
   financial_year_end: string | null;
+  time_zone: string | null;
   registered_address: Record<string, unknown> | null;
   status: LegalEntityStatus;
 }
@@ -105,7 +107,7 @@ export async function insertLegalEntity(db: Db, e: NewLegalEntity): Promise<Lega
       (${e.partyId}, ${e.tenantId}, ${e.jurisdiction}, ${e.entityType},
        ${e.incorporatedOn}, ${e.financialYearEnd}, ${address})
     RETURNING party_id, tenant_id, jurisdiction, entity_type,
-              incorporated_on::text AS incorporated_on, financial_year_end,
+              incorporated_on::text AS incorporated_on, financial_year_end, time_zone,
               registered_address, status
   `;
   if (!row) throw new Error("legal_entity insert returned no row");
@@ -164,6 +166,7 @@ function toLegalEntity(r: LegalEntityRow): LegalEntity {
     entityType: r.entity_type,
     incorporatedOn: r.incorporated_on,
     financialYearEnd: r.financial_year_end,
+    timeZone: r.time_zone,
     registeredAddress: r.registered_address,
     status: r.status,
   };
@@ -303,7 +306,64 @@ export class PostgresPartyRepository implements PartyRepository, ClientDirectory
         WHERE party_id = ${partyId}
         RETURNING party_id, tenant_id, jurisdiction, entity_type,
                   incorporated_on::text AS incorporated_on,
-                  financial_year_end, registered_address, status
+                  financial_year_end, time_zone, registered_address, status
+      `;
+      return row ? toLegalEntity(row) : null;
+    });
+  }
+
+  async listReturnPeriods(tenantId: string, partyId: string): Promise<readonly ReturnPeriod[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<{ tax: string; frequency: string; first_month: number | null }[]>`
+        SELECT tax, frequency, first_month FROM core.legal_entity_return_period
+        WHERE entity_party_id = ${partyId} AND cleared_at IS NULL
+        ORDER BY tax
+      `;
+      return rows.map((r) => ({
+        tax: r.tax,
+        frequency: r.frequency === "monthly" ? ("monthly" as const) : ("quarterly" as const),
+        firstMonth: r.first_month,
+      }));
+    });
+  }
+
+  async setReturnPeriod(tenantId: string, partyId: string, p: ReturnPeriod): Promise<void> {
+    await withTenant(this.app, tenantId, async (db) => {
+      await db`
+        INSERT INTO core.legal_entity_return_period (tenant_id, entity_party_id, tax, frequency, first_month)
+        VALUES (${tenantId}, ${partyId}, ${p.tax}, ${p.frequency}, ${p.firstMonth})
+        ON CONFLICT (tenant_id, entity_party_id, tax)
+        DO UPDATE SET frequency = EXCLUDED.frequency, first_month = EXCLUDED.first_month,
+                      cleared_at = NULL
+      `;
+    });
+  }
+
+  async removeReturnPeriod(tenantId: string, partyId: string, tax: string): Promise<boolean> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<{ id: string }[]>`
+        UPDATE core.legal_entity_return_period SET cleared_at = now()
+        WHERE entity_party_id = ${partyId} AND tax = ${tax} AND cleared_at IS NULL
+        RETURNING id
+      `;
+      return rows.length > 0;
+    });
+  }
+
+  /** A client company's own zone, or null for its country's (Q070 Part B).
+   *  0337's trigger refuses a zone the database does not know. */
+  async setLegalEntityTimeZone(
+    tenantId: string,
+    partyId: string,
+    timeZone: string | null,
+  ): Promise<LegalEntity | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<LegalEntityRow[]>`
+        UPDATE core.legal_entity SET time_zone = ${timeZone}
+        WHERE party_id = ${partyId}
+        RETURNING party_id, tenant_id, jurisdiction, entity_type,
+                  incorporated_on::text AS incorporated_on,
+                  financial_year_end, time_zone, registered_address, status
       `;
       return row ? toLegalEntity(row) : null;
     });
@@ -337,7 +397,7 @@ export class PostgresPartyRepository implements PartyRepository, ClientDirectory
       const rows = await db<LegalEntityRow[]>`
         SELECT party_id, tenant_id, jurisdiction, entity_type,
                incorporated_on::text AS incorporated_on,
-               financial_year_end, registered_address, status
+               financial_year_end, time_zone, registered_address, status
         FROM core.legal_entity
         WHERE party_id = ${partyId}
         ORDER BY jurisdiction

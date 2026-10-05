@@ -892,11 +892,18 @@ export class FakeObligationFiling implements ObligationFiling {
     _tenantId: string,
     workItemId: string,
     _entityPartyId: string,
-  ): Promise<{ readonly linked: LinkableFiling | null; readonly open: readonly LinkableFiling[] }> {
+  ): Promise<{
+    readonly linked: LinkableFiling | null;
+    readonly open: readonly LinkableFiling[];
+    readonly filedHere: readonly LinkableFiling[];
+  }> {
     const link = this.links.find((l) => l.task.id === workItemId);
     return Promise.resolve({
       linked: link === undefined ? null : (this.filings.find((f) => f.obligationId === link.obligationId) ?? null),
       open: this.filings.filter((f) => !this.links.some((l) => l.obligationId === f.obligationId)),
+      filedHere: this.filings.filter(
+        (f) => f.filedByWorkItemId === workItemId && f.obligationId !== link?.obligationId,
+      ),
     });
   }
 
@@ -998,5 +1005,12 @@ export class FakeJobStepHandover implements JobStepHandover {
   ): Promise<number> {
     this.calls.push({ jobId, fromUserId, toUserId });
     return Promise.resolve(this.moves);
+  }
+
+  /** Open step labels by job id; a job not named has none (Q063). */
+  readonly open = new Map<string, readonly string[]>();
+
+  openStepLabels(_tenantId: string, jobId: string): Promise<readonly string[]> {
+    return Promise.resolve(this.open.get(jobId) ?? []);
   }
 }

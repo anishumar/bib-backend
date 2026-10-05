@@ -424,6 +424,14 @@ export class ClientImportService {
             actor,
           );
           made.push(`its ${row.entityType.trim()} registration in ${row.jurisdiction.toUpperCase()}`);
+          for (const period of row.returnPeriods) {
+            step = `recording its ${period.tax} return period`;
+            await this.deps.parties.setReturnPeriod(
+              { tenantId, partyId: org.partyId, tax: period.tax, frequency: period.frequency, firstMonth: period.firstMonth },
+              actor,
+            );
+            made.push(`its ${period.tax} return period`);
+          }
         }
 
         for (const [i, id] of row.identifiers.entries()) {

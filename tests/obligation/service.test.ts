@@ -470,6 +470,107 @@ describe("the filing closes when its task does, and opens again if the task reop
   });
 });
 
+describe("a period job's task files its period's filings, and takes back only those (Q063)", () => {
+  // Ashish (10x), 2026-10-04: "Job marked as done means the return is being
+  // filed." The month task of a recurring service ("GST · Aug 2026") is what
+  // the firm marks done; it is not the filing's own task.
+  const JOB_TASK = "00000000-0000-4000-8000-00000000a0b1";
+  let h: H;
+  beforeEach(() => {
+    h = harness();
+  });
+
+  /** August to October generated; the job's task is August's, on the GST
+   *  service that carries the rule. */
+  async function augustJob(): Promise<string> {
+    const rule = await firmWithGst(h);
+    await h.service.generate(FIRM, { from: "2026-08-01", to: "2026-10-31" }, ACTOR);
+    h.instances.jobTasks.set(JOB_TASK, {
+      entityPartyId: ENTITY,
+      periodStart: "2026-08-01",
+      periodEnd: "2026-08-31",
+      templateIds: new Set([rule.id]),
+    });
+    return rule.id;
+  }
+  const row = (label: string) => h.instances.rows.find((r) => r.periodLabel === label);
+
+  it("files the period's filing, names the job's task on it, and leaves other months alone", async () => {
+    await augustJob();
+    await h.service.reconcileFiling(FIRM, JOB_TASK, true, ACTOR);
+
+    expect(row("Aug 2026")).toMatchObject({ filedOn: TODAY, filedByWorkItemId: JOB_TASK });
+    expect(row("Sep 2026")?.filedOn).toBeNull();
+    expect(row("Oct 2026")?.filedOn).toBeNull();
+    const ev = h.events.recorded.find((e) => e.verb === "obligation.filed");
+    expect(ev?.payload).toMatchObject({ workItemId: JOB_TASK, byJobTask: true, daysLate: -21 });
+    expect(findPiiKey(ev?.payload ?? {})).toBeNull();
+  });
+
+  it("reopening the job's task un-files exactly what it filed", async () => {
+    await augustJob();
+    await h.service.reconcileFiling(FIRM, JOB_TASK, true, ACTOR);
+    await h.service.reconcileFiling(FIRM, JOB_TASK, false, ACTOR);
+
+    expect(row("Aug 2026")).toMatchObject({ filedOn: null, filedByWorkItemId: null });
+    const initial = (await h.states.list(FIRM)).find((st) => st.isInitial);
+    expect(row("Aug 2026")?.stateId).toBe(initial?.id);
+    const ev = h.events.recorded.find((e) => e.verb === "obligation.filing_reversed");
+    expect(ev?.payload).toMatchObject({ workItemId: JOB_TASK, byJobTask: true });
+  });
+
+  it("never un-files a return filed through its own task", async () => {
+    await augustJob();
+    await h.service.raise(FIRM, "2026-09-30", ACTOR);
+    const own = row("Aug 2026")?.workItemId;
+    if (!own) throw new Error("August was not raised");
+    // The filing's own task is finished first: filed by it.
+    await h.service.reconcileFiling(FIRM, own, true, ACTOR);
+    // The job's task done and then reopened: nothing of its own to take back.
+    await h.service.reconcileFiling(FIRM, JOB_TASK, true, ACTOR);
+    await h.service.reconcileFiling(FIRM, JOB_TASK, false, ACTOR);
+
+    expect(row("Aug 2026")).toMatchObject({ filedOn: TODAY, filedByWorkItemId: own });
+    expect(h.events.verbs().filter((v) => v === "obligation.filed")).toHaveLength(1);
+    expect(h.events.verbs()).not.toContain("obligation.filing_reversed");
+  });
+
+  it("the filing's own task reopened leaves a return the job filed alone", async () => {
+    await augustJob();
+    await h.service.raise(FIRM, "2026-09-30", ACTOR);
+    const own = row("Aug 2026")?.workItemId;
+    if (!own) throw new Error("August was not raised");
+    // The job files it while its own task is still open on a desk.
+    await h.service.reconcileFiling(FIRM, JOB_TASK, true, ACTOR);
+    expect(row("Aug 2026")).toMatchObject({ filedOn: TODAY, filedByWorkItemId: JOB_TASK, workItemId: own });
+    // That task cancelled or reopened says nothing about the return; finishing
+    // it writes no second filing.
+    await h.service.reconcileFiling(FIRM, own, false, ACTOR);
+    await h.service.reconcileFiling(FIRM, own, true, ACTOR);
+
+    expect(row("Aug 2026")).toMatchObject({ filedOn: TODAY, filedByWorkItemId: JOB_TASK });
+    expect(h.events.verbs().filter((v) => v === "obligation.filed")).toHaveLength(1);
+    expect(h.events.verbs()).not.toContain("obligation.filing_reversed");
+  });
+
+  it("files nothing for a task that is not a period job's", async () => {
+    await augustJob();
+    const before = h.events.verbs().length;
+    await h.service.reconcileFiling(FIRM, "00000000-0000-4000-8000-0000000000ff", true, ACTOR);
+    expect(h.events.verbs()).toHaveLength(before);
+    expect(h.instances.rows.filter((r) => r.filedOn !== null)).toHaveLength(0);
+  });
+
+  it("the task page lists what the job's task filed", async () => {
+    await augustJob();
+    await h.service.reconcileFiling(FIRM, JOB_TASK, true, ACTOR);
+    const read = await h.service.filingsForTask(FIRM, JOB_TASK, ENTITY);
+    expect(read.linked).toBeNull();
+    expect(read.filedHere.map((r) => r.periodLabel)).toEqual(["Aug 2026"]);
+    expect(read.filedHere[0]?.filedByWorkItemId).toBe(JOB_TASK);
+  });
+});
+
 describe("a task raised by hand can be the one that files a filing (audit 2026-10-03, CA#36)", () => {
   // The roleplay firm approved "File GSTR-3B for September", an ad-hoc task,
   // and the calendar and the client's portal went on saying "GSTR-3B Sep 2026,
@@ -2279,5 +2380,199 @@ describe("filling the calendar the moment work goes live (audit 2026-10-03, CA#2
 
     const sweep = await h.service.sweepTenant(FIRM, ACTOR);
     expect(sweep.created).toBe(0);
+  });
+});
+
+describe("a rule may cut its periods on the CLIENT's year end (Q070 Part B, 0358)", () => {
+  const SG_A = "00000000-0000-4000-8000-0000000005a1";
+  const SG_B = "00000000-0000-4000-8000-0000000005b1";
+  let h: H;
+  beforeEach(() => {
+    h = harness();
+  });
+
+  /** Singapore's annual return on the client's year end: due 7 months after
+   *  it ends (the last day of the 7th month), on the firm's SG service. */
+  async function annualOnClientYear(periodBasis: "client_year_end" | "rule_calendar" = "client_year_end") {
+    await h.service.seedDefaultStates(FIRM, ACTOR);
+    h.services.keys.set(SERVICE, "sg-annual");
+    const { rule } = await h.service.createRule(
+      {
+        tenantId: FIRM,
+        jurisdiction: "SG",
+        serviceEntryIds: [SERVICE],
+        name: "Annual return (ACRA)",
+        recurrence: "annual",
+        fiscalYearStartMonth: 4,
+        periodBasis,
+        dueRule: { kind: "day_of_month", dueMonthOffset: 7, dueDayOfMonth: 31 },
+        leadTimeDays: 0,
+        rulePack: "sg@test",
+      },
+      ACTOR,
+    );
+    return rule;
+  }
+  function subject(entityPartyId: string, financialYearEnd: string | null, n: number) {
+    h.calendarSource.subjects.push({
+      entityPartyId,
+      engagementId: `00000000-0000-4000-8000-00000000e${String(n).padStart(3, "0")}`,
+      effectiveFrom: "2025-01-01",
+      jurisdiction: "SG",
+      entityType: null,
+      serviceEntryId: SERVICE,
+      financialYearEnd,
+    });
+  }
+  const rowsOf = (entity: string) =>
+    h.instances.rows
+      .filter((r) => r.entityPartyId === entity)
+      .sort((a, b) => a.periodStart.localeCompare(b.periodStart));
+
+  it("a December year-end client gets January-December years, due 31 July", async () => {
+    await annualOnClientYear();
+    subject(SG_A, "12-31", 1);
+    await h.service.generate(FIRM, { from: "2026-01-01", to: "2026-12-31" }, ACTOR);
+
+    expect(rowsOf(SG_A).map((r) => [r.periodStart, r.periodEnd, r.periodLabel, r.statutoryDueOn, r.periodBasis])).toEqual([
+      ["2026-01-01", "2026-12-31", "2026", "2027-07-31", "client_year_end"],
+    ]);
+  });
+
+  it("a client with no year end recorded takes the rule's own month, and the row says so", async () => {
+    await annualOnClientYear();
+    subject(SG_B, null, 2);
+    await h.service.generate(FIRM, { from: "2026-04-01", to: "2026-04-30" }, ACTOR);
+
+    expect(rowsOf(SG_B).map((r) => [r.periodStart, r.periodEnd, r.periodBasis])).toEqual([
+      ["2026-04-01", "2027-03-31", "rule_fallback"],
+    ]);
+    const [row] = await h.service.calendar(FIRM, {});
+    expect(row).toMatchObject({ periodBasis: "rule_fallback", ruleYearStartMonth: 4 });
+  });
+
+  it("two clients with different year ends get their own years from one rule", async () => {
+    await annualOnClientYear();
+    subject(SG_A, "12-31", 1);
+    subject(SG_B, "06-30", 2);
+    await h.service.generate(FIRM, { from: "2026-07-01", to: "2026-07-31" }, ACTOR);
+    expect(rowsOf(SG_A).map((r) => r.periodStart)).toEqual(["2026-01-01"]);
+    expect(rowsOf(SG_B).map((r) => [r.periodStart, r.periodEnd, r.periodLabel])).toEqual([
+      ["2026-07-01", "2027-06-30", "FY2026-27"],
+    ]);
+  });
+
+  it("a rule on its own year ignores the client's year end, as every rule did before", async () => {
+    await annualOnClientYear("rule_calendar");
+    subject(SG_A, "12-31", 1);
+    await h.service.generate(FIRM, { from: "2026-04-01", to: "2026-04-30" }, ACTOR);
+    expect(rowsOf(SG_A).map((r) => [r.periodStart, r.periodBasis])).toEqual([["2026-04-01", "rule_calendar"]]);
+  });
+
+  it("a year end that changes keeps what was generated, and never overlaps it (Q078's default)", async () => {
+    await annualOnClientYear();
+    subject(SG_A, "12-31", 1);
+    await h.service.generate(FIRM, { from: "2026-01-01", to: "2026-12-31" }, ACTOR);
+    // The client moves to a June year end.
+    h.calendarSource.subjects.length = 0;
+    subject(SG_A, "06-30", 1);
+    await h.service.generate(FIRM, { from: "2026-01-01", to: "2027-12-31" }, ACTOR);
+
+    // Jan-Dec 2026 stays; Jul 2026-Jun 2027 overlaps it and is not produced;
+    // Jul 2027-Jun 2028 is the first period on the new end.
+    expect(rowsOf(SG_A).map((r) => [r.periodStart, r.periodEnd])).toEqual([
+      ["2026-01-01", "2026-12-31"],
+      ["2027-07-01", "2028-06-30"],
+    ]);
+  });
+
+  it("whose year the periods follow is part of the period shape, locked once rows exist", async () => {
+    const rule = await annualOnClientYear();
+    subject(SG_A, "12-31", 1);
+    await h.service.generate(FIRM, { from: "2026-01-01", to: "2026-12-31" }, ACTOR);
+    await expect(
+      h.service.updateRule(FIRM, rule.id, { periodBasis: "rule_calendar" }, ACTOR),
+    ).rejects.toMatchObject({ code: "PERIOD_SHAPE_LOCKED" });
+    await expect(
+      h.service.updateRule(FIRM, rule.id, { periodBasis: "the_moon" }, ACTOR),
+    ).rejects.toMatchObject({ code: "INVALID_PERIOD_BASIS" });
+  });
+});
+
+describe("a rule on the period the tax authority assigned (Q073, 0359)", () => {
+  const FEB = "00000000-0000-4000-8000-0000000aef01";
+  const MONTHLY = "00000000-0000-4000-8000-0000000aef02";
+  const NONE = "00000000-0000-4000-8000-0000000aef03";
+  let h: H;
+  beforeEach(() => {
+    h = harness();
+  });
+
+  async function uaeVat() {
+    await h.service.seedDefaultStates(FIRM, ACTOR);
+    h.services.keys.set(SERVICE, "uae-vat");
+    const { rule } = await h.service.createRule(
+      {
+        tenantId: FIRM,
+        jurisdiction: "AE",
+        serviceEntryIds: [SERVICE],
+        module: "VAT",
+        name: "VAT return",
+        recurrence: "quarterly",
+        fiscalYearStartMonth: 1,
+        periodBasis: "authority_assigned",
+        dueRule: { kind: "days_after", dueDaysAfter: 28 },
+        leadTimeDays: 0,
+        rulePack: "ae@test",
+      },
+      ACTOR,
+    );
+    const subject = (entityPartyId: string, n: number, returnPeriods: { tax: string; frequency: "monthly" | "quarterly"; firstMonth: number | null }[]) =>
+      h.calendarSource.subjects.push({
+        entityPartyId,
+        engagementId: `00000000-0000-4000-8000-0000000ae${String(n).padStart(3, "0")}`,
+        effectiveFrom: "2026-01-01",
+        jurisdiction: "AE",
+        entityType: null,
+        serviceEntryId: SERVICE,
+        returnPeriods,
+      });
+    subject(FEB, 1, [{ tax: "VAT", frequency: "quarterly", firstMonth: 2 }]);
+    subject(MONTHLY, 2, [{ tax: "VAT", frequency: "monthly", firstMonth: null }]);
+    subject(NONE, 3, []);
+    return rule;
+  }
+  const rows = (e: string) =>
+    h.instances.rows.filter((r) => r.entityPartyId === e).sort((a, b) => a.periodStart.localeCompare(b.periodStart));
+
+  it("cuts each client's own period, labels the stagger, and gives a client with none nothing", async () => {
+    await uaeVat();
+    await h.service.generate(FIRM, { from: "2026-02-01", to: "2026-07-31" }, ACTOR);
+    expect(rows(FEB).map((r) => [r.periodLabel, r.periodEnd, r.statutoryDueOn, r.periodBasis])).toEqual([
+      ["Feb-Apr 2026", "2026-04-30", "2026-05-28", "authority_assigned"],
+      ["May-Jul 2026", "2026-07-31", "2026-08-28", "authority_assigned"],
+    ]);
+    expect(rows(MONTHLY).map((r) => r.periodLabel)).toEqual(["Feb 2026", "Mar 2026", "Apr 2026", "May 2026", "Jun 2026", "Jul 2026"]);
+    expect(rows(NONE)).toEqual([]);
+  });
+
+  it("needs the tax it is matched on", async () => {
+    await h.service.seedDefaultStates(FIRM, ACTOR);
+    await expect(
+      h.service.createRule(
+        {
+          tenantId: FIRM,
+          jurisdiction: "AE",
+          name: "VAT return",
+          recurrence: "quarterly",
+          fiscalYearStartMonth: 1,
+          periodBasis: "authority_assigned",
+          dueRule: { kind: "days_after", dueDaysAfter: 28 },
+          leadTimeDays: 0,
+          rulePack: "ae@test",
+        },
+        ACTOR,
+      ),
+    ).rejects.toMatchObject({ code: "ASSIGNED_PERIOD_NEEDS_TAX" });
   });
 });

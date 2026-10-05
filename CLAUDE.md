@@ -5005,3 +5005,66 @@ Branch `feat/quick-wins-1005`; handover `bib/prompts/build-2026-10-05/S1/`.
   `senders.integration`), `tests/portalaccess/service.test.ts`, `tests/portal/group.integration`,
   `tests/party/*`, `tests/readiness/*`, proposal/engagement service tests. Walk:
   `bib/demo-assets/tools/qw-walk.mjs` (38/38, Mailpit headers).
+
+## Filings across countries: the job files them, each on its own clock and period (S3, 2026-10-05)
+
+Four client answers (Q063, Q070 Part B, Q073, Q074), built on `feat/intl-compliance`, migrations
+0357-0359. The design for B1/B2 is `bib/prompts/company-calendar/SPEC.md` §5.
+
+**A period job's task files its period's filings (Q063, 0357).** Ashish: *"Job marked as done
+means the return is being filed."* `reconcileFiling` now files, besides the task's own filing,
+every unfiled, unwithdrawn, unfinished filing of the task's company whose period lies INSIDE the
+job's period (`delivery.job.period_start/_end`; contained, never overlapping, so July's task never
+files the July-September quarter) on a chain the task's service carries
+(`listJobFilingsForTask`, the CA#11 join `earliestFilingDue` uses). Each is `obligation.filed`
+with `byJobTask: true`. **`obligation_instance.filed_by_work_item_id` names the task that filed a
+row** (backfilled from `work_item_id`; CHECK: only while filed), and reopening a task takes back
+ONLY the rows naming it (`clearFiled` holds the task in its WHERE): the job's task reopened never
+un-files a return filed through its own task, and a filing's own task reopened never un-files
+one the job filed. A filing's own task left open when the job files it stays where it is; its
+page says "Filed by <job task>" (Shrestha's choice). **`JOB_STEPS_OPEN` (409)**: a job's task
+cannot be moved into a successful finished state, or approved, while the job has steps not
+settled (`JobStepHandover.openStepLabels`); Approve refuses BEFORE the decision is written. Known
+limit: a period job's steps are laid out at period END, so a task finished inside its own month
+has no steps to wait on.
+
+**A filing's day is its own (Q070 Part B, B1).** `domain/obligation/filing-zone.ts`: the client
+entity's `core.legal_entity.time_zone`, else the filing country's single zone
+(`filingCountryZones`: the tenancy table plus `US -> America/New_York`), else the zone of the
+firm's own company registered in that country, else the firm's. In SQL it is the constant
+`FILING_ZONE` fragment (the country table inlined as a literal: zone names only).
+`listMissable` takes the sweep's instant and judges each row on `asOf + (filing day - firm day)`
+at that instant (`filingDay`), so a replayed day still sweeps that day and a firm-zone filing is
+judged exactly as before. Calendar rows carry `filingZone` and `filingToday`. Reminders, T-X
+raising, escalations and the decision queue's `daysLate` stay on the firm's day.
+`PUT /parties/{id}/legal-entity/time-zone` sets a client company's own zone (offsets refused).
+`filed_on` is still the UTC day (2026-08-30 decision).
+
+**A rule's periods may follow the client (B2, 0358) or its tax authority (Q073, 0359).**
+`obligation_template.period_basis`: `rule_calendar` (every rule before 0358), `client_year_end`
+(quarters/years cut on `core.legal_entity.financial_year_end`), `authority_assigned` (each
+client's `core.legal_entity_return_period` for the rule's MODULE: monthly, or quarterly from
+`first_month` 1-3, the UAE VAT staggers; such a rule needs a module, CHECK +
+`ASSIGNED_PERIOD_NEEDS_TAX`). Part of the period shape (`PERIOD_SHAPE_LOCKED`). `periodCutFor`
+(`period-basis.ts`) decides per subject; the generator groups subjects by cut. Each row records
+`period_basis`, including `rule_fallback` (client_year_end asked, no year end recorded: the
+rule's month, and the calendar says "Using April: no year end recorded for X"). A client on an
+assigned basis with no period gets NO filing; the Setup line `return_periods` lists it. Assigned
+quarters are labelled "Feb-Apr 2026". **Q078 is unanswered**: SPEC's default holds, generated
+rows stay and a client-year or assigned period never overlaps a live row of the same chain and
+company (the `NOT EXISTS` in `createIfAbsent`, asked only for those bases). Return periods:
+`PUT /parties/{id}/return-periods`, `DELETE /parties/{id}/return-periods/{tax}`,
+`PartyProfile.returnPeriods`, `legal_entity.return_period_set/_removed`, import column
+"Tax Return Period" ("VAT quarterly Feb", "VAT monthly", several with ";").
+
+**Draft country packs (Q074).** `domain/obligation/rulepack-intl.ts`: UAE, Singapore and US
+filings from official sources, loaded only when a firm presses Load
+(`POST /obligation-rules/seed-pack/{AE|SG|US}`), every row UNCONFIRMED and on NO service, so
+nothing generates until the firm adds it to a service. The list for 10x to confirm is
+`bib/qa/intl-rule-packs-draft-2026-10.xlsx` (draft, not sent).
+
+Tests: `tests/obligation/service.test.ts` (Q063, B2, Q073 blocks), `missed.test.ts` (B1),
+`filing-zone.test.ts`, `assigned-periods.test.ts`, `tests/workitem/service.test.ts`
+(JOB_STEPS_OPEN), integration `job-filings` and `intl-calendar`. Walks: `demo-assets/tools/
+s3-walk.mjs` and `s3-vat-walk.mjs` on the 10x demo with `prompts/build-2026-10-05/S3-intl/walk/`
+fixtures.

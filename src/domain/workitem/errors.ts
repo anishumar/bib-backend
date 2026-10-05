@@ -55,6 +55,7 @@ export type WorkItemErrorCode =
   | "REVIEW_REJECTION_NEEDS_NOTE"
   | "REVIEWER_NOT_ELIGIBLE"
   | "CHECKLIST_OPEN"
+  | "JOB_STEPS_OPEN"
   | "REVIEW_RULE_NEEDED"
   | "NOTE_REQUIRED"
   | "NOTE_TOO_LONG";
@@ -427,6 +428,28 @@ export class ChecklistOpen extends WorkItemError {
         (to === "doer"
           ? "Tick them, or remove a line that does not apply, first."
           : "Send it back so the person doing it can finish them."),
+    );
+  }
+}
+
+/**
+ * A job's task is being finished while the job's own process still has steps
+ * open (Q063, Shrestha 2026-10-05). Finishing a period job's task files its
+ * period's returns, so "done" must mean the process ran: the steps first, the
+ * way a step's Done waits for its sub-steps (T6.15). A step that does not
+ * apply is skipped on the job page, which settles it.
+ */
+export class JobStepsOpen extends WorkItemError {
+  constructor(open: readonly string[], to: "doer" | "checker") {
+    const named = open.slice(0, 5).map((l) => `"${l}"`).join(", ");
+    const more = open.length > 5 ? ` and ${String(open.length - 5)} more` : "";
+    super(
+      "JOB_STEPS_OPEN",
+      `${open.length === 1 ? "One step of this job is" : `${String(open.length)} steps of this job are`} ` +
+        `not finished yet: ${named}${more}. ` +
+        (to === "doer"
+          ? "Finish them on the job page, or skip a step that does not apply, first."
+          : "Send it back, or finish the steps on the job page, before approving."),
     );
   }
 }

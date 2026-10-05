@@ -50,6 +50,7 @@ interface TemplateRow {
   authority: string | null;
   recurrence: string;
   fiscal_year_start_month: number;
+  period_basis: string;
   due_rule: string | null;
   due_month_offset: number | null;
   due_day_of_month: number | null;
@@ -90,8 +91,9 @@ interface StateRow {
 
 const TEMPLATE_COLUMNS =
   "id, tenant_id, jurisdiction, entity_type, lineage_id, module, name, authority, " +
-  "recurrence, fiscal_year_start_month, due_rule, due_month_offset, due_day_of_month, " +
-  "due_days_after, unresolved_reason, lead_time_days, rule_pack, supersedes_id, status, " +
+  "recurrence, fiscal_year_start_month, period_basis, due_rule, due_month_offset, " +
+  "due_day_of_month, due_days_after, unresolved_reason, lead_time_days, rule_pack, " +
+  "supersedes_id, status, " +
   // `::text` on both dates, which is what `day.ts` names as the better answer
   // where a query is being written anyway: Postgres renders the day, no `Date`
   // is constructed, and no zone is involved at any point.
@@ -126,6 +128,7 @@ function toTemplate(r: TemplateRow): ObligationTemplate {
     authority: r.authority,
     recurrence: r.recurrence as ObligationTemplate["recurrence"],
     fiscalYearStartMonth: r.fiscal_year_start_month,
+    periodBasis: r.period_basis as ObligationTemplate["periodBasis"],
     dueRule: toDueRule(r),
     unresolvedReason: r.unresolved_reason,
     leadTimeDays: r.lead_time_days,
@@ -185,14 +188,15 @@ export class PostgresObligationTemplateRepository implements ObligationTemplateR
           (id, tenant_id, jurisdiction, entity_type, module, name, authority,
            recurrence, fiscal_year_start_month, due_rule, due_month_offset, due_day_of_month,
            due_days_after, unresolved_reason, lead_time_days, rule_pack, supersedes_id,
-           effective_from, effective_to, status)
+           effective_from, effective_to, status, period_basis)
         VALUES
           (${t.id}, ${t.tenantId}, ${t.jurisdiction}, ${t.entityType},
            ${t.module}, ${t.name}, ${t.authority}, ${t.recurrence}, ${t.fiscalYearStartMonth},
            ${t.dueRule?.kind ?? null}, ${t.dueRule?.dueMonthOffset ?? null},
            ${t.dueRule?.dueDayOfMonth ?? null}, ${t.dueRule?.dueDaysAfter ?? null},
            ${t.unresolvedReason}, ${t.leadTimeDays}, ${t.rulePack}, ${t.supersedesId},
-           ${t.effectiveFrom}::date, ${t.effectiveTo}::date, ${t.status})
+           ${t.effectiveFrom}::date, ${t.effectiveTo}::date, ${t.status},
+           ${t.periodBasis ?? "rule_calendar"})
         -- The rule's own identity. A revision is a NEW row under a new pack, so
         -- a conflict here means "we already have this exact rule" and the seed
         -- must leave the firm's own confirmations and lead times alone.
@@ -246,14 +250,15 @@ export class PostgresObligationTemplateRepository implements ObligationTemplateR
           (id, tenant_id, jurisdiction, entity_type, module, name, authority,
            recurrence, fiscal_year_start_month, due_rule, due_month_offset, due_day_of_month,
            due_days_after, unresolved_reason, lead_time_days, rule_pack, supersedes_id,
-           effective_from, effective_to, status)
+           effective_from, effective_to, status, period_basis)
         VALUES
           (${t.id}, ${t.tenantId}, ${t.jurisdiction}, ${t.entityType},
            ${t.module}, ${t.name}, ${t.authority}, ${t.recurrence}, ${t.fiscalYearStartMonth},
            ${t.dueRule?.kind ?? null}, ${t.dueRule?.dueMonthOffset ?? null},
            ${t.dueRule?.dueDayOfMonth ?? null}, ${t.dueRule?.dueDaysAfter ?? null},
            ${t.unresolvedReason}, ${t.leadTimeDays}, ${t.rulePack}, ${predecessorId},
-           ${t.effectiveFrom}::date, ${t.effectiveTo}::date, ${t.status})
+           ${t.effectiveFrom}::date, ${t.effectiveTo}::date, ${t.status},
+           ${t.periodBasis ?? "rule_calendar"})
         RETURNING ${db.unsafe(TEMPLATE_COLUMNS)}
       `;
       const row = rows[0];
@@ -346,6 +351,7 @@ export class PostgresObligationTemplateRepository implements ObligationTemplateR
           authority               = ${patch.authority},
           recurrence              = ${patch.recurrence},
           fiscal_year_start_month = ${patch.fiscalYearStartMonth},
+          period_basis            = ${patch.periodBasis},
           due_rule                = ${patch.dueRule?.kind ?? null},
           due_month_offset        = ${patch.dueRule?.dueMonthOffset ?? null},
           due_day_of_month        = ${patch.dueRule?.dueDayOfMonth ?? null},

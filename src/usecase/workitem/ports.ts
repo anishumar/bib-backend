@@ -264,7 +264,13 @@ export interface ObligationFiling {
     tenantId: string,
     workItemId: string,
     entityPartyId: string,
-  ): Promise<{ readonly linked: LinkableFiling | null; readonly open: readonly LinkableFiling[] }>;
+  ): Promise<{
+    readonly linked: LinkableFiling | null;
+    readonly open: readonly LinkableFiling[];
+    /** The filings this task filed besides its own: a period job's task
+     *  files its period's returns (Q063). */
+    readonly filedHere: readonly LinkableFiling[];
+  }>;
   /** Make this task the one that files that filing; filed at once when the
    *  task is already done. The calendar's rules refuse, in words. */
   linkTask(
@@ -287,6 +293,9 @@ export interface LinkableFiling {
   readonly entityName: string | null;
   readonly stateName: string;
   readonly filedOn: string | null;
+  /** The task that filed it, and its title (Q063, 0357). */
+  readonly filedByWorkItemId: string | null;
+  readonly filedByTitle: string | null;
 }
 
 export interface NewWorkItem {
@@ -654,6 +663,13 @@ export interface JobStepHandover {
     toUserId: string,
     actor: Actor,
   ): Promise<number>;
+  /**
+   * The labels of the job's steps not yet settled (done, skipped or failed),
+   * in the job's order (Q063): what holds the job's task from being finished.
+   * Empty for a job with no steps laid out, which includes a period job whose
+   * process has not started yet (its steps are laid out when the period ends).
+   */
+  openStepLabels(tenantId: string, jobId: string): Promise<readonly string[]>;
 }
 
 /** One task the catch-up may re-decide. See `listCatchUpCandidates`. */

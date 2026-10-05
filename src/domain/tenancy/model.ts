@@ -302,6 +302,13 @@ export function zoneForCountry(country: string): string | null {
   return SINGLE_ZONE_COUNTRIES[country.trim().toUpperCase()] ?? null;
 }
 
+/** Every country this product knows to keep ONE zone, with that zone: the
+ *  table `zoneForCountry` reads, for a reader that needs all of it at once
+ *  (a filing's clock in SQL, Q070 Part B). */
+export function singleZoneCountries(): Readonly<Record<string, string>> {
+  return SINGLE_ZONE_COUNTRIES;
+}
+
 /**
  * The zone a set of companies' countries settles, or null.
  *

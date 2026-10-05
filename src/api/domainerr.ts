@@ -324,6 +324,8 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_JURISDICTION":
       case "INVALID_RECURRENCE":
       case "INVALID_FISCAL_YEAR_START":
+      case "INVALID_PERIOD_BASIS":
+      case "ASSIGNED_PERIOD_NEEDS_TAX":
       case "INVALID_DUE_RULE":
       case "INCOMPLETE_DUE_RULE":
       case "UNRESOLVED_REASON_REQUIRED":
@@ -661,6 +663,7 @@ export function mapError(err: unknown): MappedError {
       case "REVIEW_ALREADY_OPEN":
       case "REVIEW_ALREADY_DECIDED":
       case "CHECKLIST_OPEN": // a line on the task's own list is open (CA#30)
+      case "JOB_STEPS_OPEN": // the job's process still has steps open (Q063)
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

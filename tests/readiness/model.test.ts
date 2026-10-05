@@ -58,6 +58,7 @@ describe("the lines", () => {
       "client_details",
       "account_team",
       "portal_contacts",
+      "return_periods",
     ]);
   });
 
@@ -73,6 +74,7 @@ describe("the lines", () => {
       "client_details",
       "account_team",
       "portal_contacts",
+      "return_periods",
     ]);
     expect(lines.filter((l) => l.state === "to_do").map((l) => l.key)).toEqual([
       "company_details",

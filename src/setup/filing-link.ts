@@ -25,6 +25,8 @@ function toLinkable(r: CalendarRow): LinkableFiling {
     entityName: r.entityName,
     stateName: r.stateName,
     filedOn: r.filedOn,
+    filedByWorkItemId: r.filedByWorkItemId,
+    filedByTitle: r.filedByTitle,
   };
 }
 
@@ -33,8 +35,16 @@ export function obligationFilingPort(obligations: () => ObligationService): Obli
     reconcileFiling: (tenantId, workItemId, discharged, actor) =>
       obligations().reconcileFiling(tenantId, workItemId, discharged, actor),
     filingsForTask: async (tenantId, workItemId, entityPartyId) => {
-      const { linked, open } = await obligations().filingsForTask(tenantId, workItemId, entityPartyId);
-      return { linked: linked === null ? null : toLinkable(linked), open: open.map(toLinkable) };
+      const { linked, open, filedHere } = await obligations().filingsForTask(
+        tenantId,
+        workItemId,
+        entityPartyId,
+      );
+      return {
+        linked: linked === null ? null : toLinkable(linked),
+        open: open.map(toLinkable),
+        filedHere: filedHere.map(toLinkable),
+      };
     },
     linkTask: (tenantId, obligationId, task, actor) =>
       obligations().linkWorkItem(tenantId, obligationId, task, actor),

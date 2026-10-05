@@ -311,6 +311,10 @@ const linkableFiling = () =>
     entityName: z.string().nullable(),
     stateName: z.string().openapi({ description: "The firm's own word for where the filing stands." }),
     filedOn: IsoDate.nullable(),
+    filedByWorkItemId: z.string().uuid().nullable().openapi({
+      description: "The task that filed it (Q063): this one, or a period job's task. Null while unfiled.",
+    }),
+    filedByTitle: z.string().nullable(),
   });
 const LinkableFilingSchema = linkableFiling().openapi("LinkableFiling");
 
@@ -325,6 +329,12 @@ const TaskFilingResponse = z
       description:
         "The company's open filings with no task yet, by due date: what this task could file. " +
         "The company is the task's entity, or else its client.",
+    }),
+    filedHere: z.array(LinkableFilingSchema).openapi({
+      description:
+        "The filings this task filed besides its own (Q063): finishing a period job's task " +
+        "files every open filing of its company inside the job's period on a rule its service " +
+        "carries, and reopening it un-files exactly these.",
     }),
   })
   .openapi("TaskFilingResponse");
@@ -745,14 +755,21 @@ function toLinkableWire(f: LinkableFiling): z.infer<typeof LinkableFilingSchema>
     entityName: f.entityName,
     stateName: f.stateName,
     filedOn: f.filedOn,
+    filedByWorkItemId: f.filedByWorkItemId,
+    filedByTitle: f.filedByTitle,
   };
 }
 
 function filingWire(r: {
   readonly linked: LinkableFiling | null;
   readonly open: readonly LinkableFiling[];
+  readonly filedHere: readonly LinkableFiling[];
 }): z.infer<typeof TaskFilingResponse> {
-  return { linked: r.linked === null ? null : toLinkableWire(r.linked), open: r.open.map(toLinkableWire) };
+  return {
+    linked: r.linked === null ? null : toLinkableWire(r.linked),
+    open: r.open.map(toLinkableWire),
+    filedHere: r.filedHere.map(toLinkableWire),
+  };
 }
 
 function toCheckRowWire(c: WorkItemCheckOnDesk): z.infer<typeof WorkItemCheckRowSchema> {

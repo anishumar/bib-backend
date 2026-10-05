@@ -33,6 +33,8 @@ export type ObligationErrorCode =
   | "INVALID_JURISDICTION"
   | "INVALID_RECURRENCE"
   | "INVALID_FISCAL_YEAR_START"
+  | "INVALID_PERIOD_BASIS"
+  | "ASSIGNED_PERIOD_NEEDS_TAX"
   | "INVALID_DUE_RULE"
   | "INCOMPLETE_DUE_RULE"
   | "UNRESOLVED_REASON_REQUIRED"
@@ -108,6 +110,30 @@ export class InvalidRecurrence extends ObligationError {
         `annual or event. "event" means the filing is triggered by something happening (a ` +
         `share allotment, a director change) and produces no calendar entries, because ` +
         `nothing in this system yet knows the event occurred.`,
+    );
+  }
+}
+
+export class InvalidPeriodBasis extends ObligationError {
+  constructor(value: string) {
+    super(
+      "INVALID_PERIOD_BASIS",
+      `A filing's periods follow the rule's own year ("rule_calendar"), the client's year end ` +
+        `("client_year_end") or the period its tax authority assigned ("authority_assigned"), ` +
+        `not ${JSON.stringify(value)}.`,
+    );
+  }
+}
+
+/** An authority-assigned rule is matched to a client's return period by its
+ *  module (0359), so it cannot be written without one, or for an event. */
+export class AssignedPeriodNeedsTax extends ObligationError {
+  constructor() {
+    super(
+      "ASSIGNED_PERIOD_NEEDS_TAX",
+      "A filing on the period the tax authority assigned needs its tax (e.g. VAT) in the group " +
+        "field, and must come round monthly or quarterly. Each client's assigned period for that " +
+        "tax decides its returns.",
     );
   }
 }

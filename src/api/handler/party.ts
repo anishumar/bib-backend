@@ -123,6 +123,11 @@ const LegalEntitySchema = z
     entityType: z.string(),
     incorporatedOn: z.string().nullable(),
     financialYearEnd: z.string().nullable(),
+    timeZone: z.string().nullable().openapi({
+      description:
+        "The company's own IANA zone, or null for its country's. For a client company it is " +
+        "the clock its filings are judged missed on (Q070 Part B).",
+    }),
     registeredAddress: z.record(z.unknown()).nullable(),
     status: z.enum(["active", "dormant", "under_strike_off", "struck_off", "dissolved"]),
   })
@@ -194,6 +199,18 @@ const RelationshipTypeSchema = z
   })
   .openapi("RelationshipType");
 
+const ReturnPeriodSchema = z
+  .object({
+    tax: z.string().openapi({ description: "The tax, as a filing rule's group names it: VAT." }),
+    frequency: z.enum(["monthly", "quarterly"]),
+    firstMonth: z.number().int().min(1).max(3).nullable().openapi({
+      description:
+        "Quarterly only: the first month of its first calendar-year quarter. 1 Jan/Apr/Jul/Oct, " +
+        "2 Feb/May/Aug/Nov, 3 Mar/Jun/Sep/Dec. Null when monthly.",
+    }),
+  })
+  .openapi("ReturnPeriod");
+
 const PartyProfileSchema = z
   .object({
     party: PartySchema,
@@ -207,6 +224,10 @@ const PartyProfileSchema = z
     // financial-year end that can be written and never read back is not a
     // stored fact.
     legalEntities: z.array(LegalEntitySchema),
+    returnPeriods: z.array(ReturnPeriodSchema).openapi({
+      description:
+        "The company's return periods as its tax authorities assigned them (Q073, 0359), by tax.",
+    }),
     identifiers: z.array(IdentifierSchema),
     relationships: z.array(RelationshipRecordSchema),
   })
@@ -429,6 +450,84 @@ const correctLegalEntityRoute = createRoute({
     401: errorResponse("No authenticated session"),
     403: errorResponse("The session has not selected an org, or the role may not do this"),
     409: errorResponse("The client is not registered as a company"),
+  },
+});
+
+const SetEntityTimeZoneBody = z
+  .object({
+    timeZone: z.string().max(64).nullable().openapi({ example: "America/Los_Angeles" }),
+  })
+  .openapi("SetLegalEntityTimeZone");
+
+const setEntityTimeZoneRoute = createRoute({
+  method: "put",
+  path: "/api/v1/parties/{partyId}/legal-entity/time-zone",
+  tags: ["party"],
+  summary: "Set a registered company's own time zone, or null for its country's",
+  description:
+    "For a client company, the clock its filings are judged MISSED on (Q070 Part B): its own " +
+    "zone first, else its country's (New York for the US), else the firm's company there, " +
+    "else the firm's. Only needed where the country keeps several zones.",
+  request: {
+    params: PartyParam,
+    body: { content: { "application/json": { schema: SetEntityTimeZoneBody } }, required: true },
+  },
+  responses: {
+    200: { description: "Set", content: { "application/json": { schema: LegalEntitySchema } } },
+    400: errorResponse("Not a time zone this system knows, an offset, or nothing changed"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not do this"),
+    409: errorResponse("The client is not registered as a company"),
+  },
+});
+
+const SetReturnPeriodBody = z
+  .object({
+    tax: z.string().min(1).max(40).openapi({ example: "VAT" }),
+    frequency: z.enum(["monthly", "quarterly"]),
+    firstMonth: z.number().int().min(1).max(3).nullable().optional(),
+  })
+  .openapi("SetReturnPeriod");
+
+const ReturnPeriodsResponse = z
+  .object({ returnPeriods: z.array(ReturnPeriodSchema) })
+  .openapi("ReturnPeriods");
+
+const setReturnPeriodRoute = createRoute({
+  method: "put",
+  path: "/api/v1/parties/{partyId}/return-periods",
+  tags: ["party"],
+  summary: "Record a company's return period for one tax, as its tax authority assigned it",
+  description:
+    "Q073: e.g. UAE VAT, quarterly on the February stagger. A filing rule that follows the " +
+    "authority-assigned period for that tax cuts this company's returns on it. One per tax; " +
+    "setting it again changes it, and filings already generated stay.",
+  request: {
+    params: PartyParam,
+    body: { content: { "application/json": { schema: SetReturnPeriodBody } }, required: true },
+  },
+  responses: {
+    200: { description: "Recorded", content: { "application/json": { schema: ReturnPeriodsResponse } } },
+    400: errorResponse("Not a tax code, not monthly or quarterly, no quarter months, or nothing changed"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not do this"),
+    409: errorResponse("The client is not registered as a company"),
+  },
+});
+
+const TaxParam = z.object({ partyId: z.string().uuid(), tax: z.string().min(1).max(40) });
+
+const removeReturnPeriodRoute = createRoute({
+  method: "delete",
+  path: "/api/v1/parties/{partyId}/return-periods/{tax}",
+  tags: ["party"],
+  summary: "Take a company's recorded return period for one tax off",
+  request: { params: TaxParam },
+  responses: {
+    200: { description: "Taken off", content: { "application/json": { schema: ReturnPeriodsResponse } } },
+    400: errorResponse("None is recorded for that tax"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not do this"),
   },
 });
 
@@ -700,6 +799,7 @@ function legalEntityWire(e: LegalEntity): z.infer<typeof LegalEntitySchema> {
     entityType: e.entityType,
     incorporatedOn: e.incorporatedOn,
     financialYearEnd: e.financialYearEnd,
+    timeZone: e.timeZone,
     registeredAddress: e.registeredAddress === null ? null : { ...e.registeredAddress },
     status: e.status,
   };
@@ -791,6 +891,32 @@ export function registerPartyRoutes(app: OpenAPIHono<AppEnv>, deps: PartyDeps): 
     const { partyId } = c.req.valid("param");
     const body = c.req.valid("json");
     const entity = await deps.service.correctLegalEntity({ tenantId: s.tenantId, partyId, ...body }, s.actor);
+    return c.json(legalEntityWire(entity), 200);
+  });
+
+  app.openapi(setReturnPeriodRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { partyId } = c.req.valid("param");
+    const body = c.req.valid("json");
+    const returnPeriods = await deps.service.setReturnPeriod({ tenantId: s.tenantId, partyId, ...body }, s.actor);
+    return c.json({ returnPeriods: returnPeriods.map((p) => ({ ...p })) }, 200);
+  });
+
+  app.openapi(removeReturnPeriodRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { partyId, tax } = c.req.valid("param");
+    const returnPeriods = await deps.service.removeReturnPeriod({ tenantId: s.tenantId, partyId, tax }, s.actor);
+    return c.json({ returnPeriods: returnPeriods.map((p) => ({ ...p })) }, 200);
+  });
+
+  app.openapi(setEntityTimeZoneRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { partyId } = c.req.valid("param");
+    const { timeZone } = c.req.valid("json");
+    const entity = await deps.service.setLegalEntityTimeZone({ tenantId: s.tenantId, partyId, timeZone }, s.actor);
     return c.json(legalEntityWire(entity), 200);
   });
 
@@ -897,6 +1023,7 @@ export function registerPartyRoutes(app: OpenAPIHono<AppEnv>, deps: PartyDeps): 
         organization: profile.organization === null ? null : organizationWire(profile.organization),
         person: profile.person === null ? null : personWire(profile.person),
         legalEntities: profile.legalEntities.map(legalEntityWire),
+        returnPeriods: profile.returnPeriods.map((p) => ({ tax: p.tax, frequency: p.frequency, firstMonth: p.firstMonth })),
         identifiers: profile.identifiers.map(identifierWire),
         relationships: profile.relationships.map(relationshipRecordWire),
       },

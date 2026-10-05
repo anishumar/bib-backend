@@ -2,6 +2,7 @@
 // the use case that needs them, stated in our vocabulary; adapters in
 // infrastructure/ implement them. Every tenant-scoped write/read is expected to
 // run under the RLS context (withTenant) inside the adapter.
+import type { ReturnPeriod } from "../../domain/obligation/period-basis";
 import type { PostalAddress } from "../../domain/party/address";
 import type {
   ClientStructure,
@@ -69,6 +70,20 @@ export interface PartyRepository {
       readonly entityType?: string | undefined;
       readonly financialYearEnd?: string | null | undefined;
     },
+  ): Promise<LegalEntity | null>;
+  /** A company's return periods as its tax authorities assigned them (0359),
+   *  by tax. */
+  listReturnPeriods(tenantId: string, partyId: string): Promise<readonly ReturnPeriod[]>;
+  /** Record or change one tax's assigned period (one row per tax). */
+  setReturnPeriod(tenantId: string, partyId: string, period: ReturnPeriod): Promise<void>;
+  /** Take one tax's period off. False when there was none. */
+  removeReturnPeriod(tenantId: string, partyId: string, tax: string): Promise<boolean>;
+  /** Set a registered company's own zone, or null for its country's (Q070
+   *  Part B). Null when it has no registration. */
+  setLegalEntityTimeZone(
+    tenantId: string,
+    partyId: string,
+    timeZone: string | null,
   ): Promise<LegalEntity | null>;
   /** Creates the party row and its organization subtype in one transaction. */
   createOrganization(o: NewOrganization): Promise<Organization>;
