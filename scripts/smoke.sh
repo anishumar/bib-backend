@@ -23,10 +23,27 @@
 # Verify the BiB backend end to end. Needs: the API on :8080, a migrated DB.
 set -u
 API=${API:-http://localhost:8080}
+# NOT AGAINST A DEPLOYED ENVIRONMENT (F-18-6, S7). This walk provisions firms
+# and sets a known password on every person it creates, and nothing deletes a
+# firm: run against QA, each run leaves a live firm with public credentials.
+# After a deploy, run scripts/postdeploy-check.sh, which only reads. A
+# throwaway deployment that really should be walked says so out loud.
+case "$API" in
+  http://localhost:*|http://127.0.0.1:*|http://\[::1\]:*) ;;
+  *)
+    if [ "${SMOKE_WRITES_TO_A_DEPLOYED_API:-}" != "yes" ]; then
+      echo "smoke: $API is not this machine. Smoke creates firms with known passwords that cannot be"
+      echo "deleted. After a deploy run scripts/postdeploy-check.sh instead (read-only). To walk a"
+      echo "throwaway deployment anyway, set SMOKE_WRITES_TO_A_DEPLOYED_API=yes."
+      exit 2
+    fi
+    ;;
+esac
 # OVERRIDABLE, like API above. This default is the .env.example key, which
 # validateServer refuses in any production-like environment — so against a
 # deployed instance the whole walk would 401 on its first provisioning call
-# with nothing explaining why. Pass the real one:
+# with nothing explaining why. Pass the real one (a THROWAWAY deployment only,
+# with SMOKE_WRITES_TO_A_DEPLOYED_API=yes, see above):
 #   API=https://bib-api-xxxx.run.app KEY=$(gcloud secrets versions access latest \
 #     --secret=bib-internal-keys | python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["key"])') \
 #   npm run smoke

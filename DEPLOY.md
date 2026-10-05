@@ -200,21 +200,26 @@ curl -s <api>/health                      # {"status":"ok","commit":"<sha>","bui
 curl -so /dev/null -w '%{http_code}' <api>/api/v1/parties    # 401
 ```
 
-Then the real check — it provisions its own firm and walks every gate:
+Then the post-deploy check. It only READS: the build, the wall, the CORS origin.
 
 ```bash
-KEY=$(gcloud secrets versions access latest --secret=bib-internal-keys \
-  | python3 -c 'import json,sys;print([c["key"] for c in json.load(sys.stdin) if "tenant.provision" in c["capabilities"]][0])') \
-CRED_KEY=$(gcloud secrets versions access latest --secret=bib-internal-keys \
-  | python3 -c 'import json,sys;print([c["key"] for c in json.load(sys.stdin) if "credential.set" in c["capabilities"]][0])') \
-API=<api> npm run smoke
+API=<api> WEB=<web> COMMIT=<the sha you deployed> bash scripts/postdeploy-check.sh
 ```
 
-Expect **242 passed, 19 failed**. All 19 are documented in §7: 17 from signing, the India pack count, and the localhost origin.
+Expect **every check passed, nothing written**.
+
+**Do not run `npm run smoke` against a deployed environment** (F-18-6, S7). Smoke provisions
+firms and sets a known password on every person it creates, and nothing deletes a firm, so each
+run against QA left a live firm with public credentials. Smoke now refuses any `API` that is not
+this machine unless `SMOKE_WRITES_TO_A_DEPLOYED_API=yes`. Walk the release locally, against a
+migrated throwaway database, before deploying it.
 
 ---
 
 ## 7 · Known failures, so you do not chase them
+
+(These were smoke's, when smoke was run against QA; it no longer is, see §6. Kept for whoever
+walks a throwaway deployment.)
 
 **`the client signs`, and the 16 checks after it.** Smoke records the signature
 by hand with a paper reference, and under `docusign` the verifier refuses
