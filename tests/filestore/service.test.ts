@@ -45,23 +45,77 @@ clock,
   return { service, documents, blobs, events, renderSource, timeZones, clock };
 }
 
-function bytes(text: string): Uint8Array {
-  return new TextEncoder().encode(text);
+// The store checks an upload's first bytes against the type it was sent as
+// (F-14-1), so a fixture carries the signature of the type it claims.
+const ascii = (s: string): number[] => [...new TextEncoder().encode(s)];
+const SIGNATURE: Readonly<Record<string, readonly number[]>> = {
+  "application/pdf": ascii("%PDF-1.7\n"),
+  "image/png": [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+  "image/webp": [...ascii("RIFF"), 0, 0, 0, 0, ...ascii("WEBP")],
+};
+
+function bytes(text: string, mediaType = "application/pdf"): Uint8Array {
+  const bare = (mediaType.split(";")[0] ?? "").trim().toLowerCase();
+  return new Uint8Array([...(SIGNATURE[bare] ?? []), ...new TextEncoder().encode(text)]);
 }
 
 function upload(overrides: Record<string, unknown> = {}) {
+  const mediaType = typeof overrides.mediaType === "string" ? overrides.mediaType : "application/pdf";
   return {
     tenantId: TENANT,
     title: "PAN card",
     kind: "identity_proof" as const,
     partyId: PARTY,
     filename: "pan.pdf",
-    mediaType: "application/pdf",
-    bytes: bytes("a scanned pan card"),
+    mediaType,
+    bytes: bytes("a scanned pan card", mediaType),
     actor,
     ...overrides,
   };
 }
+
+describe("the bytes are what they say they are (F-14-1)", () => {
+  it("refuses a file whose contents are not the type it was sent as, before anything is written", async () => {
+    const { service, blobs, documents } = makeService();
+    // An executable renamed statement.pdf: the browser names it application/pdf.
+    const exe = new Uint8Array([0x4d, 0x5a, 0x90, 0x00, ...new TextEncoder().encode("not a pdf")]);
+    await expect(service.store(upload({ filename: "statement.pdf", bytes: exe }))).rejects.toMatchObject({
+      code: "CONTENT_NOT_OF_TYPE",
+    });
+    // A binary sent as text, and a spreadsheet that is not a zip.
+    await expect(
+      service.store(upload({ filename: "notes.txt", mediaType: "text/plain", bytes: new Uint8Array([0x41, 0, 0x42]) })),
+    ).rejects.toMatchObject({ code: "CONTENT_NOT_OF_TYPE" });
+    await expect(
+      service.store(
+        upload({
+          filename: "books.xlsx",
+          mediaType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          bytes: new TextEncoder().encode("plain words"),
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "CONTENT_NOT_OF_TYPE" });
+    expect(blobs.blobs.size).toBe(0);
+    expect(documents.documents).toHaveLength(0);
+  });
+
+  it("takes each type with its own signature, and plain text", async () => {
+    const { service } = makeService();
+    const zip = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 1, 2, 3]);
+    const ole = new Uint8Array([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1, 9]);
+    const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1]);
+    for (const [mediaType, b] of [
+      ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", zip],
+      ["application/vnd.ms-excel", ole],
+      ["application/msword", ole],
+      ["image/jpeg", jpeg],
+      ["text/csv", new TextEncoder().encode("a,b\n1,2\n")],
+      ["application/pdf", bytes("x")],
+    ] as const) {
+      await expect(service.store(upload({ title: mediaType, mediaType, bytes: b }))).resolves.toBeDefined();
+    }
+  });
+});
 
 describe("storing a file", () => {
   it("stores the bytes, the row, and a version numbered 1", async () => {
@@ -71,7 +125,7 @@ describe("storing a file", () => {
     expect(record.document.title).toBe("PAN card");
     expect(record.document.origin).toBe("uploaded");
     expect(record.latestVersion.versionNo).toBe(1);
-    expect(record.latestVersion.byteSize).toBe(18);
+    expect(record.latestVersion.byteSize).toBe(bytes("a scanned pan card").byteLength);
     expect(record.versionCount).toBe(1);
     // The bytes are actually in the store, under the key the row names.
     expect(blobs.blobs.get(record.latestVersion.storageKey)).toEqual(bytes("a scanned pan card"));
@@ -372,7 +426,7 @@ describe("brand assets", () => {
         kind: "brand_asset",
         filename: "logo-2026.png",
         mediaType: "image/png",
-        bytes: bytes("a newer logo"),
+        bytes: bytes("a newer logo", "image/png"),
       }),
     );
 

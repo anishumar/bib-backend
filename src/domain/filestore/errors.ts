@@ -24,6 +24,7 @@ export type FileStoreErrorCode =
   | "EMPTY_CONTENT"
   | "CONTENT_TOO_LARGE"
   | "UNSUPPORTED_MEDIA_TYPE"
+  | "CONTENT_NOT_OF_TYPE"
   | "BRAND_ASSET_NOT_DRAWABLE"
   | "INVALID_FILENAME"
   | "INVALID_TITLE"
@@ -85,6 +86,18 @@ export class UnsupportedMediaType extends FileStoreError {
       "UNSUPPORTED_MEDIA_TYPE",
       `${JSON.stringify(raw)} is not a media type this store can record. Expected ` +
         `type/subtype, like "application/pdf" or "image/png".`,
+    );
+  }
+}
+
+/** F-14-1: the bytes are not the type they were sent as (`contentMatchesType`). */
+export class ContentNotOfType extends FileStoreError {
+  constructor(mediaType: string, filename: string) {
+    super(
+      "CONTENT_NOT_OF_TYPE",
+      `${filename} was sent as ${mediaType}, but its contents are not a file of that type. ` +
+        "Open it on your computer to check it is the file you meant, save it again in its own " +
+        "format, and upload that.",
     );
   }
 }

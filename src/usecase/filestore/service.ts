@@ -17,6 +17,7 @@ import {
   RENDERED_ROLE,
   SUBJECT_KINDS,
   clientVisibleByDefault,
+  contentMatchesType,
   hasCopyOfRecord,
   isSubjectKind,
   normaliseMediaType,
@@ -29,6 +30,7 @@ import {
   LinkNotFound,
   BrandAssetNotFound,
   BytesMissing,
+  ContentNotOfType,
   ContentTooLarge,
   DocumentNotFound,
   DraftNotShareable,
@@ -187,6 +189,7 @@ export class FileStoreService {
     if (input.bytes.byteLength > this.deps.maxUploadBytes) {
       throw new ContentTooLarge(input.bytes.byteLength, this.deps.maxUploadBytes);
     }
+    if (!contentMatchesType(mediaType, input.bytes)) throw new ContentNotOfType(mediaType, filename);
 
     // Validated BEFORE anything is written, so a bad subject kind does not leave
     // a stored document behind that nobody asked for on its own.
@@ -287,6 +290,7 @@ export class FileStoreService {
     if (input.bytes.byteLength > this.deps.maxUploadBytes) {
       throw new ContentTooLarge(input.bytes.byteLength, this.deps.maxUploadBytes);
     }
+    if (!contentMatchesType(mediaType, input.bytes)) throw new ContentNotOfType(mediaType, filename);
 
     const contentHash = this.deps.digest.ofBytes(input.bytes);
     const { storageKey } = await this.deps.blobs.put({

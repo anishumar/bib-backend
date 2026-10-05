@@ -1190,6 +1190,7 @@ export function mapError(err: unknown): MappedError {
     switch (err.code) {
       case "EMPTY_CONTENT":
       case "UNSUPPORTED_MEDIA_TYPE":
+      case "CONTENT_NOT_OF_TYPE": // F-14-1: the bytes are not the type named
       case "BRAND_ASSET_NOT_DRAWABLE":
       case "INVALID_FILENAME":
       case "INVALID_TITLE":

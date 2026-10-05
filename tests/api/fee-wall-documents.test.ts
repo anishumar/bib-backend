@@ -82,7 +82,9 @@ function world() {
       partyId: PARTY,
       filename: `${kind}.pdf`,
       mediaType: "application/pdf",
-      bytes: new TextEncoder().encode(`the ${kind}, with its fees`),
+      // A PDF's own signature first: the store checks the bytes are the type
+      // they were sent as (F-14-1).
+      bytes: new TextEncoder().encode(`%PDF-1.7\nthe ${kind}, with its fees`),
       actor: { type: "human", id: USER },
     });
   const call = async (method: string, path: string, body?: unknown) => {

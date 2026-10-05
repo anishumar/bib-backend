@@ -404,6 +404,65 @@ export const PORTAL_UPLOAD_MEDIA_TYPES: readonly string[] = [
   "application/vnd.oasis.opendocument.spreadsheet",
 ];
 
+// ── The bytes are what they say they are (F-14-1, S7) ──────────────────────
+//
+// The media type of an upload is whatever the sender's browser named, usually
+// from the file's extension: an executable renamed "statement.pdf" arrives as
+// application/pdf. The store kept that word and served the bytes back under
+// it. Now, for every type with a reliable signature, the first bytes must be
+// that signature, and a text type must not carry the NUL bytes of a binary.
+// A type with no signature (rare, and staff-only off the portal) is taken at
+// its word, as before. Malware scanning is the storage layer's job and is on
+// the infrastructure list; this is the part the code can do.
+
+const sig = (...b: number[]): readonly number[] => b;
+const ZIP = sig(0x50, 0x4b, 0x03, 0x04); // OOXML and OpenDocument are zip files
+const OLE = sig(0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1); // legacy .doc / .xls
+
+const SIGNATURES: Readonly<Record<string, readonly (readonly number[])[]>> = {
+  "image/png": [sig(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)],
+  "image/jpeg": [sig(0xff, 0xd8, 0xff)],
+  "image/gif": [sig(0x47, 0x49, 0x46, 0x38)],
+  "image/tiff": [sig(0x49, 0x49, 0x2a, 0x00), sig(0x4d, 0x4d, 0x00, 0x2a)],
+  "application/msword": [OLE],
+  "application/vnd.ms-excel": [OLE],
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [ZIP],
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [ZIP],
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation": [ZIP],
+  "application/vnd.oasis.opendocument.text": [ZIP],
+  "application/vnd.oasis.opendocument.spreadsheet": [ZIP],
+  "application/zip": [ZIP],
+};
+
+function startsWith(bytes: Uint8Array, prefix: readonly number[], at = 0): boolean {
+  if (bytes.byteLength < at + prefix.length) return false;
+  return prefix.every((b, i) => bytes[at + i] === b);
+}
+
+function ascii(text: string): number[] {
+  return [...text].map((c) => c.charCodeAt(0));
+}
+
+/**
+ * Whether `bytes` can be the NORMALISED `mediaType` they were sent as. False
+ * only when the type has a signature and the bytes do not carry it.
+ */
+export function contentMatchesType(mediaType: string, bytes: Uint8Array): boolean {
+  if (mediaType === "application/pdf") {
+    // The header may follow up to 1 KB of junk (ISO 32000-1, 7.5.2).
+    const head = bytes.subarray(0, 1024);
+    const marker = ascii("%PDF-");
+    for (let i = 0; i + marker.length <= head.byteLength; i += 1) if (startsWith(head, marker, i)) return true;
+    return false;
+  }
+  if (mediaType === "image/webp") return startsWith(bytes, ascii("RIFF")) && startsWith(bytes, ascii("WEBP"), 8);
+  if (mediaType === "image/heic" || mediaType === "image/heif") return startsWith(bytes, ascii("ftyp"), 4);
+  if (mediaType.startsWith("text/")) return !bytes.subarray(0, 8192).includes(0);
+  const signatures = SIGNATURES[mediaType];
+  if (signatures === undefined) return true;
+  return signatures.some((s) => startsWith(bytes, s));
+}
+
 /** Whether a NORMALISED media type may be uploaded through the client portal.
  *  Call `normaliseMediaType` first; this compares the bare type/subtype. */
 export function isPortalUploadable(mediaType: string): boolean {
