@@ -77,17 +77,38 @@ chk() { # chk <label> <expected> <actual>
 }
 code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 
-# THE WALK'S OWN BUDGET, AND IT IS ALL BUT SPENT: ~288 requests against a limit
-# of 300. The next section added here does not fit, and that is a decision to
-# take deliberately rather than discover as a flaky run.
+# THE WALK PACES ITSELF UNDER THE LIMITER (S7, 2026-10-05). It makes ~300
+# requests from one address against a general limiter of 300 a minute
+# (BIB_RATELIMIT_GENERAL_PER_MINUTE, a sliding window), and for a year it ran
+# in a few seconds with no headroom: the next section, or a second run inside a
+# minute, drowned in 429s that read like a pile of broken features (G1.8 cost an
+# investigation; so did the sign-in bucket, which is what the message at the end
+# of `seed` is about).
 #
-# This script makes ~288 requests
-# from one client address in a few seconds, against a general limiter of 300 a
-# minute (BIB_RATELIMIT_GENERAL_PER_MINUTE). So: one run fits, TWO RUNS INSIDE A
-# MINUTE DO NOT — the second one drowns in 429s partway through, which reads
-# like a pile of broken features rather than a spent budget. That already cost
-# an investigation once (G1.8), and the same trap in the sign-in bucket cost
-# another, which is what the message at the end of `seed` is about.
+# So every request goes through `curl()` below, which keeps its own sliding
+# window in $REQLOG (a file, because most calls run in a `$(...)` subshell) and,
+# once SMOKE_BUDGET requests (default 250) fall inside the last minute, waits
+# until the oldest of them has left it. The limit is NOT raised and is still
+# what the walk meets; the walk now behaves like a polite client instead of
+# assuming it has the address to itself. A run that waits says so on stderr.
+# Sections can be added again; each 250 requests costs about a minute.
+REQLOG=$(mktemp)
+SMOKE_BUDGET=${SMOKE_BUDGET:-250}
+curl() {
+  local now inwin oldest wait
+  now=$(date +%s)
+  read -r inwin oldest < <(awk -v n="$now" '$1 > n - 60 { c++; if (!o) o = $1 } END { print c + 0, o + 0 }' "$REQLOG")
+  if [ "$inwin" -ge "$SMOKE_BUDGET" ]; then
+    wait=$((oldest + 61 - now))
+    if [ "$wait" -gt 0 ]; then
+      printf '  … %s requests in the last minute; waiting %ss for the limiter\n' "$inwin" "$wait" >&2
+      sleep "$wait"
+    fi
+    now=$(date +%s)
+  fi
+  echo "$now" >> "$REQLOG"
+  command curl "$@"
+}
 #
 # WHAT WAS TRIMMED FROM THIS WALK, AND WHY, so it is not added back by reflex:
 # a handful of checks that only asserted "this malformed body answers 400". Each
@@ -689,7 +710,7 @@ chk "…and never to the client contact"      0 "$(sed -n 3p $J/desks.txt)"
 sed -n 4p $J/desks.txt
 
 # T2.1b's OTHER half: a territory rule OVERRIDES the rotation. Kept to five
-# requests because the walk is close to its per-minute budget (see the note by
+# requests because the walk was close to its per-minute budget (see the note by
 # `code()`), so this proves the override and the fall-through and nothing else —
 # the refusals and the revoked-desk case are unit and integration tests.
 chk "the firm gives one desk the UK"        200 "$(code -b $J/partner.txt -XPOST $API/api/v1/territory-rules -H "$H" -d '{"jurisdiction":"GB","ownerUserId":"'$ASSOCUID'","note":"UK desk"}')"
@@ -1443,8 +1464,8 @@ echo; echo "── 16f. The compliance calendar — generated, never typed ─�
 # nothing that a unit test already covers: the date arithmetic, the March TDS
 # exception and the re-run idempotency are all in tests/obligation/.
 #
-# THE BUDGET IS NOW SPENT: ~296 of 300. The next section genuinely does not fit,
-# and the known-open item about the limiter's key is no longer theoretical.
+# (That budget was ~296 of 300 here; since S7 the walk paces itself, see the
+# note by `curl()` at the top. The limiter's key is still a known-open item.)
 RULES=$(curl -s -b $J/partner.txt $API/api/v1/obligation-rules)
 # A NEW FIRM IS NEVER LOOKING AT AN EMPTY RULES SCREEN. Fifty-seven rules from
 # the firm's own applicability sheet arrive with the tenant — ten that produce
@@ -1554,6 +1575,7 @@ chk "…and every human act names its actor" yes "$NAMED"
 
 echo; echo "───────────────────────────────────────────────────────────────────"
 printf "  %s passed, %s failed\n\n" "$ok" "$bad"
+printf "  %s requests, paced under %s a minute\n\n" "$(wc -l < "$REQLOG" | tr -d ' ')" "$SMOKE_BUDGET"
 echo "  Log in to the UI as:  partner-$S@example.com / correct horse battery staple"
 echo "                        associate-$S@example.com  (no audit trail)"
 echo "                        client-$S@example.com     (blocked from the workspace)"
