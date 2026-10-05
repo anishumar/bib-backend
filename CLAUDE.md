@@ -5332,3 +5332,49 @@ Tests: `tests/obligation/service.test.ts` (Q063, B2, Q073 blocks), `missed.test.
 (JOB_STEPS_OPEN), integration `job-filings` and `intl-calendar`. Walks: `demo-assets/tools/
 s3-walk.mjs` and `s3-vat-walk.mjs` on the 10x demo with `prompts/build-2026-10-05/S3-intl/walk/`
 fixtures.
+
+## 10x's answers of 5 Oct, built (S8): Q069, Q084, Q087, Q085 (0375-0376)
+
+Ashish answered eight points on 2026-10-05; four changed the product, two (Q086, Q088) confirmed it as
+built. Branch `fix/client-answers-1005`, on `release/2026-10-final`.
+
+- **Q069, the client's Key Manager checks the work** ("Client's engagement manager"; Shrestha read
+  "engagement manager" as the Key Manager). A fourth `verification_policy` rule, `client_key_manager`:
+  the ONE person who may check is the work's client's Key Manager in force on the firm's today, or,
+  when there is none or they are the maker, the person who signs for the firm (the owner rule's last
+  two rungs, `WorkOwnerDirectory` / `StepDeskResolver.ownerFactsFor`). `isEligible` takes the facts
+  as a fourth argument (`ClientCheckers`), read ONLY under this rule; without them nobody qualifies
+  (`NO_CLIENT_CHECKER`), never "anybody". Refusal `NOT_THE_CLIENTS_CHECKER`. Maker != checker and
+  `work:write` still come first. The check notification follows `isEligible`, so it reaches the same
+  person. Nothing seeded: a firm publishes a rule with it (the rule form offers it first).
+- **Q084, the portal filing day** ("While closing job, ask filing date separately"). Finishing a task
+  (`POST /work-items/{id}/state`) and a checker's Approve (`/work-item-checks/{id}/decide`) take
+  `filedOn`: obligation id -> the day it was filed on the portal. `markFiled` writes it over the
+  instant's day (`COALESCE`), lateness counts from it. `ObligationService.assertPortalDays` refuses a
+  non-day, a day not yet begun anywhere (UTC+14), or one before the return's period began
+  (`INVALID_FILED_ON`, 400) BEFORE the task moves or the decision is recorded. A return left out is
+  filed today. `TaskFilingResponse.filesOnDone` lists what finishing it now would file; the task page
+  asks a day for each (Done from the State list, and Approve). The Checks queue's Approve and the
+  board still file on today: open the task to give the day.
+- **Q087, Round off** ("round off"; 0375). `crm.firm_entity.round_off_total`, OFF until the firm turns
+  it on (switching every Indian company on would move every firm's drafts on deploy).
+  `crm.invoice.round_off` is written by the issuing UPDATE (`crm.company_rounds_off`) and guarded by
+  0370's freeze trigger. `crm.invoice_totals.total` is rounded half away from zero where the invoice
+  rounds (a draft follows its company), `round_off` (appended) is the difference, `net_payable` is
+  the rounded total less the TDS; every balance follows. The PDF and the invoice page print
+  "Round off" above the Total, GST and plain alike. `PUT /firm-entities/{id}/round-off`
+  (tenant:admin), `roundOff` on `/invoicing/companies` and on invoice totals, ledger
+  `firm_entity.round_off_set`. 0375 down cannot drop the view's column; it leaves it always zero.
+- **Q085, an advance is revenue when a bill takes it** ("Invoice to be mapped to manager, not at
+  advance stage"; 0376). `crm.invoice_manager_share` puts an advance's net on nobody (ad-hoc ones
+  whole; a letter's advance line moved off its invoice's manager) and, for each bill that took part
+  of it (`billing_due.advance_applied`), moves that part to the bill's manager on the day the bill
+  counts (`counts_on`: its invoice's issue date, or the bill's date when the advance covered it).
+  Each invoice's rows still add up to its net. The mapping rows (`allocation`, `unmapped`) left the
+  view. `crm.advance_invoice`: their money and balance are nobody's in the manager figures (dashboard
+  by month, owed by manager, the Revenue report, whose nobody row reads "No manager yet (incl.
+  advances not adjusted)"). The originator view is unchanged.
+- Tests: `tests/verification/eligibility.test.ts`, `tests/obligation/service.test.ts` (Q084),
+  `tests/workitem/service.test.ts`, `tests/invoice/gst-print.test.ts`, integration
+  `gst.integration` (round off), `job-filings`, `adhoc-advance`, `revenue-report`. Walk
+  `bib/demo-assets/tools/ans-walk.mjs` (29) on a `gst-fixture.mjs` firm.
