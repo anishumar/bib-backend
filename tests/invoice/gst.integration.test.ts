@@ -232,7 +232,9 @@ describe("the split in SQL is the split in the domain", () => {
           ]);
         }
       }
-    });
+      // Seven drafts of ten lines each: ~4s on a quiet machine, past the
+      // default 5s on a busy one.
+    }, 30_000);
   }
 });
 
@@ -404,6 +406,20 @@ describe("a company's bank accounts and LUTs", () => {
 });
 
 describe("Round off (Q087, 0375)", () => {
+  it("starts ON for a company registered in India and OFF elsewhere (0380)", async () => {
+    // The Indian company joined the firm through routing (0313's trigger) and
+    // nobody touched its switch.
+    expect((await companies.list(tenant)).find((c) => c.entityPartyId === entity)?.roundOff).toBe(true);
+
+    const dubai = await party(`Ten X Global FZ LLC ${stamp}`);
+    await registered(dubai, "AE");
+    await owner`INSERT INTO crm.firm_entity (tenant_id, party_id) VALUES (${tenant}, ${dubai})`;
+    const [row] = await owner<{ round_off_total: boolean }[]>`
+      SELECT round_off_total FROM crm.firm_entity WHERE tenant_id = ${tenant} AND party_id = ${dubai}
+    `;
+    expect(row?.round_off_total).toBe(false);
+  });
+
   it("rounds a draft's total while the company rounds, freezes it at issue, and never moves an issued one", async () => {
     // The company must be one of the firm's listed companies to carry the
     // setting (0313's membership).

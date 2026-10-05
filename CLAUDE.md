@@ -5356,8 +5356,11 @@ built. Branch `fix/client-answers-1005`, on `release/2026-10-final`.
   filed today. `TaskFilingResponse.filesOnDone` lists what finishing it now would file; the task page
   asks a day for each (Done from the State list, and Approve). The Checks queue's Approve and the
   board still file on today: open the task to give the day.
-- **Q087, Round off** ("round off"; 0375). `crm.firm_entity.round_off_total`, OFF until the firm turns
-  it on (switching every Indian company on would move every firm's drafts on deploy).
+- **Q087, Round off** ("round off"; 0375, 0380). `crm.firm_entity.round_off_total`: ON for a company
+  registered in India (0380 switched every existing one on and a BEFORE INSERT trigger on
+  `crm.firm_entity` starts a new one on, whichever road it joins by), OFF elsewhere until the firm
+  turns it on. Shrestha's call (2026-10-05), knowing it re-renders Indian companies' DRAFTS on deploy;
+  issued invoices are frozen.
   `crm.invoice.round_off` is written by the issuing UPDATE (`crm.company_rounds_off`) and guarded by
   0370's freeze trigger. `crm.invoice_totals.total` is rounded half away from zero where the invoice
   rounds (a draft follows its company), `round_off` (appended) is the difference, `net_payable` is
@@ -5377,4 +5380,5 @@ built. Branch `fix/client-answers-1005`, on `release/2026-10-final`.
 - Tests: `tests/verification/eligibility.test.ts`, `tests/obligation/service.test.ts` (Q084),
   `tests/workitem/service.test.ts`, `tests/invoice/gst-print.test.ts`, integration
   `gst.integration` (round off), `job-filings`, `adhoc-advance`, `revenue-report`. Walk
-  `bib/demo-assets/tools/ans-walk.mjs` (29) on a `gst-fixture.mjs` firm.
+  `bib/demo-assets/tools/ans-walk.mjs` (29) on a `gst-fixture.mjs` firm; the follow-ups (Los
+  Angeles zone, advance box words, 0380, the queue's portal day) `fix4-walk.mjs` (17).
