@@ -290,7 +290,7 @@ export class PostgresPartyRepository implements PartyRepository, ClientDirectory
     return withTenant(this.app, tenantId, async (db) => {
       const rows = await db<{ tax: string; frequency: string; first_month: number | null }[]>`
         SELECT tax, frequency, first_month FROM core.legal_entity_return_period
-        WHERE entity_party_id = ${partyId}
+        WHERE entity_party_id = ${partyId} AND cleared_at IS NULL
         ORDER BY tax
       `;
       return rows.map((r) => ({
@@ -307,7 +307,8 @@ export class PostgresPartyRepository implements PartyRepository, ClientDirectory
         INSERT INTO core.legal_entity_return_period (tenant_id, entity_party_id, tax, frequency, first_month)
         VALUES (${tenantId}, ${partyId}, ${p.tax}, ${p.frequency}, ${p.firstMonth})
         ON CONFLICT (tenant_id, entity_party_id, tax)
-        DO UPDATE SET frequency = EXCLUDED.frequency, first_month = EXCLUDED.first_month
+        DO UPDATE SET frequency = EXCLUDED.frequency, first_month = EXCLUDED.first_month,
+                      cleared_at = NULL
       `;
     });
   }
@@ -315,8 +316,8 @@ export class PostgresPartyRepository implements PartyRepository, ClientDirectory
   async removeReturnPeriod(tenantId: string, partyId: string, tax: string): Promise<boolean> {
     return withTenant(this.app, tenantId, async (db) => {
       const rows = await db<{ id: string }[]>`
-        DELETE FROM core.legal_entity_return_period
-        WHERE entity_party_id = ${partyId} AND tax = ${tax}
+        UPDATE core.legal_entity_return_period SET cleared_at = now()
+        WHERE entity_party_id = ${partyId} AND tax = ${tax} AND cleared_at IS NULL
         RETURNING id
       `;
       return rows.length > 0;

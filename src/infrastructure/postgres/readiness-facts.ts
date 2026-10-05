@@ -235,7 +235,7 @@ export class PostgresReadinessFacts implements ReadinessFactSource {
          WHERE t.is_active AND t.status = 'confirmed' AND t.period_basis = 'authority_assigned'
            AND NOT EXISTS (SELECT 1 FROM core.legal_entity_return_period rp
                             WHERE rp.tenant_id = le.tenant_id AND rp.entity_party_id = le.party_id
-                              AND rp.tax = upper(btrim(t.module)))
+                              AND rp.tax = upper(btrim(t.module)) AND rp.cleared_at IS NULL)
          GROUP BY le.party_id, p.display_name
          ORDER BY p.display_name
       `;

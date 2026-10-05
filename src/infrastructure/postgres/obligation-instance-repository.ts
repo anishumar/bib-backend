@@ -951,7 +951,8 @@ export class PostgresCalendarSource implements CalendarSource {
                          'tax', rp.tax, 'frequency', rp.frequency, 'firstMonth', rp.first_month)
                          ORDER BY rp.tax), '[]'::jsonb)
                   FROM core.legal_entity_return_period rp
-                 WHERE rp.tenant_id = le.tenant_id AND rp.entity_party_id = le.party_id) AS return_periods
+                 WHERE rp.tenant_id = le.tenant_id AND rp.entity_party_id = le.party_id
+                   AND rp.cleared_at IS NULL) AS return_periods
         FROM core.legal_entity le
         JOIN crm.engagement e
           ON e.entity_party_id = le.party_id AND e.tenant_id = le.tenant_id
