@@ -157,6 +157,10 @@ export interface InvoiceTotals {
    *  total less it. `tds` is "0" for a client that deducts none. */
   readonly tds: string;
   readonly netPayable: string;
+  /** Q087 (0375): what rounding the total to the whole unit added (negative
+   *  when it rounded down), "0" when the invoice does not round. `total`
+   *  already includes it. */
+  readonly roundOff: string;
 }
 
 /**

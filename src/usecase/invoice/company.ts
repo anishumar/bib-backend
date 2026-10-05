@@ -34,6 +34,8 @@ export interface CompanyInvoicing {
   readonly gstin: string | null;
   readonly bankAccounts: readonly BankAccountView[];
   readonly luts: readonly CompanyLut[];
+  /** Q087 (0375): whether its invoices round the total to the whole unit. */
+  readonly roundOff: boolean;
 }
 
 export interface NewBankAccount {
@@ -67,6 +69,9 @@ export interface CompanyInvoicingRepository {
   ): Promise<{ readonly replaced: string | null }>;
   /** The retired LUT's year, or null when no live LUT of this company has that id. */
   retireLut(tenantId: string, entityPartyId: string, lutId: string): Promise<number | null>;
+  /** Q087: set whether the company rounds its totals. Its value BEFORE, or null
+   *  when it is not one of the firm's listed companies (nothing written). */
+  setRoundOff(tenantId: string, entityPartyId: string, on: boolean): Promise<boolean | null>;
 }
 
 export interface CompanyInvoicingDeps {
@@ -224,6 +229,28 @@ export class CompanyInvoicingService {
       objectId: entityPartyId,
       actor,
       payload: { lutId, financialYear: year },
+    });
+  }
+
+  /**
+   * Q087 (10x, 2026-10-05: "round off"): the company's invoices round the total
+   * to the whole unit with a Round off line. Drafts follow at once; an issued
+   * invoice keeps what it did (frozen at issue, 0375).
+   */
+  async setRoundOff(tenantId: string, entityPartyId: string, on: boolean, actor: Actor): Promise<void> {
+    await this.requireCompany(tenantId, entityPartyId);
+    const before = await this.deps.companies.setRoundOff(tenantId, entityPartyId, on);
+    if (before === null) {
+      const name = (await this.deps.parties.findParty(tenantId, entityPartyId))?.displayName ?? entityPartyId;
+      throw new InvoiceIssuerNotAFirmEntity(name);
+    }
+    if (before === on) return;
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "firm_entity.round_off_set",
+      objectId: entityPartyId,
+      actor,
+      payload: { roundOff: on },
     });
   }
 

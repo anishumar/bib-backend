@@ -557,6 +557,7 @@ describe("the GST tax invoice (Q056)", () => {
       sgst: "2700.0000",
       utgst: "0.0000",
       igst: "0.0000",
+      roundOff: "0",
     },
     taxInInr: null,
     lut: null,

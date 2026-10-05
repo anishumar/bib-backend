@@ -51,7 +51,7 @@ import { isoInstant, zoneDayOf } from "./instant";
 import { amountInWords, documentMoney } from "../../domain/render/money";
 import { isTaxTreatment, stateLabel } from "../../domain/invoice/gst";
 import type { TaxTreatment } from "../../domain/invoice/gst";
-import { gstPrint, tdsRows } from "../../domain/invoice/gst-print";
+import { gstPrint, roundOffRow, tdsRows } from "../../domain/invoice/gst-print";
 import { financialYearLabel } from "../../domain/invoice/model";
 import { readPostalAddress } from "../../domain/party/address";
 import type { PostalAddress } from "../../domain/party/address";
@@ -176,6 +176,7 @@ interface InvoiceRow {
   igst: string;
   tds: string;
   net_payable: string;
+  round_off: string;
   /** The tax at the invoice's rate in INR, two places. */
   tax_inr: string;
   lut_reference: string | null;
@@ -1154,7 +1155,7 @@ export class PostgresRenderSource implements RenderSource {
                i.tax_treatment, i.supplier_state_code, i.place_of_supply_state_code,
                i.place_of_supply_country, i.tds_section, i.tds_percent::text, i.fx_rate::text,
                t.cgst::text, t.sgst::text, t.utgst::text, t.igst::text, t.tds::text,
-               t.net_payable::text, round(t.tax * i.fx_rate, 2)::text AS tax_inr,
+               t.net_payable::text, t.round_off::text, round(t.tax * i.fx_rate, 2)::text AS tax_inr,
                lut.reference AS lut_reference, lut.financial_year AS lut_year,
                ba.account_name AS bank_account_name, ba.account_number AS bank_account_number,
                ba.bank_name, ba.branch AS bank_branch, ba.ifsc AS bank_ifsc, ba.swift AS bank_swift,
@@ -1257,6 +1258,7 @@ export class PostgresRenderSource implements RenderSource {
                 sgst: row.sgst,
                 utgst: row.utgst,
                 igst: row.igst,
+                roundOff: row.round_off,
               },
               taxInInr:
                 row.currency.toUpperCase() === "INR" ? null : { amount: row.tax_inr, printed: documentMoney(row.tax_inr, "INR", { minorUnits: "always" }), rate: row.fx_rate },
@@ -1360,6 +1362,7 @@ export class PostgresRenderSource implements RenderSource {
             ...(Number(row.tax) > 0
               ? [{ label: "Tax", value: fmt(row.tax), emphasis: false }]
               : []),
+            ...roundOffRow(row.round_off, fmt),
             { label: "Total", value: fmt(row.total), emphasis: true },
           ]),
           ...tds,

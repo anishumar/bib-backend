@@ -402,3 +402,40 @@ describe("a company's bank accounts and LUTs", () => {
     expect(v.bankAccount).toMatchObject({ currency: "USD", swift: "HDFCINBB" });
   });
 });
+
+describe("Round off (Q087, 0375)", () => {
+  it("rounds a draft's total while the company rounds, freezes it at issue, and never moves an issued one", async () => {
+    // The company must be one of the firm's listed companies to carry the
+    // setting (0313's membership).
+    await owner`
+      INSERT INTO crm.firm_entity (tenant_id, party_id) VALUES (${tenant}, ${entity})
+      ON CONFLICT (tenant_id, party_id) DO NOTHING
+    `;
+    await companies.setRoundOff(tenant, entity, true, SYSTEM_ACTOR);
+    expect((await companies.list(tenant)).find((c) => c.entityPartyId === entity)?.roundOff).toBe(true);
+
+    // 1,000.05 at 18% within a state: 90.00 + 90.00 = 180.00, so 1,180.05
+    // before rounding; the client pays 1,180.00 and the PDF says Round off -0.05.
+    const id = await draft(mumbai);
+    await add(id, "1000.05");
+    const d = await service.describe(tenant, id);
+    expect(d.totals).toMatchObject({ total: "1180.0000", roundOff: "-0.0500", netPayable: "1180.0000" });
+
+    await service.issue(tenant, id, SYSTEM_ACTOR);
+    expect((await service.describe(tenant, id)).totals).toMatchObject({ total: "1180.0000", roundOff: "-0.0500" });
+    const [b] = await owner<{ outstanding: string }[]>`
+      SELECT outstanding::text FROM crm.invoice_balance WHERE invoice_id = ${id}
+    `;
+    expect(b?.outstanding).toBe("1180.0000");
+
+    // Switched off: a new draft keeps its paise, the issued one keeps its rounding.
+    await companies.setRoundOff(tenant, entity, false, SYSTEM_ACTOR);
+    expect((await service.describe(tenant, id)).totals).toMatchObject({ total: "1180.0000", roundOff: "-0.0500" });
+    const next = await draft(mumbai);
+    await add(next, "1000.05");
+    expect((await service.describe(tenant, next)).totals).toMatchObject({ total: "1180.0500", roundOff: "0.0000" });
+
+    // And the trigger, not only the service, keeps an issued invoice's rounding.
+    await expect(owner`UPDATE crm.invoice SET round_off = false WHERE id = ${id}`).rejects.toThrow(/rounded/);
+  });
+});

@@ -651,6 +651,9 @@ export class FakeInvoiceRepo implements InvoiceRepository {
       igst: unscaled(sum((r) => r.igst)),
       tds,
       netPayable: netPayable(total, tds),
+      // The fake does not round totals (Q087); the view's rounding is proven
+      // in `tests/invoice/round-off.integration.test.ts`.
+      roundOff: "0.0000",
     };
   }
 }
@@ -806,6 +809,16 @@ export class FakeCompanyInvoicingRepo implements CompanyInvoicingRepository {
     if (l === undefined) return Promise.resolve(null);
     l.retired = true;
     return Promise.resolve(l.financialYear);
+  }
+
+  /** Q087: each company's setting; a company not in the map is not listed. */
+  readonly roundOff = new Map<string, boolean>();
+
+  setRoundOff(_t: string, entityPartyId: string, on: boolean): Promise<boolean | null> {
+    const before = this.roundOff.get(entityPartyId);
+    if (before === undefined) return Promise.resolve(null);
+    this.roundOff.set(entityPartyId, on);
+    return Promise.resolve(before);
   }
 }
 

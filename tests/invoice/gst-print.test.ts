@@ -1,6 +1,6 @@
 // Q056 (S5): what a GST tax invoice prints, CGST Rule 46 field by field.
 import { describe, expect, it } from "vitest";
-import { gstPrint, placeOfSupplyText, tdsRows, type GstPrintInput } from "../../src/domain/invoice/gst-print";
+import { gstPrint, placeOfSupplyText, roundOffRow, tdsRows, type GstPrintInput } from "../../src/domain/invoice/gst-print";
 
 const money = (a: string): string => `₹${Number(a).toFixed(2)}`;
 const countryName = (c: string): string => ({ US: "United States", AE: "United Arab Emirates" })[c] ?? c;
@@ -29,6 +29,7 @@ const base: GstPrintInput = {
     sgst: "900.0000",
     utgst: "0.0000",
     igst: "0.0000",
+    roundOff: "0.0000",
   },
   taxInInr: null,
   lut: null,
@@ -74,6 +75,17 @@ describe("a GST tax invoice prints", () => {
     ]);
     expect(p.print.summary.rows).toEqual([["998222", "₹10000.00", "9", "₹900.00", "9", "₹900.00", "₹1800.00"]]);
     expect(p.print.taxInWords).toBe("Indian Rupees One Thousand Eight Hundred Only");
+  });
+
+  it("a Round off row just above the Total when the total was rounded, and none when not (Q087)", () => {
+    const p = gstPrint({
+      ...base,
+      totals: { ...base.totals, total: "11801.0000", roundOff: "0.4900" },
+    });
+    expect(p.totals.map((r) => r.label)).toEqual(["Sub-total", "CGST @9%", "SGST @9%", "Round off", "Total"]);
+    expect(p.totals.find((r) => r.label === "Round off")?.value).toBe("₹0.49");
+    expect(roundOffRow("-0.4900", (a) => a)).toEqual([{ label: "Round off", value: "-0.4900", emphasis: false }]);
+    expect(roundOffRow("0.0000", (a) => a)).toEqual([]);
   });
 
   it("UTGST instead of SGST in a union territory without a legislature", () => {

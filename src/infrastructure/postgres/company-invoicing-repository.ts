@@ -34,8 +34,12 @@ export class PostgresCompanyInvoicingRepository implements CompanyInvoicingRepos
     return withTenant(this.app, tenantId, async (db) => {
       // The firm's live companies (0313's membership), each with its GSTIN in
       // force today on the firm's calendar.
-      const companies = await db<{ party_id: string; name: string; country: string | null; gstin: string | null }[]>`
+      const companies = await db<
+        { party_id: string; name: string; country: string | null; gstin: string | null; round_off: boolean | null }[]
+      >`
         SELECT p.id AS party_id, p.display_name AS name, le.jurisdiction AS country,
+               (SELECT fe.round_off_total FROM crm.firm_entity fe
+                 WHERE fe.party_id = p.id AND fe.tenant_id = p.tenant_id) AS round_off,
                (SELECT i.value::text FROM core.party_identifier i
                  WHERE i.party_id = p.id AND i.type = 'gstin' AND i.voided_at IS NULL
                    AND i.valid_from <= (now() AT TIME ZONE crm.issuer_zone(p.tenant_id, p.id))::date
@@ -88,6 +92,7 @@ export class PostgresCompanyInvoicingRepository implements CompanyInvoicingRepos
             reference: l.reference,
             filedOn: toDayOrNull(l.filed_on),
           })),
+        roundOff: c.round_off === true,
       }));
     });
   }
@@ -156,6 +161,18 @@ export class PostgresCompanyInvoicingRepository implements CompanyInvoicingRepos
         RETURNING financial_year
       `;
       return row?.financial_year ?? null;
+    });
+  }
+
+  async setRoundOff(tenantId: string, entityPartyId: string, on: boolean): Promise<boolean | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ before: boolean }[]>`
+        UPDATE crm.firm_entity fe SET round_off_total = ${on}
+          FROM crm.firm_entity old
+         WHERE fe.party_id = ${entityPartyId} AND old.id = fe.id AND old.tenant_id = fe.tenant_id
+        RETURNING old.round_off_total AS before
+      `;
+      return row?.before ?? null;
     });
   }
 }

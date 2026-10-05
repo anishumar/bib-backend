@@ -519,6 +519,7 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
           igst: string | null;
           tds: string | null;
           net_payable: string | null;
+          round_off: string | null;
           paid: string | null;
           credited: string | null;
           outstanding: string | null;
@@ -532,7 +533,7 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
                p.display_name AS party_name,
                t.line_count::text, t.gross::text, t.discount::text, t.net::text,
                t.tax::text, t.total::text, t.cgst::text, t.sgst::text, t.utgst::text, t.igst::text,
-               t.tds::text, t.net_payable::text,
+               t.tds::text, t.net_payable::text, t.round_off::text,
                b.paid::text, b.credited::text, b.outstanding::text, b.tds::text AS tds_paid
         FROM crm.invoice i
         JOIN core.party p ON p.id = i.party_id
@@ -574,6 +575,7 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
                 igst: r.igst ?? "0",
                 tds: r.tds ?? "0",
                 net_payable: r.net_payable ?? "0",
+                round_off: r.round_off ?? "0",
               },
           r.currency,
         ),
@@ -788,6 +790,9 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
                bank_account_id = ${on.tax.bankAccountId}::uuid,
                tds_section = ${on.tax.tdsSection},
                tds_percent = ${on.tax.tdsPercent}::numeric,
+               -- Q087 (0375): whether its total rounds, as its company stands
+               -- today, frozen with the rest.
+               round_off = crm.company_rounds_off(tenant_id, entity_party_id),
                -- WHO IT IS FROM AND TO, FROZEN (0334): the supplier and the
                -- client as they stand today on the issuing company's calendar
                -- (0337), in this same write (the only one the trigger lets set
@@ -1480,11 +1485,12 @@ interface TotalsRow {
   igst: string;
   tds: string;
   net_payable: string;
+  round_off: string;
 }
 
 const TOTALS_COLUMNS =
   "line_count::text, gross::text, discount::text, net::text, tax::text, total::text, cgst::text, " +
-  "sgst::text, utgst::text, igst::text, tds::text, net_payable::text";
+  "sgst::text, utgst::text, igst::text, tds::text, net_payable::text, round_off::text";
 
 /**
  * An invoice with no live lines has no row in the totals view at all: `sum()`
@@ -1507,6 +1513,7 @@ function toTotals(t: TotalsRow | undefined, currency: string): InvoiceRecord["to
     igst: t?.igst ?? "0",
     tds: t?.tds ?? "0",
     netPayable: t?.net_payable ?? "0",
+    roundOff: t?.round_off ?? "0",
   };
 }
 

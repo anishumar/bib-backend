@@ -845,6 +845,7 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("POST", "/api/v1/firm-entities/{entityPartyId}/bank-accounts/{accountId}/retire"), "tenant:admin" as const],
   [routeKey("POST", "/api/v1/firm-entities/{entityPartyId}/luts"), "tenant:admin" as const],
   [routeKey("POST", "/api/v1/firm-entities/{entityPartyId}/luts/{lutId}/retire"), "tenant:admin" as const],
+  [routeKey("PUT", "/api/v1/firm-entities/{entityPartyId}/round-off"), "tenant:admin" as const],
   [routeKey("GET", "/api/v1/receivables"), "party:read" as const],
 
   // BILL DUES (0318). Reading what is owed is `party:read`, with the fee axis

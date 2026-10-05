@@ -180,6 +180,12 @@ const TotalsSchema = z
         "Circular 23/2017). \"0\" when the client deducts none. The receivable stays `total`.",
     }),
     netPayable: Decimal.nullable().openapi({ description: "`total` less `tds`: what the client remits." }),
+    roundOff: Decimal.nullable().openapi({
+      description:
+        "Q087: what rounding the total to the whole unit added (negative when it rounded down); " +
+        "`total` includes it. \"0\" when the invoice does not round: a draft follows its company's " +
+        "setting, an issued invoice what it did when issued.",
+    }),
   })
   .openapi("InvoiceTotals");
 
@@ -1060,6 +1066,9 @@ const CompanyInvoicingSchema = z
         filedOn: z.string().nullable(),
       }),
     ),
+    roundOff: z.boolean().openapi({
+      description: "Q087: whether its invoices round the total to the whole unit with a Round off line.",
+    }),
   })
   .openapi("CompanyInvoicing");
 
@@ -1177,6 +1186,30 @@ const retireLutRoute = createRoute({
     401: errorResponse("Not signed in"),
     403: errorResponse("No org selected, or the role does not permit it"),
     404: errorResponse("No live LUT with that id on this company"),
+  },
+});
+
+const setRoundOffRoute = createRoute({
+  method: "put",
+  path: "/api/v1/firm-entities/{entityPartyId}/round-off",
+  tags: ["invoices"],
+  summary: "Round this company's invoice totals to the whole unit, or stop (Q087)",
+  description:
+    "On: each invoice's total after tax is rounded to the nearest whole unit, half away from " +
+    "zero, and the difference prints as a Round off line. Drafts follow at once; an issued " +
+    "invoice keeps what it did.",
+  request: {
+    params: z.object({ entityPartyId: z.string().uuid() }),
+    body: {
+      content: { "application/json": { schema: z.object({ roundOff: z.boolean() }).openapi("SetRoundOffRequest") } },
+      required: true,
+    },
+  },
+  responses: {
+    204: { description: "Set" },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    409: errorResponse("Not one of the firm's companies"),
   },
 });
 
@@ -1633,10 +1666,18 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
             reference: l.reference,
             filedOn: l.filedOn,
           })),
+          roundOff: co.roundOff,
         })),
       },
       200,
     );
+  });
+
+  app.openapi(setRoundOffRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    await deps.companies.setRoundOff(s.tenantId, c.req.valid("param").entityPartyId, c.req.valid("json").roundOff, s.actor);
+    return c.body(null, 204);
   });
 
   app.openapi(addBankAccountRoute, async (c) => {
@@ -1817,6 +1858,7 @@ function toTotalsBody(t: InvoiceTotals, fees: boolean): z.infer<typeof TotalsSch
     igst: fees ? t.igst : null,
     tds: fees ? t.tds : null,
     netPayable: fees ? t.netPayable : null,
+    roundOff: fees ? t.roundOff : null,
   };
 }
 

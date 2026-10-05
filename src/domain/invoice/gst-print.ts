@@ -64,6 +64,8 @@ export interface GstPrintInput {
     readonly sgst: string;
     readonly utgst: string;
     readonly igst: string;
+    /** Q087: what rounding the total added; "0" when it does not round. */
+    readonly roundOff: string;
   };
   /** The tax in INR at the invoice's rate, when it is in another currency and
    *  charges tax; else null. */
@@ -164,6 +166,7 @@ export function gstPrint(i: GstPrintInput): GstPrint {
   } else {
     totals.push({ label: `IGST${sharedRate(taxedRates, false)}`, value: i.money(i.totals.igst), emphasis: false });
   }
+  totals.push(...roundOffRow(i.totals.roundOff, i.money));
   totals.push({ label: "Total", value: i.money(i.totals.total), emphasis: true });
 
   const summary: LineTable = intra(i.treatment)
@@ -243,6 +246,15 @@ export function gstPrint(i: GstPrintInput): GstPrint {
       signatoryFor: `For ${i.supplierName}`,
     },
   };
+}
+
+/**
+ * Q087: the "Round off" row, just above the Total it explains, on any invoice
+ * whose total was rounded (GST or plain). Nothing when it rounded by nothing:
+ * a "Round off 0.00" row is noise on a document a client pays from.
+ */
+export function roundOffRow(roundOff: string, money: (amount: string) => string): readonly TotalRow[] {
+  return isZero(roundOff) ? [] : [{ label: "Round off", value: money(roundOff), emphasis: false }];
 }
 
 /** The TDS rows any invoice prints under its total when its client deducts
