@@ -75,6 +75,7 @@ async function draft(): Promise<string> {
     quantity: "1",
     unitAmount: "5000",
     taxPercent: "18",
+    sac: "998231",
   });
   return invoice.id;
 }
@@ -131,10 +132,23 @@ describe("who an invoice is from and to (B12 / CA#1)", () => {
       "PAN ABCDE1234F",
       "+912026123456",
       "office@sharmamehta.in",
+      // Q056: both parties are registered in Maharashtra, so this is a GST
+      // tax invoice (CGST + SGST), which names each party's state and code.
+      "State: Maharashtra (27)",
     ]);
-    expect(d?.recipient.lines).toEqual(["Plot 4, MIDC Bhosari", "Maharashtra 411026, India", "GSTIN 27AAACD1234E1Z2"]);
-    expect(d?.table?.rows[0]).toEqual(["GST returns for September 2026", "1", "₹5,000.00", "₹5,000.00"]);
-    expect(d?.totals.map((t) => t.value)).toEqual(["₹5,000.00", "₹900.00", "₹5,900.00"]);
+    expect(d?.recipient.lines).toEqual([
+      "Plot 4, MIDC Bhosari",
+      "Maharashtra 411026, India",
+      "GSTIN 27AAACD1234E1Z2",
+      "State: Maharashtra (27)",
+    ]);
+    expect(d?.table?.rows[0]).toEqual(["GST returns for September 2026", "998231", "1", "₹5,000.00", "18", "₹5,000.00"]);
+    expect(d?.totals.map((t) => `${t.label} ${t.value}`)).toEqual([
+      "Sub-total ₹5,000.00",
+      "CGST @9% ₹450.00",
+      "SGST @9% ₹450.00",
+      "Total ₹5,900.00",
+    ]);
     expect(d?.amountInWords).toBe("Indian Rupees Five Thousand Nine Hundred Only");
   });
 
