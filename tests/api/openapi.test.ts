@@ -786,6 +786,17 @@ describe("OpenAPI spec", () => {
     expect(paths).toContain("/api/v1/auth/login");
   });
 
+  it("marks the single-signatory routes deprecated, naming the list (S7)", async () => {
+    const spec = (await (await app().request("/openapi.json")).json()) as {
+      paths: Record<string, Record<string, { deprecated?: boolean; description?: string }>>;
+    };
+    const route = spec.paths["/api/v1/tenancy/firm-signatory"];
+    expect(route?.get?.deprecated).toBe(true);
+    expect(route?.put?.deprecated).toBe(true);
+    expect(route?.put?.description).toContain("/api/v1/tenancy/signatories");
+    expect(spec.paths["/api/v1/tenancy/signatories"]?.get?.deprecated).toBeUndefined();
+  });
+
   it("is not served when docs are disabled", async () => {
     const res = await buildRouter(deps(), silentLog, {
       docsEnabled: false,

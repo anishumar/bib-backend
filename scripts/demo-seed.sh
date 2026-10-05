@@ -314,10 +314,10 @@ FIRMENT=$(as partner "$API/api/v1/firm-entities/preferences" \
   | pick "next(p['firmEntityPartyId'] for p in d['preferences'] if p['clientJurisdiction']=='*')")
 asp partner "$API/api/v1/parties/organizations/$FIRMENT/legal-entities" \
   -d '{"jurisdiction":"IN","entityType":"private_limited"}' | ok
-# PUT, not POST — naming a successor REPLACES the standing signatory rather
-# than adding a second one, and there is only ever one.
-asput partner "$API/api/v1/tenancy/firm-signatory" \
-  -d "{\"userId\":\"$PARTNER_ID\",\"title\":\"Managing Partner\"}" | ok
+# Onto the firm's list of signatories (0343, Q005), as its default. The old
+# single-signatory PUT is deprecated (S7).
+asp partner "$API/api/v1/tenancy/signatories" \
+  -d "{\"userId\":\"$PARTNER_ID\",\"title\":\"Managing Partner\",\"makeDefault\":true}" | ok
 step "10x Global registered in IN · Siddharth signs its letters"
 
 # ── How the firm is shaped ───────────────────────────────────────────────────

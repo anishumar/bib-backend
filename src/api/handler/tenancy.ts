@@ -694,15 +694,26 @@ const setReportsToRoute = createRoute({
 // signature will be on it. WRITING is `tenant:admin`, because naming who binds
 // the firm is a decision at the same level as deciding what a role means.
 
+// DEPRECATED (S7, 2026-10-05): the list below (0343, Q005) replaced these two.
+// They are kept as shims onto it, because scripts outside this repo still call
+// them (the QA setup and demo tools); the spec marks them deprecated and every
+// answer says so in a `Deprecation` header naming the successor. Nothing in the
+// frontend or this repo's scripts calls them any more. Remove them in a later
+// release, once those tools have moved.
+const DEPRECATED_SIGNATORY_NOTE =
+  " DEPRECATED: use GET/POST /api/v1/tenancy/signatories and POST " +
+  "/api/v1/tenancy/signatories/{signatoryId}/default.";
+
 const firmSignatoryRoute = createRoute({
   method: "get",
   path: "/api/v1/tenancy/firm-signatory",
   tags: ["tenancy"],
-  summary: "Who signs this firm's engagement letters",
+  deprecated: true,
+  summary: "Who signs this firm's engagement letters (deprecated)",
   description:
     "Snapshotted onto each letter when it is SENT, so changing it here never restates a " +
     "letter already issued. Null means the firm has not named anybody and its letters go " +
-    "out with no signature block.",
+    "out with no signature block." + DEPRECATED_SIGNATORY_NOTE,
   responses: {
     200: {
       description: "The standing signatory, or null",
@@ -717,11 +728,13 @@ const setFirmSignatoryRoute = createRoute({
   method: "put",
   path: "/api/v1/tenancy/firm-signatory",
   tags: ["tenancy"],
-  summary: "Name who binds the firm",
+  deprecated: true,
+  summary: "Name who binds the firm (deprecated)",
   description:
     "The person must have an active STAFF membership here: authority to bind the firm is the " +
     "strongest thing anyone holds in this product, and `tenancy.user_account` is global, so " +
-    "no foreign key can say it. Letters already sent keep the block they went out with.",
+    "no foreign key can say it. Letters already sent keep the block they went out with." +
+    DEPRECATED_SIGNATORY_NOTE,
   request: {
     body: { content: { "application/json": { schema: SetFirmSignatoryRequest } }, required: true },
   },
@@ -881,6 +894,13 @@ const myMembershipsRoute = createRoute({
 // FIELD BY FIELD (B48, audit 2026-10-03), as createTenant below already was
 // and for its reason: a forwarded membership or account ships whatever the
 // aggregate holds, undocumented, and the generated client never sees it.
+
+/** RFC 9745's `Deprecation` and RFC 8594's successor link, on every answer of
+ *  the two single-signatory routes (S7). */
+function deprecatedSignatoryHeaders(c: { header: (name: string, value: string) => void }): void {
+  c.header("Deprecation", "true");
+  c.header("Link", '</api/v1/tenancy/signatories>; rel="successor-version"');
+}
 
 function membershipWire(m: Membership): z.infer<typeof MembershipSchema> {
   return {
@@ -1082,6 +1102,7 @@ export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDep
   });
 
   app.openapi(firmSignatoryRoute, async (c) => {
+    deprecatedSignatoryHeaders(c);
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const signatory = await deps.service.firmSignatory(s.tenantId);
@@ -1097,6 +1118,7 @@ export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDep
   });
 
   app.openapi(setFirmSignatoryRoute, async (c) => {
+    deprecatedSignatoryHeaders(c);
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const { userId, title } = c.req.valid("json");
