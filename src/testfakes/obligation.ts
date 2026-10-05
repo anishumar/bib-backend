@@ -664,20 +664,24 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
     );
   }
 
+  /** The zone the fake reads a filing's day in (the SQL's FILING_ZONE). */
+  filingZone = "UTC";
+
   markFiled(
     tenantId: string,
     obligationId: string,
-    filedOn: string,
+    filedAt: string,
     stateId: string,
     filedByWorkItemId: string,
-  ): Promise<boolean> {
+  ): Promise<string | null> {
     const i = this.rows.findIndex((r) => r.tenantId === tenantId && r.id === obligationId);
     const row = this.rows[i];
     // `AND filed_on IS NULL`, modelled — the guard that makes a second
     // completion of the same task write no second event.
-    if (!row || row.filedOn !== null) return Promise.resolve(false);
+    if (!row || row.filedOn !== null) return Promise.resolve(null);
+    const filedOn = dayInZone(filedAt, this.filingZone);
     this.rows[i] = { ...row, filedOn, stateId, filedByWorkItemId };
-    return Promise.resolve(true);
+    return Promise.resolve(filedOn);
   }
 
   clearFiled(

@@ -815,9 +815,9 @@ was not yet MISSED, a D+1 rung had not fired, a D-1 nudge asked about the wrong 
 opening at 01:00 was placed against the assignment in force the day before. The per-period spawn
 (T6.13) and the chaser (T6.11) already asked the firm; the other five now do, through
 `firmDay(tenantId)` = `dayInZone(now, timeZoneFor(tenantId))`, resolved per firm inside the
-pass rather than once for all firms. **`filed_on` is the one exception and stays the UTC day**, by
-the 2026-08-30 decision recorded under 0054, with `completed_at` keeping the instant; the
-`today()` that remains in `usecase/obligation` exists for it alone. The routes that take a date
+pass rather than once for all firms. **`filed_on` is the FILING's day** (since S7, 2026-10-05):
+the instant of completion read in the filing's zone, the clock "missed" uses; `completed_at`
+keeps the instant. The routes that take a date
 from the browser are untouched — the caller's day is still the caller's. The PORTAL resolves it
 BEFORE `withPortal` opens — `tenancy.tenant` has no portal policy and must not grow one (T6.9's
 rule about the Key Manager).
@@ -3797,12 +3797,14 @@ until 0054, so cancellations counted as work the firm finished — and the verb'
 *"what did we finish last month"*. `work_item.state_changed` carries `isSuccess`, so "what did we
 abandon" stays answerable without a verb of its own.
 
-**`filed_on` is the UTC day, DECIDED rather than defaulted (Shrestha, 2026-08-30).** East of
-Greenwich a filing made after midnight local records the previous day, which is exactly the
-on-time/late boundary. It is survivable only because `work_item.completed_at` keeps the instant, so
-`filed_on` is a projection and the truth is not lost. `invoice`, `dunning` and `lead` no longer
-share it — they take the caller's or the firm's day since 2026-09-25 (see the client-assignment
-section) — so this is now the one deliberate UTC day left.
+**`filed_on` is the FILING's day (S7, 2026-10-05; it was the UTC day by the 2026-08-30 decision).**
+The UTC day recorded a filing made after midnight in India as the previous day, which is exactly
+the on-time/late boundary, and the client saw that wrong date. `markFiled` now takes the INSTANT
+and writes `(instant AT TIME ZONE FILING_ZONE)::date` in the same guarded UPDATE: the client
+entity's zone, else the filing country's, else the firm's company there, else the firm's, the
+same fragment the calendar's `filingToday` and the missed sweep read. It returns the day (or null
+when another completion got there first), and `obligation.filed` carries that day. No UTC day is
+left on purpose.
 
 **A boolean query parameter is NEVER `z.coerce.boolean()`.** Coercion is `Boolean(value)`, a query
 string carries TEXT, and `Boolean("false")` is `true` — so `?includeSettled=false` meant "include
@@ -5244,7 +5246,7 @@ at that instant (`filingDay`), so a replayed day still sweeps that day and a fir
 judged exactly as before. Calendar rows carry `filingZone` and `filingToday`. Reminders, T-X
 raising, escalations and the decision queue's `daysLate` stay on the firm's day.
 `PUT /parties/{id}/legal-entity/time-zone` sets a client company's own zone (offsets refused).
-`filed_on` is still the UTC day (2026-08-30 decision).
+`filed_on` is the filing's day too since S7 (see "filed_on is the FILING's day").
 
 **A rule's periods may follow the client (B2, 0358) or its tax authority (Q073, 0359).**
 `obligation_template.period_basis`: `rule_calendar` (every rule before 0358), `client_year_end`

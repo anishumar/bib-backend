@@ -2432,9 +2432,11 @@ export class ObligationService {
 
     const filed = filedState(await this.deps.states.list(tenantId));
     if (filed === null) throw new NoFiledState();
-    const filedOn = this.today();
+    // One instant for every row; each row's own zone makes it a day (S7).
+    const filedAt = this.deps.clock.now().toISOString();
     for (const { row, byJobTask } of toFile) {
-      if (!(await this.deps.instances.markFiled(tenantId, row.id, filedOn, filed.id, workItemId))) {
+      const filedOn = await this.deps.instances.markFiled(tenantId, row.id, filedAt, filed.id, workItemId);
+      if (filedOn === null) {
         continue; // somebody else got there first; their event is the one that counts
       }
       await this.deps.events.recordEvent({
@@ -2640,13 +2642,6 @@ export class ObligationService {
     return dayInZone(this.deps.clock.now().toISOString(), await this.deps.timeZones.timeZoneFor(tenantId));
   }
 
-  /** The SERVER's UTC day — kept for ONE thing: `filed_on`, which is the UTC
-   *  day BY DECISION (Shrestha, 2026-08-30, board T3.3) with the cost stated;
-   *  the work item's `completed_at` keeps the exact instant. Nothing else
-   *  should call this. */
-  private today(): IsoDate {
-    return this.deps.clock.now().toISOString().slice(0, 10);
-  }
 }
 
 // ── reading a due rule off the wire ────────────────────────────────────────

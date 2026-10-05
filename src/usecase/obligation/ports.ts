@@ -882,7 +882,14 @@ export interface ObligationInstanceRepository {
   findByWorkItem(tenantId: string, workItemId: string): Promise<ObligationInstance | null>;
   /**
    * Record that this obligation was discharged, and move it to the firm's filed
-   * state. Returns false if it was ALREADY filed.
+   * state. Returns the day it was filed on, or null if it was ALREADY filed.
+   *
+   * THE DAY IS THE FILING'S (S7, 2026-10-05): `filed_on` is `filedAt` read in
+   * the zone the filing is judged on (`filingZone`: the client entity's own,
+   * else the filing country's, else the firm's company there, else the
+   * firm's), the clock "missed" already uses. A UAE return filed at 23:30 in
+   * Dubai is filed that day, not the next one in India, and an Indian return
+   * filed at 04:30 IST is filed that day, not the previous one in UTC.
    *
    * The guard is in the WHERE clause rather than in the caller, because the
    * caller records `obligation.filed` from the answer: two concurrent moves
@@ -893,12 +900,13 @@ export interface ObligationInstanceRepository {
   markFiled(
     tenantId: string,
     obligationId: string,
-    filedOn: IsoDate,
+    /** The instant it was filed (ISO); the row's zone turns it into a day. */
+    filedAt: string,
     stateId: string,
     /** The task whose completion files it (0357): its own, or a period
      *  job's task (Q063). Written with `filed_on`, never apart from it. */
     filedByWorkItemId: string,
-  ): Promise<boolean>;
+  ): Promise<IsoDate | null>;
   /**
    * Take a recorded filing back and return the obligation to `stateId`.
    * Returns false if it was not filed to begin with, or was filed by a task

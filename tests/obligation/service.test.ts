@@ -412,6 +412,18 @@ describe("the filing closes when its task does, and opens again if the task reop
     expect(ev?.payload).toMatchObject({ workItemId, filedOn: TODAY, daysLate: -21 });
   });
 
+  it("files on the FILING's day, not the server's UTC one (S7)", async () => {
+    // The clock reads 00:00 UTC on 30 Aug, which is still 29 Aug in New York:
+    // a filing judged on New York files on the 29th, and its lateness is
+    // counted from that day.
+    const workItemId = await raisedFiling();
+    h.instances.filingZone = "America/New_York";
+    await h.service.reconcileFiling(FIRM, workItemId, true, ACTOR);
+    expect(filed()[0]?.filedOn).toBe("2026-08-29");
+    const ev = h.events.recorded.find((e) => e.verb === "obligation.filed");
+    expect(ev?.payload).toMatchObject({ filedOn: "2026-08-29", daysLate: -22 });
+  });
+
   it("writes ONE obligation.filed however many times it is told", async () => {
     // The call is reconciliation, not a transition: a double-click, a retry and
     // a redelivered message all arrive here, and the guard is in the store's

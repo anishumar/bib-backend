@@ -240,7 +240,9 @@ describe("the filings a period job's task files (Q063)", () => {
     const other = await jobTask(engagement, "2026-12-01", "2026-12-31", "Dec 2026");
     const nov = await filing(r, "2026-11-01", "2026-11-30", "Nov 2026");
 
-    expect(await instances.markFiled(tenant, nov, "2026-12-05", filedState, jobTaskId)).toBe(true);
+    // 23:30 UTC on 4 Dec is 05:00 on 5 Dec in India: an Indian filing is
+    // filed on ITS day, not the UTC one (S7; the zone is FILING_ZONE's).
+    expect(await instances.markFiled(tenant, nov, "2026-12-04T23:30:00Z", filedState, jobTaskId)).toBe("2026-12-05");
     expect((await instances.findById(tenant, nov))?.filedByWorkItemId).toBe(jobTaskId);
     expect((await instances.listFiledBy(tenant, jobTaskId)).map((x) => x.id)).toEqual([nov]);
     // A filed row is no longer one the job could file.
@@ -251,7 +253,7 @@ describe("the filings a period job's task files (Q063)", () => {
     expect(await instances.findById(tenant, nov)).toMatchObject({ filedOn: null, filedByWorkItemId: null });
 
     // The calendar names the filer.
-    await instances.markFiled(tenant, nov, "2026-12-05", filedState, jobTaskId);
+    await instances.markFiled(tenant, nov, "2026-12-05T06:00:00Z", filedState, jobTaskId);
     const [row] = await instances.calendar(tenant, { filedByWorkItemId: jobTaskId, includeSettled: true });
     expect(row).toMatchObject({ id: nov, filedByWorkItemId: jobTaskId, filedByTitle: "GST · Nov 2026" });
   });

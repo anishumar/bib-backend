@@ -119,7 +119,7 @@ describe("the task-to-filing link, in SQL (CA#36)", () => {
 
     // Filed by the task: it stays on.
     expect(await instances.attachWorkItem(tenant, sep, taskA)).toBe(true);
-    expect(await instances.markFiled(tenant, sep, "2026-10-03", filed, taskA)).toBe(true);
+    expect(await instances.markFiled(tenant, sep, "2026-10-03T06:00:00Z", filed, taskA)).toBe("2026-10-03");
     expect(await instances.detachWorkItem(tenant, sep, taskA)).toBe(false);
   });
 

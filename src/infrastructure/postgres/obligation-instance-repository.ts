@@ -532,24 +532,36 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
   async markFiled(
     tenantId: string,
     obligationId: string,
-    filedOn: IsoDate,
+    filedAt: string,
     stateId: string,
     filedByWorkItemId: string,
-  ): Promise<boolean> {
+  ): Promise<IsoDate | null> {
     return withTenant(this.app, tenantId, async (db) => {
       // `AND filed_on IS NULL` is what makes this safe to call twice. Two
       // concurrent completions of the same task both reach here; exactly one
       // updates a row, and only that one's caller writes `obligation.filed`.
       // The check cannot live in the caller — between its read and its write
       // the other request has already committed.
-      const rows = await db<{ id: string }[]>`
-        UPDATE delivery.obligation_instance
-        SET filed_on = ${filedOn}::date, state_id = ${stateId},
+      //
+      // The day is the filing's: the instant read in FILING_ZONE, the clock
+      // the missed sweep and the calendar's "today" use for the same row.
+      const rows = await db<{ filed_on: string }[]>`
+        UPDATE delivery.obligation_instance oi
+        SET filed_on = (${filedAt}::timestamptz AT TIME ZONE (
+              SELECT z.zone
+                FROM delivery.obligation_template t
+                JOIN tenancy.tenant ten ON ten.id = t.tenant_id
+                LEFT JOIN core.legal_entity le
+                  ON le.party_id = oi.entity_party_id AND le.tenant_id = oi.tenant_id
+                CROSS JOIN LATERAL (SELECT ${db.unsafe(FILING_ZONE)} AS zone) z
+               WHERE t.id = oi.template_id AND t.tenant_id = oi.tenant_id
+            ))::date,
+            state_id = ${stateId},
             filed_by_work_item_id = ${filedByWorkItemId}
-        WHERE id = ${obligationId} AND filed_on IS NULL
-        RETURNING id
+        WHERE oi.id = ${obligationId} AND oi.filed_on IS NULL
+        RETURNING oi.filed_on::text
       `;
-      return rows.length > 0;
+      return rows[0]?.filed_on ?? null;
     });
   }
 
