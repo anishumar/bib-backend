@@ -429,19 +429,14 @@ describe("the ad-hoc advance on a real database (0363)", () => {
     expect(events.verbs().filter((v) => v === "advance_allocation.mapped")).toHaveLength(2);
   });
 
-  it("splits the revenue by the mappings' managers; an ordinary invoice is one row, as before", async () => {
+  it("is nobody's revenue while no bill has taken it, however it is mapped (Q085, 0376)", async () => {
+    // 10x, 2026-10-05: "Invoice to be mapped to manager, not at advance stage."
+    // Fully mapped to two managers' services, and still all unearned.
     const rows = await withTenant(app, tenantId, (db) => db<{ manager_user_id: string | null; net_share: string; basis: string }[]>`
       SELECT manager_user_id, round(net_share, 2)::text AS net_share, basis
         FROM crm.invoice_manager_share WHERE invoice_id = ${first.invoiceId}
-       ORDER BY basis, net_share
     `);
-    expect(rows).toEqual(
-      expect.arrayContaining([
-        { manager_user_id: managerFrc, net_share: "40000.00", basis: "allocation" },
-        { manager_user_id: managerTrc, net_share: "10000.00", basis: "allocation" },
-        { manager_user_id: keyManager, net_share: "0.00", basis: "unmapped" },
-      ]),
-    );
+    expect(rows).toEqual([{ manager_user_id: null, net_share: "50000.00", basis: "advance" }]);
   });
 
   it("takes a mapped part off the service's earliest bill, before tax, and bills the balance", async () => {
@@ -464,6 +459,22 @@ describe("the ad-hoc advance on a real database (0363)", () => {
     const afterBills = await adhoc.get(tenantId, first.advanceId);
     const booksPart = afterBills.allocations.find((a) => a.target.kind === "service" && a.target.engagementId === books);
     expect(booksPart).toMatchObject({ taken: "40000.00", left: "0.00" });
+
+    // Q085 (0376): October's bill was covered by the advance, so its 30,000 is
+    // now the bookkeeping manager's, on October's bill date; November's 10,000
+    // waits for its invoice to be issued (a draft earns nothing yet).
+    const shares = await withTenant(app, tenantId, (db) => db<
+      { manager_user_id: string | null; net_share: string; basis: string; counts_on: string | null }[]
+    >`
+      SELECT manager_user_id, round(net_share, 2)::text AS net_share, basis, counts_on::text AS counts_on
+        FROM crm.invoice_manager_share WHERE invoice_id = ${first.invoiceId}
+       ORDER BY basis, net_share
+    `);
+    expect(shares).toEqual([
+      { manager_user_id: null, net_share: "-30000.00", basis: "adjusted", counts_on: "2026-10-31" },
+      { manager_user_id: managerFrc, net_share: "30000.00", basis: "adjusted", counts_on: "2026-10-31" },
+      { manager_user_id: null, net_share: "50000.00", basis: "advance", counts_on: null },
+    ]);
   });
 
   it("re-maps after partial consumption: keeps what bills took, frees the rest; a used-up part cannot move", async () => {

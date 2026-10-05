@@ -435,13 +435,49 @@ describe("the revenue report by originator (Q049)", () => {
 describe("an advance taken before the letter in the revenue report (0363)", () => {
   const NOV: Omit<RevenueQuery, "by"> = { from: "2026-11-01", to: "2026-11-30", asOf: "2026-11-30" };
 
-  it("by manager: split by the managers of the work it was mapped to, one invoice", async () => {
+  it("by manager: nobody's while no bill has taken it, its money too (Q085, 0376)", async () => {
     const rows = await repo.revenueByPerson(firm, { by: "manager", ...NOV });
-    // Mona's service took 20,000; the letter mapping named nobody; the rest is Ravi's.
-    expect(pick(rows, mona, "INR")).toMatchObject({ invoiced: "20000.0000", invoices: 0 });
-    expect(pick(rows, null, "INR")).toMatchObject({ invoiced: "5000.0000", invoices: 0 });
-    expect(pick(rows, ravi, "INR")).toMatchObject({ invoiced: "5000.0000", invoices: 1 });
+    // Mapped 20,000 to Mona's service and 5,000 to a letter, and still all
+    // unearned: no bill has taken any of it.
+    expect(pick(rows, null, "INR")).toMatchObject({ invoiced: "30000.0000", invoices: 1 });
+    expect(n(pick(rows, null, "INR")?.collected)).toBe(35400);
+    // Mona and Ravi earned none of it (Mona's row carries only older invoices' balance).
+    expect(n(pick(rows, mona, "INR")?.invoiced ?? "0")).toBe(0);
+    expect(n(pick(rows, ravi, "INR")?.invoiced ?? "0")).toBe(0);
     expect(total(rows, "INR")).toMatchObject({ invoiced: "30000.0000", invoices: 1 });
+  });
+
+  it("by manager: the part a bill takes is that bill's manager's, in the month the bill counts (Q085)", async () => {
+    // December: Mona's service bills 30,000, takes 20,000 of the advance and
+    // invoices the 10,000 balance on 10 Dec.
+    const [adv] = await owner<{ invoice_id: string }[]>`
+      SELECT invoice_id FROM crm.adhoc_advance WHERE tenant_id = ${firm} LIMIT 1
+    `;
+    const dec = await invoice({
+      entity: india,
+      manager: mona,
+      currency: "INR",
+      lines: [{ engagement: engagements.A ?? null, unit: "10000", tax: "0" }],
+      status: "issued",
+      issuedOn: "2026-12-10",
+    });
+    await owner`
+      INSERT INTO crm.billing_due
+        (tenant_id, kind, party_id, issuing_entity_party_id, currency, engagement_id, period_start, period_end,
+         period_label, bill_on, full_amount, served_days, period_days, manager_user_id, manager_how, manager_note,
+         invoice_id, invoice_line_id, advance_invoice_id, advance_applied)
+      VALUES (${firm}, 'period', ${client}, ${india}, 'INR', ${engagements.A ?? null}, '2026-11-01', '2026-11-30',
+              'Nov 2026', '2026-11-30', 30000, 30, 30, ${mona}, 'spoc_manager', null,
+              ${dec.id}, ${dec.lines[0] ?? null}, ${adv?.invoice_id ?? null}, 20000)
+    `;
+    const DEC: Omit<RevenueQuery, "by"> = { from: "2026-12-01", to: "2026-12-31", asOf: "2026-12-31" };
+    const rows = await repo.revenueByPerson(firm, { by: "manager", ...DEC });
+    expect(pick(rows, mona, "INR")).toMatchObject({ invoiced: "30000.0000", invoices: 1 });
+    expect(pick(rows, null, "INR")).toMatchObject({ invoiced: "-20000.0000", invoices: 0 });
+    // The firm's total is still what it invoiced in December.
+    expect(total(rows, "INR")).toMatchObject({ invoiced: "10000.0000", invoices: 1 });
+    // November, the advance's own month, does not move.
+    expect(total(await repo.revenueByPerson(firm, { by: "manager", ...NOV }), "INR")).toMatchObject({ invoiced: "30000.0000" });
   });
 
   it("by originator: each mapping is its letter's, the unmapped part nobody's", async () => {

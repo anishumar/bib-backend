@@ -452,24 +452,23 @@ export class PostgresDashboardRepository implements DashboardRepository {
           invoices: number;
         }[]
       >`
-        -- WHOSE each part is (0363, Q045): invoice_manager_share is one row
-        -- per invoice and its manager for an ordinary invoice (its whole net,
-        -- as before), and for an advance taken before the letter one row per
-        -- service manager it was mapped to plus the rest to its own manager.
-        -- An invoice is counted once, on its own manager's row.
+        -- WHOSE each part is (0376, Q085): invoice_manager_share gives an
+        -- ordinary invoice to its manager, and an advance to nobody until a
+        -- bill takes some of it; that part is then the bill's manager's, in
+        -- the month the bill counts (counts_on). An invoice is counted once.
         WITH docs AS (
           SELECT s.manager_user_id AS manager,
-                 to_char(i.issued_on, 'YYYY-MM') AS month,
+                 to_char(coalesce(s.counts_on, i.issued_on), 'YYYY-MM') AS month,
                  round(coalesce(s.net_share, 0) * i.fx_rate, 4) AS billed,
                  0::numeric AS collected,
-                 CASE WHEN s.basis = 'allocation' THEN 0 ELSE 1 END AS invoices
+                 CASE WHEN s.basis IN ('invoice', 'advance') THEN 1 ELSE 0 END AS invoices
           FROM crm.invoice i
           JOIN crm.invoice_manager_share s ON s.invoice_id = i.id AND s.tenant_id = i.tenant_id
           WHERE i.status = 'issued'
-            AND i.issued_on >= ${window.from}::date
-            AND i.issued_on <  ${window.until}::date
+            AND coalesce(s.counts_on, i.issued_on) >= ${window.from}::date
+            AND coalesce(s.counts_on, i.issued_on) <  ${window.until}::date
           UNION ALL
-          SELECT i.manager_user_id,
+          SELECT CASE WHEN ai.invoice_id IS NULL THEN i.manager_user_id END,
                  to_char(c.issued_on, 'YYYY-MM'),
                  round(-round(CASE WHEN coalesce(t.total, 0) = 0 THEN c.amount
                                    ELSE c.amount * t.net / t.total END, 4) * i.fx_rate, 4),
@@ -478,17 +477,19 @@ export class PostgresDashboardRepository implements DashboardRepository {
           FROM crm.credit_note c
           JOIN crm.invoice i ON i.id = c.invoice_id AND i.tenant_id = c.tenant_id
           LEFT JOIN crm.invoice_totals t ON t.invoice_id = i.id AND t.tenant_id = i.tenant_id
+          LEFT JOIN crm.advance_invoice ai ON ai.invoice_id = i.id AND ai.tenant_id = i.tenant_id
           WHERE i.status = 'issued'
             AND c.issued_on >= ${window.from}::date
             AND c.issued_on <  ${window.until}::date
           UNION ALL
-          SELECT i.manager_user_id,
+          SELECT CASE WHEN ai.invoice_id IS NULL THEN i.manager_user_id END,
                  to_char(p.received_on, 'YYYY-MM'),
                  0,
                  round(p.amount * i.fx_rate, 4),
                  0
           FROM crm.payment p
           JOIN crm.invoice i ON i.id = p.invoice_id AND i.tenant_id = p.tenant_id
+          LEFT JOIN crm.advance_invoice ai ON ai.invoice_id = i.id AND ai.tenant_id = i.tenant_id
           WHERE i.status = 'issued'
             AND p.received_on >= ${window.from}::date
             AND p.received_on <  ${window.until}::date
@@ -520,13 +521,19 @@ export class PostgresDashboardRepository implements DashboardRepository {
       // rate. The empty grouping set always answers, so a firm owed nothing
       // gets a total of "0" rather than no row.
       const rows = await db<{ manager: string | null; whole: number; total: string; n: number }[]>`
-        SELECT i.manager_user_id AS manager,
-               GROUPING(i.manager_user_id)::int AS whole,
-               coalesce(sum(a.outstanding_reporting), 0)::text AS total,
-               count(a.invoice_id)::int AS n
-        FROM crm.receivable_ageing_on(${day}::date) a
-        JOIN crm.invoice i ON i.id = a.invoice_id AND i.tenant_id = a.tenant_id
-        GROUP BY GROUPING SETS ((i.manager_user_id), ())
+        -- An advance's balance is nobody's (0376, Q085), as its revenue is.
+        SELECT o.manager,
+               GROUPING(o.manager)::int AS whole,
+               coalesce(sum(o.outstanding_reporting), 0)::text AS total,
+               count(o.invoice_id)::int AS n
+        FROM (
+          SELECT CASE WHEN ai.invoice_id IS NULL THEN i.manager_user_id END AS manager,
+                 a.outstanding_reporting, a.invoice_id
+            FROM crm.receivable_ageing_on(${day}::date) a
+            JOIN crm.invoice i ON i.id = a.invoice_id AND i.tenant_id = a.tenant_id
+            LEFT JOIN crm.advance_invoice ai ON ai.invoice_id = i.id AND ai.tenant_id = i.tenant_id
+        ) o
+        GROUP BY GROUPING SETS ((o.manager), ())
       `;
       return rows.map((r) => ({
         scope: r.whole === 1 ? ("firm" as const) : ("manager" as const),
@@ -567,21 +574,24 @@ export class PostgresDashboardRepository implements DashboardRepository {
       if (q.by === "manager") {
         const rows = await db<RevenueRow[]>`
           WITH inv AS (
-            SELECT i.id, i.manager_user_id AS who, i.currency, i.issued_on
+            -- An advance's money and balance are nobody's (0376, Q085).
+            SELECT i.id, CASE WHEN ai.invoice_id IS NULL THEN i.manager_user_id END AS who,
+                   i.currency, i.issued_on
               FROM crm.invoice i
+              LEFT JOIN crm.advance_invoice ai ON ai.invoice_id = i.id AND ai.tenant_id = i.tenant_id
              WHERE i.status = 'issued' ${issuer} ${currency}
           ), docs AS (
-            -- WHOSE each part is (0363, Q045), as billingByManager reads it:
-            -- an ordinary invoice to its manager; an advance taken before the
-            -- letter split by the managers of the services it was mapped to,
-            -- the rest to its own manager. A share is revenue, not a second
-            -- invoice, so only the 'invoiced' kind is counted.
+            -- WHOSE each part is (0376, Q085), as billingByManager reads it:
+            -- an ordinary invoice to its manager; an advance to nobody until a
+            -- bill takes some of it, then that part to the bill's manager on
+            -- the day the bill counts. A moved part is revenue, not a second
+            -- invoice, so only an invoice's own row is counted as one.
             SELECT s.manager_user_id AS who, inv.currency, inv.id AS invoice_id,
-                   CASE WHEN s.basis = 'allocation' THEN 'shared' ELSE 'invoiced' END AS kind,
+                   CASE WHEN s.basis IN ('invoice', 'advance') THEN 'invoiced' ELSE 'shared' END AS kind,
                    coalesce(s.net_share, 0) AS invoiced, 0::numeric AS collected, 0::numeric AS outstanding
               FROM inv
               JOIN crm.invoice_manager_share s ON s.invoice_id = inv.id
-             WHERE inv.issued_on BETWEEN ${q.from}::date AND ${q.to}::date
+             WHERE coalesce(s.counts_on, inv.issued_on) BETWEEN ${q.from}::date AND ${q.to}::date
             UNION ALL
             SELECT inv.who, inv.currency, inv.id, 'credited',
                    -round(CASE WHEN coalesce(t.total, 0) = 0 THEN c.amount ELSE c.amount * t.net / t.total END, 4),
