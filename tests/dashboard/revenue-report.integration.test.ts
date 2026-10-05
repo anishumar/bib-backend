@@ -14,6 +14,10 @@
 //   3. The currency totals equal the sum of its people's rows.
 //   4. Drafts and cancelled invoices count nowhere; another firm's never.
 //   5. The originator store: the default's `how`, a person's word, the wall.
+//   6. AN ADVANCE TAKEN BEFORE THE LETTER (0363), in November: by manager it
+//      splits by the managers of the work it was mapped to (S4's
+//      invoice_manager_share), counted as one invoice; by originator each
+//      mapping is its letter's, and what is mapped to nothing is nobody's.
 //
 // Run with:  npx vitest run --config vitest.integration.config.ts tests/dashboard/revenue-report.integration.test.ts
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -307,6 +311,34 @@ beforeAll(async () => {
     status: "cancelled",
     issuedOn: "2026-06-01",
   });
+  // I7 (INR, Ravi), 15 Nov: an ad-hoc advance of 30,000 + 18%. 20,000 is
+  // mapped to letter A's service (Mona manages it), 5,000 to letter B when it
+  // was signed (nobody named), 5,000 to nothing yet.
+  const i7 = await invoice({
+    entity: india,
+    manager: ravi,
+    currency: "INR",
+    lines: [{ engagement: null, unit: "30000", tax: "18" }],
+    status: "issued",
+    issuedOn: "2026-11-15",
+  });
+  const [adv] = await owner<{ id: string }[]>`
+    INSERT INTO crm.adhoc_advance (tenant_id, invoice_id, currency, raised_by_user_id)
+    VALUES (${firm}, ${i7.id}, 'INR', ${ravi}) RETURNING id
+  `;
+  if (!adv) throw new Error("advance seed failed");
+  // Paid in full on 20 Nov, so nothing of it is owed at any close above.
+  await pay(i7.id, "35400", "INR", "2026-11-20");
+  await owner`
+    INSERT INTO crm.advance_allocation
+      (tenant_id, adhoc_advance_id, invoice_id, currency, engagement_id, amount, manager_user_id, how, reason)
+    VALUES (${firm}, ${adv.id}, ${i7.id}, 'INR', ${engagements.A ?? null}, 20000, ${mona}, 'by_hand', 'Fixture')
+  `;
+  await owner`
+    INSERT INTO crm.advance_allocation
+      (tenant_id, adhoc_advance_id, invoice_id, currency, engagement_letter_id, amount, manager_user_id, how, reason)
+    VALUES (${firm}, ${adv.id}, ${i7.id}, 'INR', ${letters.B ?? null}, 5000, null, 'letter_signed', 'Fixture')
+  `;
   // Another firm's invoice in the period.
   const otherCo = await company(other, "Other Firm", "IN");
   await invoice({
@@ -397,6 +429,31 @@ describe("the revenue report by originator (Q049)", () => {
     expect(sum("invoiced")).toBeCloseTo(n(total(rows, "INR")?.invoiced), 3);
     expect(sum("collected")).toBeCloseTo(n(total(rows, "INR")?.collected), 3);
     expect(sum("outstanding")).toBeCloseTo(n(total(rows, "INR")?.outstanding), 3);
+  });
+});
+
+describe("an advance taken before the letter in the revenue report (0363)", () => {
+  const NOV: Omit<RevenueQuery, "by"> = { from: "2026-11-01", to: "2026-11-30", asOf: "2026-11-30" };
+
+  it("by manager: split by the managers of the work it was mapped to, one invoice", async () => {
+    const rows = await repo.revenueByPerson(firm, { by: "manager", ...NOV });
+    // Mona's service took 20,000; the letter mapping named nobody; the rest is Ravi's.
+    expect(pick(rows, mona, "INR")).toMatchObject({ invoiced: "20000.0000", invoices: 0 });
+    expect(pick(rows, null, "INR")).toMatchObject({ invoiced: "5000.0000", invoices: 0 });
+    expect(pick(rows, ravi, "INR")).toMatchObject({ invoiced: "5000.0000", invoices: 1 });
+    expect(total(rows, "INR")).toMatchObject({ invoiced: "30000.0000", invoices: 1 });
+  });
+
+  it("by originator: each mapping is its letter's, the unmapped part nobody's", async () => {
+    const rows = await repo.revenueByPerson(firm, { by: "originator", ...NOV });
+    expect(n(pick(rows, sunil, "INR")?.invoiced)).toBe(20000);
+    expect(n(pick(rows, priya, "INR")?.invoiced)).toBe(5000);
+    expect(n(pick(rows, null, "INR")?.invoiced)).toBe(5000);
+    expect(n(total(rows, "INR")?.invoiced)).toBe(30000);
+    // Its money follows the parts, tax included: 35,400 paid, 20:5:5.
+    expect(n(pick(rows, sunil, "INR")?.collected)).toBeCloseTo(23600, 3);
+    expect(n(pick(rows, priya, "INR")?.collected)).toBeCloseTo(5900, 3);
+    expect(n(pick(rows, null, "INR")?.collected)).toBeCloseTo(5900, 3);
   });
 });
 

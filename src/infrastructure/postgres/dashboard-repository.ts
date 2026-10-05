@@ -571,10 +571,16 @@ export class PostgresDashboardRepository implements DashboardRepository {
               FROM crm.invoice i
              WHERE i.status = 'issued' ${issuer} ${currency}
           ), docs AS (
-            SELECT inv.who, inv.currency, inv.id AS invoice_id, 'invoiced' AS kind,
-                   coalesce(t.net, 0) AS invoiced, 0::numeric AS collected, 0::numeric AS outstanding
+            -- WHOSE each part is (0363, Q045), as billingByManager reads it:
+            -- an ordinary invoice to its manager; an advance taken before the
+            -- letter split by the managers of the services it was mapped to,
+            -- the rest to its own manager. A share is revenue, not a second
+            -- invoice, so only the 'invoiced' kind is counted.
+            SELECT s.manager_user_id AS who, inv.currency, inv.id AS invoice_id,
+                   CASE WHEN s.basis = 'allocation' THEN 'shared' ELSE 'invoiced' END AS kind,
+                   coalesce(s.net_share, 0) AS invoiced, 0::numeric AS collected, 0::numeric AS outstanding
               FROM inv
-              LEFT JOIN crm.invoice_totals t ON t.invoice_id = inv.id
+              JOIN crm.invoice_manager_share s ON s.invoice_id = inv.id
              WHERE inv.issued_on BETWEEN ${q.from}::date AND ${q.to}::date
             UNION ALL
             SELECT inv.who, inv.currency, inv.id, 'credited',
@@ -608,6 +614,12 @@ export class PostgresDashboardRepository implements DashboardRepository {
       // found through the bill it was raised from. Each line takes its share
       // of the invoice's credit notes (of its net), money and balance (of its
       // total), to four places.
+      //
+      // AN ADVANCE TAKEN BEFORE THE LETTER (0363) has one line, on no
+      // engagement and no bill. Its parts are followed instead: each mapping
+      // to a service or a signed letter is that letter's originator's, at its
+      // effective amount (what a re-map kept), its tax in the invoice's own
+      // proportion; what is mapped to nothing yet stays with nobody.
       const rows = await db<RevenueRow[]>`
         WITH inv AS (
           SELECT i.id, i.currency, i.issued_on
@@ -632,6 +644,30 @@ export class PostgresDashboardRepository implements DashboardRepository {
             LEFT JOIN crm.letter_originator_in_force o
               ON o.engagement_letter_id = coalesce(e.engagement_letter_id, bill.letter_id)
              AND o.tenant_id = il.tenant_id
+           WHERE NOT EXISTS (SELECT 1 FROM crm.adhoc_advance aa WHERE aa.invoice_id = la.invoice_id)
+          UNION ALL
+          SELECT part.invoice_id, inv.currency, inv.issued_on, part.net,
+                 round(part.net * t.total / t.net, 4), t.total, o.originator_user_id
+            FROM (
+              SELECT al.invoice_id, al.tenant_id,
+                     coalesce(al.engagement_letter_id, e.engagement_letter_id) AS letter_id,
+                     sum(coalesce(al.kept_amount, al.amount)) AS net
+                FROM crm.advance_allocation al
+                LEFT JOIN crm.engagement e ON e.id = al.engagement_id AND e.tenant_id = al.tenant_id
+               GROUP BY 1, 2, 3
+              UNION ALL
+              SELECT aa.invoice_id, aa.tenant_id, NULL::uuid,
+                     t.net - coalesce((SELECT sum(coalesce(al.kept_amount, al.amount))
+                                         FROM crm.advance_allocation al
+                                        WHERE al.adhoc_advance_id = aa.id AND al.tenant_id = aa.tenant_id), 0)
+                FROM crm.adhoc_advance aa
+                JOIN crm.invoice_totals t ON t.invoice_id = aa.invoice_id AND t.tenant_id = aa.tenant_id
+            ) part
+            JOIN inv ON inv.id = part.invoice_id
+            JOIN crm.invoice_totals t ON t.invoice_id = part.invoice_id
+            LEFT JOIN crm.letter_originator_in_force o
+              ON o.engagement_letter_id = part.letter_id AND o.tenant_id = part.tenant_id
+           WHERE t.net > 0 AND part.net <> 0
         ), docs AS (
           SELECT l.who, l.currency, l.invoice_id, 'invoiced' AS kind,
                  l.net AS invoiced, 0::numeric AS collected, 0::numeric AS outstanding
