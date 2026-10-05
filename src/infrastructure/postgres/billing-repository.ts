@@ -19,7 +19,7 @@
 // started.
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
-import type { SpocWithManager } from "../../domain/billing/model";
+import type { SpocWithManager, StatutoryFiling } from "../../domain/billing/model";
 import type {
   AutoBillingFirms,
   BilledEngagement,
@@ -153,6 +153,67 @@ export class PostgresBillingDueWriter implements BillingDueWriter {
           duePeriodStarts: starts.get(key) ?? [],
         });
       }
+      // ── A yearly subject's statutory filings (Q071) ──────────────────────
+      // The billed client company's filings, not withdrawn, generated for one
+      // of its engagements or of a rule its service carries (T6.16, on the
+      // rule's lineage): CA#11's predicate, as Work vs Billing reads it. The
+      // domain keeps the yearly ones and picks the day.
+      const yearly = rows.filter((r) => r.billing_frequency === "annually").map((r) => r.engagement_id);
+      if (yearly.length > 0) {
+        const filings = await db<
+          {
+            engagement_id: string;
+            id: string;
+            name: string;
+            due_on: string;
+            period_start: string;
+            period_end: string;
+            period_label: string;
+          }[]
+        >`
+          SELECT e.id AS engagement_id, oi.id, ot.name, oi.statutory_due_on::text AS due_on,
+                 oi.period_start::text AS period_start, oi.period_end::text AS period_end, oi.period_label
+            FROM crm.engagement e
+            JOIN crm.engagement_letter_line ll
+              ON ll.id = e.engagement_letter_line_id AND ll.tenant_id = e.tenant_id
+            LEFT JOIN config.version pinned
+              ON pinned.id = ll.service_version_id AND pinned.tenant_id = ll.tenant_id
+            JOIN delivery.obligation_instance oi
+              ON oi.tenant_id = e.tenant_id AND oi.entity_party_id = e.entity_party_id
+             AND oi.withdrawn_at IS NULL
+             AND oi.statutory_due_on >= e.billing_from
+             AND (oi.engagement_id = e.id
+                  OR EXISTS (SELECT 1 FROM delivery.obligation_rule_service k
+                              WHERE k.tenant_id = oi.tenant_id
+                                AND k.lineage_id = oi.lineage_id
+                                AND k.service_entry_id = pinned.entry_id
+                                AND k.unlinked_at IS NULL))
+            JOIN delivery.obligation_template ot ON ot.id = oi.template_id AND ot.tenant_id = oi.tenant_id
+           WHERE e.id = ANY(${db.array(yearly)}::uuid[])
+           ORDER BY oi.statutory_due_on, oi.id
+        `;
+        const byEngagement = new Map<string, StatutoryFiling[]>();
+        for (const f of filings) {
+          const list = byEngagement.get(f.engagement_id) ?? [];
+          list.push({
+            id: f.id,
+            name: f.name,
+            dueOn: f.due_on,
+            periodStart: f.period_start,
+            periodEnd: f.period_end,
+            periodLabel: f.period_label,
+          });
+          byEngagement.set(f.engagement_id, list);
+        }
+        for (const [key, subject] of subjects) {
+          if (subject.billingFrequency !== "annually") continue;
+          const seen = new Map<string, StatutoryFiling>();
+          for (const e of subject.engagements) {
+            for (const f of byEngagement.get(e.engagementId) ?? []) seen.set(f.id, f);
+          }
+          if (seen.size > 0) subjects.set(key, { ...subject, statutoryFilings: [...seen.values()] });
+        }
+      }
       return [...subjects.values()];
     });
   }
@@ -173,6 +234,7 @@ export class PostgresBillingDueWriter implements BillingDueWriter {
         period_end: d.periodEnd,
         period_label: d.periodLabel,
         bill_on: d.billOn,
+        dated_by_filing_id: d.datedByFilingId ?? null,
         full_amount: d.fullAmount,
         served_days: d.servedDays,
         period_days: d.periodDays,
@@ -186,17 +248,17 @@ export class PostgresBillingDueWriter implements BillingDueWriter {
         INSERT INTO crm.billing_due
           (id, tenant_id, kind, engagement_letter_id, party_id, issuing_entity_party_id, currency,
            engagement_id, fee_group_id,
-           period_start, period_end, period_label, bill_on, full_amount, served_days, period_days,
+           period_start, period_end, period_label, bill_on, dated_by_filing_id, full_amount, served_days, period_days,
            manager_user_id, manager_how, manager_note)
         SELECT r.id, ${tenantId}, r.kind, r.engagement_letter_id, r.party_id, r.issuing_entity_party_id,
                r.currency, r.engagement_id,
-               r.fee_group_id, r.period_start, r.period_end, r.period_label, r.bill_on, r.full_amount,
-               r.served_days, r.period_days, r.manager_user_id, r.manager_how, r.manager_note
+               r.fee_group_id, r.period_start, r.period_end, r.period_label, r.bill_on, r.dated_by_filing_id,
+               r.full_amount, r.served_days, r.period_days, r.manager_user_id, r.manager_how, r.manager_note
           FROM jsonb_to_recordset(${JSON.stringify(payload)}::text::jsonb) AS r(
             id uuid, kind text, engagement_letter_id uuid, party_id uuid, issuing_entity_party_id uuid,
             currency text, engagement_id uuid,
             fee_group_id uuid, period_start date, period_end date, period_label text, bill_on date,
-            full_amount numeric, served_days integer, period_days integer, manager_user_id uuid,
+            dated_by_filing_id uuid, full_amount numeric, served_days integer, period_days integer, manager_user_id uuid,
             manager_how text, manager_note text)
         ON CONFLICT DO NOTHING
         RETURNING id

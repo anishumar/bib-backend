@@ -71,6 +71,7 @@ interface BillRow {
   period_end: string;
   period_label: string;
   bill_on: string;
+  dated_by_filing_id: string | null;
   currency: string;
   amount: string | null;
   full_amount: string | null;
@@ -224,7 +225,7 @@ export class PostgresWorkBillingFacts implements WorkBillingFacts {
                d.party_id, p.display_name AS party_name,
                subj.engagement_ids, subj.service_name, subj.entity_name, subj.letter_id, subj.letter_ref,
                d.period_start::text AS period_start, d.period_end::text AS period_end, d.period_label,
-               d.bill_on::text AS bill_on, d.currency, d.amount::text AS amount,
+               d.bill_on::text AS bill_on, d.dated_by_filing_id, d.currency, d.amount::text AS amount,
                d.full_amount::text AS full_amount,
                CASE
                  WHEN d.skipped_at IS NOT NULL THEN 'skipped'
@@ -443,6 +444,7 @@ function assemble(
     periodEnd: b.period_end,
     periodLabel: b.period_label,
     billOn: b.bill_on,
+    datedByFilingId: b.dated_by_filing_id,
     status: b.status,
     currency: b.currency,
     amount: b.amount,

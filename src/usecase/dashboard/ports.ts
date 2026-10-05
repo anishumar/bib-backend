@@ -91,6 +91,53 @@ export interface DashboardRepository {
   /** Names for these users, from this firm's own memberships only (a user
    *  account is global; the membership is behind the tenant wall). */
   managerNames(tenantId: string, userIds: readonly string[]): Promise<readonly ManagerName[]>;
+
+  /**
+   * The revenue report (Q049): invoiced, collected and outstanding per person
+   * and CURRENCY, never converted and never added across currencies. Summed in
+   * SQL on `numeric`. See `RevenueQuery` for the person and the definitions.
+   */
+  revenueByPerson(tenantId: string, q: RevenueQuery): Promise<readonly PersonCurrencyRow[]>;
+}
+
+/**
+ * Who a row is, and the window.
+ *
+ *   - `manager`: the invoice's manager (0318, frozen at issue);
+ *   - `originator`: the originator of the letter each invoice LINE bills
+ *     (0355), so one invoice carrying two letters' work credits two people,
+ *     each line's share of the invoice's credit notes, money and balance
+ *     allocated by its share of the invoice (pro rata, to four places).
+ *
+ * INVOICED is issued in [from, to], before tax, less credit notes issued in
+ * the window at their pre-tax share (the dashboard's BILLED, in the document's
+ * own currency). COLLECTED is cash received in the window, with tax. OUTSTANDING
+ * is what is owed at the close of `asOf` (`crm.receivable_ageing_on`). A draft
+ * or a cancelled invoice counts nowhere.
+ */
+export interface RevenueQuery {
+  readonly by: "manager" | "originator";
+  readonly from: string;
+  readonly to: string;
+  readonly asOf: string;
+  /** One of the firm's companies (the invoice's issuer), or all. */
+  readonly issuerPartyId?: string | undefined;
+  /** One currency, or all (each still its own row). */
+  readonly currency?: string | undefined;
+}
+
+export interface PersonCurrencyRow {
+  /** `currency`: the whole firm's row for that currency (GROUPING SETS), which
+   *  every person's row of the currency adds up to. */
+  readonly scope: "person" | "currency";
+  /** Null: invoices (or lines) naming nobody, or the currency's total. */
+  readonly userId: string | null;
+  readonly currency: string;
+  readonly invoiced: string;
+  readonly collected: string;
+  readonly outstanding: string;
+  /** Invoices issued in the window that count here. */
+  readonly invoices: number;
 }
 
 /** A billing window as two days: `from` inclusive, `until` exclusive. */

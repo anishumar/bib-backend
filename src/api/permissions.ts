@@ -860,6 +860,8 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("POST", "/api/v1/billing/refunds/{dueId}/keep"), "invoice:issue" as const],
   [routeKey("GET", "/api/v1/billing/bill-now"), "party:read" as const],
   [routeKey("POST", "/api/v1/billing/engagements/{engagementId}/bill-now"), "party:write" as const],
+  [routeKey("GET", "/api/v1/billing/bill-early"), "party:read" as const],
+  [routeKey("POST", "/api/v1/billing/bill-early"), "party:write" as const],
   [routeKey("GET", "/api/v1/billing/settings"), "party:read" as const],
   [routeKey("PUT", "/api/v1/billing/settings"), "tenant:admin" as const],
   // Who hears what across the firm (0323): an administrator's call, like the
@@ -917,6 +919,9 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("GET", "/api/v1/dashboard/receivables/by-client"), "party:read" as const],
   [routeKey("GET", "/api/v1/dashboard/revenue/by-company"), "party:read" as const],
   [routeKey("GET", "/api/v1/dashboard/revenue/by-manager"), "party:read" as const],
+  [routeKey("GET", "/api/v1/dashboard/revenue/report"), "party:read" as const],
+  [routeKey("GET", "/api/v1/engagement-letters/{letterId}/originator"), "party:read" as const],
+  [routeKey("PUT", "/api/v1/engagement-letters/{letterId}/originator"), "tenant:admin" as const],
 
   [routeKey("GET", "/api/v1/documents"), "party:read" as const],
   [routeKey("POST", "/api/v1/documents"), "party:write" as const],

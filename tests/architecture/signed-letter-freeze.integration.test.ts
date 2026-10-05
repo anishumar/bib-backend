@@ -588,8 +588,21 @@ describe("and EVERY child of a signed letter is frozen, not just the ones we rem
    * letter's own frozen columns, and the bill's settlement (raised, covered,
    * released) is what must move. What a person may change on it is limited by
    * a column GRANT, as 0318 set for every bill.
+   *
+   * `crm.letter_originator` (0355, Q049) is the fifth: WHO WON the work, the
+   * salesperson the firm's revenue report credits. The client agreed to no
+   * such thing, and a wrong default (the lead's owner) must stay correctable
+   * after signature, which is when revenue starts to be counted. Only its
+   * person moves (a column GRANT), every change is ledgered
+   * (`engagement_letter.originator_set`), and the route is a partner's.
    */
-  const NOT_TERMS = ["crm.engagement", "crm.letter_signature_request", "crm.recorded_acceptance", "crm.billing_due"];
+  const NOT_TERMS = [
+    "crm.engagement",
+    "crm.letter_signature_request",
+    "crm.recorded_acceptance",
+    "crm.billing_due",
+    "crm.letter_originator",
+  ];
 
   it("finds no child table of an engagement letter without the freeze trigger", async () => {
     const unguarded = await owner<{ table: string }[]>`

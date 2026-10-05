@@ -29,6 +29,8 @@ import type {
   BillingSchedules,
   BillingSubject,
   DueFilters,
+  DoneWork,
+  DoneWorkFacts,
   BillingMailer,
   FinalBillFacts,
   FinalBillSubject,
@@ -734,6 +736,44 @@ function daysFrom(from: string, to: string): number {
     return Date.UTC(y, m - 1, d);
   };
   return Math.round((ms(to) - ms(from)) / 86_400_000);
+}
+
+/** Finished work (Q071 b), by firm; the filters as the adapter reads them. */
+export class FakeDoneWorkFacts implements DoneWorkFacts {
+  readonly work: (DoneWork & { readonly tenantId: string; readonly partyId: string; readonly workItemIds?: readonly string[] })[] = [];
+
+  doneWork(
+    tenantId: string,
+    filter: {
+      readonly since: string;
+      readonly jobId?: string | undefined;
+      readonly workItemId?: string | undefined;
+      readonly partyId?: string | undefined;
+    },
+  ): Promise<readonly DoneWork[]> {
+    return Promise.resolve(
+      this.work
+        .filter((w) => w.tenantId === tenantId && w.doneOn >= filter.since)
+        .filter((w) => filter.jobId === undefined || w.jobId === filter.jobId)
+        .filter((w) => filter.workItemId === undefined || (w.workItemIds ?? []).includes(filter.workItemId))
+        .filter((w) => filter.partyId === undefined || w.partyId === filter.partyId)
+        .map(({ tenantId: _t, partyId: _p, workItemIds: _w, ...w }) => w),
+    );
+  }
+
+  describe(
+    _t: string,
+    engagementIds: readonly string[],
+  ): Promise<ReadonlyMap<string, { readonly clientName: string; readonly serviceName: string; readonly letterRef: string }>> {
+    return Promise.resolve(
+      new Map(
+        engagementIds.map((id) => [
+          `e:${id}`,
+          { clientName: "Kaveri Foods", serviceName: "Statutory audit", letterRef: "EL-2026-0001" },
+        ]),
+      ),
+    );
+  }
 }
 
 export class FakeFinalBillFacts implements FinalBillFacts {

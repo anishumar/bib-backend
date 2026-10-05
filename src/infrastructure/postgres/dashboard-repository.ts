@@ -24,7 +24,9 @@ import type {
   ManagerName,
   ManagerOwedRow,
   MrrTotals,
+  PersonCurrencyRow,
   ReceivableTotals,
+  RevenueQuery,
 } from "../../usecase/dashboard/ports";
 
 export class PostgresDashboardRepository implements DashboardRepository {
@@ -551,6 +553,115 @@ export class PostgresDashboardRepository implements DashboardRepository {
     });
   }
 
+  async revenueByPerson(tenantId: string, q: RevenueQuery): Promise<readonly PersonCurrencyRow[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // Issued invoices only, in their OWN currency: nothing is converted and
+      // two currencies never meet in one sum (the GROUP BY carries currency).
+      const issuer = q.issuerPartyId === undefined ? db`` : db`AND i.entity_party_id = ${q.issuerPartyId}`;
+      const currency = q.currency === undefined ? db`` : db`AND i.currency = ${q.currency}`;
+      if (q.by === "manager") {
+        const rows = await db<RevenueRow[]>`
+          WITH inv AS (
+            SELECT i.id, i.manager_user_id AS who, i.currency, i.issued_on
+              FROM crm.invoice i
+             WHERE i.status = 'issued' ${issuer} ${currency}
+          ), docs AS (
+            SELECT inv.who, inv.currency, inv.id AS invoice_id, 'invoiced' AS kind,
+                   coalesce(t.net, 0) AS invoiced, 0::numeric AS collected, 0::numeric AS outstanding
+              FROM inv
+              LEFT JOIN crm.invoice_totals t ON t.invoice_id = inv.id
+             WHERE inv.issued_on BETWEEN ${q.from}::date AND ${q.to}::date
+            UNION ALL
+            SELECT inv.who, inv.currency, inv.id, 'credited',
+                   -round(CASE WHEN coalesce(t.total, 0) = 0 THEN c.amount ELSE c.amount * t.net / t.total END, 4),
+                   0, 0
+              FROM crm.credit_note c
+              JOIN inv ON inv.id = c.invoice_id
+              LEFT JOIN crm.invoice_totals t ON t.invoice_id = inv.id
+             WHERE c.issued_on BETWEEN ${q.from}::date AND ${q.to}::date
+            UNION ALL
+            SELECT inv.who, inv.currency, inv.id, 'paid', 0, p.amount, 0
+              FROM crm.payment p
+              JOIN inv ON inv.id = p.invoice_id
+             WHERE p.received_on BETWEEN ${q.from}::date AND ${q.to}::date
+            UNION ALL
+            SELECT inv.who, inv.currency, inv.id, 'owed', 0, 0, a.outstanding
+              FROM crm.receivable_ageing_on(${q.asOf}::date) a
+              JOIN inv ON inv.id = a.invoice_id
+          )
+          SELECT who, GROUPING(who)::int AS whole, currency,
+                 sum(invoiced)::text AS invoiced, sum(collected)::text AS collected,
+                 sum(outstanding)::text AS outstanding,
+                 (count(DISTINCT invoice_id) FILTER (WHERE kind = 'invoiced'))::int AS invoices
+            FROM docs
+           GROUP BY GROUPING SETS ((who, currency), (currency))
+        `;
+        return rows.map(toPersonRow);
+      }
+      // ORIGINATOR: line by line. The letter a line bills is its engagement's;
+      // a line with no engagement (a fee group's, a letter-wide advance's) is
+      // found through the bill it was raised from. Each line takes its share
+      // of the invoice's credit notes (of its net), money and balance (of its
+      // total), to four places.
+      const rows = await db<RevenueRow[]>`
+        WITH inv AS (
+          SELECT i.id, i.currency, i.issued_on
+            FROM crm.invoice i
+           WHERE i.status = 'issued' ${issuer} ${currency}
+        ), lines AS (
+          SELECT la.invoice_id, inv.currency, inv.issued_on, la.net, la.net + la.tax AS gross,
+                 t.total AS invoice_total, o.originator_user_id AS who
+            FROM crm.invoice_line_amount la
+            JOIN inv ON inv.id = la.invoice_id
+            JOIN crm.invoice_totals t ON t.invoice_id = la.invoice_id
+            JOIN crm.invoice_line il ON il.id = la.invoice_line_id
+            LEFT JOIN crm.engagement e ON e.id = il.engagement_id AND e.tenant_id = il.tenant_id
+            LEFT JOIN LATERAL (
+              SELECT coalesce(d.engagement_letter_id, g.engagement_letter_id, de.engagement_letter_id) AS letter_id
+                FROM crm.billing_due d
+                LEFT JOIN crm.engagement_letter_fee_group g ON g.id = d.fee_group_id AND g.tenant_id = d.tenant_id
+                LEFT JOIN crm.engagement de ON de.id = d.engagement_id AND de.tenant_id = d.tenant_id
+               WHERE d.invoice_line_id = il.id AND d.tenant_id = il.tenant_id
+               LIMIT 1
+            ) bill ON true
+            LEFT JOIN crm.letter_originator_in_force o
+              ON o.engagement_letter_id = coalesce(e.engagement_letter_id, bill.letter_id)
+             AND o.tenant_id = il.tenant_id
+        ), docs AS (
+          SELECT l.who, l.currency, l.invoice_id, 'invoiced' AS kind,
+                 l.net AS invoiced, 0::numeric AS collected, 0::numeric AS outstanding
+            FROM lines l
+           WHERE l.issued_on BETWEEN ${q.from}::date AND ${q.to}::date
+          UNION ALL
+          SELECT l.who, l.currency, l.invoice_id, 'credited',
+                 -round(c.amount * l.net / l.invoice_total, 4), 0, 0
+            FROM crm.credit_note c
+            JOIN lines l ON l.invoice_id = c.invoice_id
+           WHERE c.issued_on BETWEEN ${q.from}::date AND ${q.to}::date
+             AND l.invoice_total > 0
+          UNION ALL
+          SELECT l.who, l.currency, l.invoice_id, 'paid', 0, round(p.amount * l.gross / l.invoice_total, 4), 0
+            FROM crm.payment p
+            JOIN lines l ON l.invoice_id = p.invoice_id
+           WHERE p.received_on BETWEEN ${q.from}::date AND ${q.to}::date
+             AND l.invoice_total > 0
+          UNION ALL
+          SELECT l.who, l.currency, l.invoice_id, 'owed', 0, 0, round(a.outstanding * l.gross / l.invoice_total, 4)
+            FROM crm.receivable_ageing_on(${q.asOf}::date) a
+            JOIN lines l ON l.invoice_id = a.invoice_id
+           WHERE l.invoice_total > 0
+        )
+        SELECT who, GROUPING(who)::int AS whole, currency,
+               sum(invoiced)::text AS invoiced, sum(collected)::text AS collected,
+               sum(outstanding)::text AS outstanding,
+               (count(DISTINCT invoice_id) FILTER (WHERE kind = 'invoiced'))::int AS invoices
+          FROM docs
+         GROUP BY GROUPING SETS ((who, currency), (currency))
+      `;
+      return rows.map(toPersonRow);
+    });
+  }
+
   private toSlice(r: { key: string; label: string; total: string; n: string }): Slice {
     return {
       key: r.key,
@@ -559,4 +670,26 @@ export class PostgresDashboardRepository implements DashboardRepository {
       count: Number(r.n),
     };
   }
+}
+
+interface RevenueRow {
+  who: string | null;
+  whole: number;
+  currency: string;
+  invoiced: string;
+  collected: string;
+  outstanding: string;
+  invoices: number;
+}
+
+function toPersonRow(r: RevenueRow): PersonCurrencyRow {
+  return {
+    scope: r.whole === 1 ? "currency" : "person",
+    userId: r.who,
+    currency: r.currency,
+    invoiced: r.invoiced,
+    collected: r.collected,
+    outstanding: r.outstanding,
+    invoices: r.invoices,
+  };
 }

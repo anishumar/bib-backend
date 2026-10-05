@@ -1,7 +1,7 @@
 // The billing use case's seams (auto-invoice, phase 1). Each port is the one
 // thing this use case needs from outside, stated in its own vocabulary and
 // satisfied by an adapter in `infrastructure/postgres`.
-import type { BillingTiming, ManagerHow, SpocWithManager } from "../../domain/billing/model";
+import type { BillingTiming, ManagerHow, SpocWithManager, StatutoryFiling } from "../../domain/billing/model";
 import type { AdvancePolicy, AdvanceStage, BillKind } from "../../domain/billing/advance";
 import type { Actor } from "../../domain/ledger/model";
 import type { Invoice } from "../../domain/invoice/model";
@@ -39,6 +39,10 @@ export interface BillingSubject {
   readonly engagements: readonly BilledEngagement[];
   /** Periods (by their first day) that already have a due. */
   readonly duePeriodStarts: readonly string[];
+  /** A YEARLY subject's statutory filings (Q071): the billed client
+   *  company's filings, not withdrawn, of the rules its services carry.
+   *  Absent or empty for every other frequency. */
+  readonly statutoryFilings?: readonly StatutoryFiling[];
 }
 
 export interface BilledEngagement {
@@ -67,6 +71,8 @@ export interface NewBillingDue {
   readonly periodEnd: string;
   readonly periodLabel: string;
   readonly billOn: string;
+  /** The yearly filing whose due date `billOn` is (0354, Q071). */
+  readonly datedByFilingId?: string | null | undefined;
   readonly fullAmount: string | null;
   readonly servedDays: number;
   readonly periodDays: number;
@@ -566,6 +572,46 @@ export interface BillingMailer {
   sendAdvanceDigest(letter: AdvanceDigestLetter): Promise<void>;
 }
 
+// ── Billing early, when the work is done (Q071 b, 2026-10-05) ───────────────
+
+/** Recurring work that is finished: a period job done, or a filing done (its
+ *  job done, its task completed, or the filing marked filed). */
+export interface DoneWork {
+  readonly kind: "job" | "filing";
+  /** The job's id, or the filing's. */
+  readonly id: string;
+  /** The job that did it, when there is one. */
+  readonly jobId: string | null;
+  /** A filing's name; null for a period job (its service names it). */
+  readonly name: string | null;
+  /** The engagements it is for: a job's own, or those whose service carries
+   *  the filing's rule (CA#11's predicate, as Work vs Billing reads it). */
+  readonly engagementIds: readonly string[];
+  readonly periodStart: string;
+  readonly periodEnd: string;
+  /** The firm's day it was finished. */
+  readonly doneOn: string;
+}
+
+export interface DoneWorkFacts {
+  /** Work finished on or after `since`, narrowed to one job, one task, or one
+   *  client when asked. */
+  doneWork(
+    tenantId: string,
+    filter: {
+      readonly since: string;
+      readonly jobId?: string | undefined;
+      readonly workItemId?: string | undefined;
+      readonly partyId?: string | undefined;
+    },
+  ): Promise<readonly DoneWork[]>;
+  /** Names for a screen, keyed `e:<engagement>` or `g:<fee group>`. */
+  describe(
+    tenantId: string,
+    engagementIds: readonly string[],
+  ): Promise<ReadonlyMap<string, { readonly clientName: string; readonly serviceName: string; readonly letterRef: string }>>;
+}
+
 // ── The final bill (0320) ───────────────────────────────────────────────────
 
 /** A one-time engagement, or a one-time fee group, as its final bill needs it. */
@@ -763,6 +809,8 @@ export interface WbBill {
   readonly periodEnd: string;
   readonly periodLabel: string;
   readonly billOn: string;
+  /** The yearly filing whose due date the bill was made on (0354, Q071). */
+  readonly datedByFilingId: string | null;
   readonly status: DueStatus;
   readonly currency: string;
   readonly amount: string | null;

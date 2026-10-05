@@ -29,7 +29,7 @@ import type { EventSink } from "../ledger/ports";
 import { dayInZone } from "../../domain/scheduler/zone";
 import { yearStartOfCompany, zoneOfCompany } from "../../domain/calendar/model";
 import { monthsPerPeriod, periodsFrom, recurrenceOfService } from "../../domain/scheduler/model";
-import { billingDues, endsBeforeGoLive, serviceWindowOf } from "../../domain/billing/model";
+import { billLabel, billingDues, endsBeforeGoLive, serviceWindowOf } from "../../domain/billing/model";
 import { billingManagerFor, type ManagerCache } from "./manager";
 import type {
   AutoBillingFirms,
@@ -125,14 +125,18 @@ export class BillingService {
         awaitingFiscalYear += 1;
         continue;
       }
-      if (subject.firstInvoiceOn > today) continue;
+      // A yearly bill may come before the schedule's first date: on its
+      // filing's due date (Q071), inside the year.
+      const filings = subject.statutoryFilings ?? [];
+      const firstBill = filings.reduce((d, f) => (f.dueOn < d ? f.dueOn : d), subject.firstInvoiceOn);
+      if (firstBill > today) continue;
 
       const span = monthsPerPeriod(recurrence);
-      // EVERY period from `billingFrom` whose bill date has come (a schedule's
-      // dates are 2000 to 2099, so at most a few hundred strings), each dated
-      // by its place in the schedule; then the ones not billed yet, oldest
-      // first, at most MAX a pass.
-      const count = Math.floor(monthsBetween(subject.firstInvoiceOn, today) / span) + 1;
+      // EVERY period from `billingFrom` that has begun (a schedule's dates are
+      // 2000 to 2099, so at most a few hundred strings), each dated by its
+      // place in the schedule or by its filing; then the ones whose date has
+      // come and not billed yet, oldest first, at most MAX a pass.
+      const count = Math.max(1, Math.floor(monthsBetween(subject.billingFrom, today) / span) + 1);
       const periods = periodsFrom(subject.billingFrom, recurrence, count, fiscalYearStartMonth ?? 1);
       const billed = new Set(subject.duePeriodStarts);
       const dues = billingDues({
@@ -141,6 +145,7 @@ export class BillingService {
         firstInvoiceOn: subject.firstInvoiceOn,
         today,
         windows: subject.engagements.map(serviceWindowOf),
+        filings,
       })
         .filter((d) => !billed.has(d.period.start) && !endsBeforeGoLive(d.period.end, goLive))
         .slice(0, MAX_PERIODS_PER_SUBJECT);
@@ -157,8 +162,9 @@ export class BillingService {
           feeGroupId: subject.feeGroupId,
           periodStart: due.period.start,
           periodEnd: due.period.end,
-          periodLabel: due.period.label,
+          periodLabel: billLabel(due),
           billOn: due.billOn,
+          datedByFilingId: due.datedBy?.id ?? null,
           fullAmount: subject.fullAmount,
           servedDays: due.servedDays,
           periodDays: due.periodDays,
@@ -184,6 +190,7 @@ export class BillingService {
           periodStart: due.periodStart,
           billOn: due.billOn,
           managerHow: due.managerHow,
+          ...(due.datedByFilingId ? { datedByFilingId: due.datedByFilingId } : {}),
         },
       });
     }

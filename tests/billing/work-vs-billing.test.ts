@@ -66,6 +66,7 @@ function bill(over: Partial<WbBill> = {}): WbBill {
   return {
     id: "b-sep",
     kind: "period",
+    datedByFilingId: null,
     subjectKey: `e:${A}`,
     party: { id: "p1", displayName: "Acme Pvt Ltd" },
     serviceName: "Monthly bookkeeping",
@@ -590,6 +591,58 @@ describe("Work vs Billing: filings, fee groups and the window", () => {
     );
     expect(out.find((r) => r.period?.label === "Sep 2026")?.filings.map((f) => f.name)).toEqual(["TDS return"]);
     expect(out.find((r) => r.period?.label === "Aug 2026")?.filings).toEqual([]);
+  });
+
+  it("puts a yearly filing under the bill it dated, not the year its own period ends in (Q071)", async () => {
+    const audit = filing({
+      id: "f-audit",
+      name: "Statutory audit",
+      periodStart: "2025-04-01",
+      periodEnd: "2026-03-31",
+      periodLabel: "FY2025-26",
+      dueOn: "2026-09-30",
+      filed: true,
+    });
+    const out = await rows(
+      facts({
+        subjects: [subject({ frequency: "annually", billingFrom: "2026-04-01", firstInvoiceOn: "2027-03-31" })],
+        bills: [
+          bill({
+            id: "b-fy27",
+            periodStart: "2026-04-01",
+            periodEnd: "2027-03-31",
+            periodLabel: "FY2025-26",
+            billOn: "2026-09-30",
+            datedByFilingId: "f-audit",
+            status: "open",
+          }),
+        ],
+        filings: [audit],
+      }),
+    );
+    const [r, ...rest] = out;
+    expect(rest).toEqual([]);
+    expect(r?.period).toMatchObject({ start: "2026-04-01", label: "FY2025-26" });
+    expect(r?.filings.map((f) => f.name)).toEqual(["Statutory audit"]);
+  });
+
+  it("expects a yearly bill on its filing's due date before the bill is written (Q071)", () => {
+    const e = expectedBill(
+      subject({ frequency: "annually", billingFrom: "2026-04-01", firstInvoiceOn: "2027-03-31" }),
+      "2026-05-01",
+      4,
+      [
+        {
+          id: "f-audit",
+          name: "Statutory audit",
+          dueOn: "2026-09-30",
+          periodStart: "2025-04-01",
+          periodEnd: "2026-03-31",
+          periodLabel: "FY2025-26",
+        },
+      ],
+    );
+    expect(e).toEqual({ period: { start: "2026-04-01", end: "2027-03-31", label: "FY2025-26" }, billOn: "2026-09-30" });
   });
 
   it("gives a fee group ONE row, with every service's job", async () => {

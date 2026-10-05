@@ -14,6 +14,7 @@ import { scopeOf } from "../scope";
 import type { BillingDeskService, BillingSettings, DueOnDesk, UnscheduledRecord } from "../../usecase/billing/desk";
 import type { AdvanceDesk, AdvanceForMe, AdvanceOnDesk } from "../../usecase/billing/advance";
 import type { BillNowCandidate, FinalBiller } from "../../usecase/billing/final";
+import type { EarlyBillCandidate, EarlyBiller } from "../../usecase/billing/early";
 import type { PersonRef, RefundCandidate, ScheduleRecord } from "../../usecase/billing/ports";
 import type { AuthzService } from "../../usecase/authz/service";
 import type { Principal } from "../../platform/callctx";
@@ -30,6 +31,8 @@ export interface BillingDeps {
   readonly authz: AuthzService;
   /** Work vs Billing (Q041): the read model, its own handler file. */
   readonly workBilling: WorkBillingService;
+  /** Billing a period early once its work is done (Q071 b). */
+  readonly early: EarlyBiller;
 }
 
 const Decimal = z.string().regex(/^\d+(\.\d+)?$/);
@@ -245,6 +248,42 @@ const BillNowSchema = z
     fullAmount: Decimal.nullable(),
   })
   .openapi("BillingBillNow");
+
+const SubjectKey = z
+  .string()
+  .regex(/^[eg]:[0-9a-f-]{36}$/)
+  .openapi({ description: "`e:<engagement id>` (a service priced on its own) or `g:<fee group id>` (one fee for several)." });
+
+const EarlyBillSchema = z
+  .object({
+    subjectKey: SubjectKey,
+    engagementId: z.string().uuid().nullable(),
+    feeGroupId: z.string().uuid().nullable(),
+    party: z.object({ id: z.string().uuid(), displayName: z.string() }),
+    serviceName: z.string(),
+    letterRef: z.string(),
+    currency: z.string(),
+    fullAmount: Decimal.nullable().openapi({ description: "One whole period's fee before tax; null without fee visibility or when the letter names none." }),
+    period: z.object({ start: Day, end: Day, label: z.string() }).openapi({
+      description: "The period the bill is for. A yearly bill dated by a filing is labelled with the FILING's year (Q071).",
+    }),
+    plannedBillOn: Day.openapi({ description: "The day the bill would be made without billing early." }),
+    datedByFiling: z
+      .object({ id: z.string().uuid(), name: z.string(), dueOn: Day })
+      .nullable()
+      .openapi({ description: "The yearly statutory filing whose due date is `plannedBillOn` (Q071)." }),
+    work: z
+      .object({
+        kind: z.enum(["job", "filing"]),
+        id: z.string().uuid(),
+        jobId: z.string().uuid().nullable(),
+        name: z.string().nullable().openapi({ description: "A filing's name; null for a period job." }),
+        doneOn: Day,
+      })
+      .openapi({ description: "The finished work that makes the period billable now: the latest, when several." }),
+    managerUserId: z.string().uuid().nullable(),
+  })
+  .openapi("BillingEarlyBill");
 
 const ScheduleSchema = z
   .object({
@@ -600,6 +639,63 @@ const billNowRoute = createRoute({
   },
 });
 
+const billEarlyListRoute = createRoute({
+  method: "get",
+  path: "/api/v1/billing/bill-early",
+  tags: ["billing"],
+  summary: "Periods whose work is done before their bill date (Raise invoice now)",
+  description:
+    "Recurring work finished before its bill comes due (Q071 b): a period job done, or the filing that " +
+    "dates a yearly bill done. Each may be billed today instead of waiting. Empty while automatic " +
+    "billing is off. Narrow to one job (`jobId`), one task (`workItemId`), one client (`partyId`), " +
+    "or the bills whose manager is the caller (`mine=true`).",
+  request: {
+    query: z.object({
+      jobId: z.string().uuid().optional(),
+      workItemId: z.string().uuid().optional(),
+      partyId: z.string().uuid().optional(),
+      mine: z.enum(["true", "false"]).optional(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Billable early",
+      content: { "application/json": { schema: z.object({ periods: z.array(EarlyBillSchema) }) } },
+    },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+  },
+});
+
+const billEarlyRoute = createRoute({
+  method: "post",
+  path: "/api/v1/billing/bill-early",
+  tags: ["billing"],
+  summary: "Bill a period now, its work being done (Raise invoice now)",
+  description:
+    "Writes the period's bill, dated today, onto To raise, to be raised there the ordinary way. It is " +
+    "the bill the daily run would have made on its date, made sooner: never a second bill for the same " +
+    "period.",
+  request: {
+    body: {
+      content: {
+        "application/json": { schema: z.object({ subjectKey: SubjectKey, periodStart: Day }).openapi("BillEarly") },
+      },
+    },
+  },
+  responses: {
+    201: {
+      description: "On To raise",
+      content: { "application/json": { schema: z.object({ dueId: z.string().uuid() }).openapi("BilledEarly") } },
+    },
+    400: errorResponse("Malformed request"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such service billed on a schedule at this firm"),
+    409: errorResponse("Billed already, work not done, or automatic billing is off"),
+  },
+});
+
 const AdvancePolicySchema = z
   .object({
     draftOverdueDays: z.number().int().min(1).max(90).openapi({
@@ -854,6 +950,33 @@ function billNowBody(b: BillNowCandidate, fees: boolean) {
   };
 }
 
+function earlyBody(b: EarlyBillCandidate, fees: boolean) {
+  return {
+    subjectKey: b.subjectKey,
+    engagementId: b.engagementId,
+    feeGroupId: b.feeGroupId,
+    party: { id: b.partyId, displayName: b.clientName },
+    serviceName: b.serviceName,
+    letterRef: b.letterRef,
+    currency: b.currency,
+    fullAmount: fees ? b.fullAmount : null,
+    period: { start: b.period.start, end: b.period.end, label: b.period.label },
+    plannedBillOn: b.plannedBillOn,
+    datedByFiling:
+      b.datedByFiling === null
+        ? null
+        : { id: b.datedByFiling.id, name: b.datedByFiling.name, dueOn: b.datedByFiling.dueOn },
+    work: {
+      kind: b.work.kind,
+      id: b.work.id,
+      jobId: b.work.jobId,
+      name: b.work.name,
+      doneOn: b.work.doneOn,
+    },
+    managerUserId: b.manager.userId,
+  };
+}
+
 function scheduleBody(s: ScheduleRecord) {
   return {
     engagementId: s.engagementId,
@@ -1010,6 +1133,31 @@ export function registerBillingRoutes(app: OpenAPIHono<AppEnv>, deps: BillingDep
     if (!s.ok) return c.json(s.deny, s.status);
     const out = await deps.finals.billNow(
       { tenantId: s.tenantId, engagementId: c.req.valid("param").engagementId },
+      s.actor,
+    );
+    return c.json({ dueId: out.dueId }, 201);
+  });
+
+  app.openapi(billEarlyListRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const q = c.req.valid("query");
+    const rows = await deps.early.candidates(s.tenantId, {
+      jobId: q.jobId,
+      workItemId: q.workItemId,
+      partyId: q.partyId,
+      managerUserId: q.mine === "true" ? s.userId : undefined,
+    });
+    const fees = seesFees(c.get("principal"));
+    return c.json({ periods: rows.map((b) => earlyBody(b, fees)) }, 200);
+  });
+
+  app.openapi(billEarlyRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const body = c.req.valid("json");
+    const out = await deps.early.billEarly(
+      { tenantId: s.tenantId, subjectKey: body.subjectKey, periodStart: body.periodStart },
       s.actor,
     );
     return c.json({ dueId: out.dueId }, 201);

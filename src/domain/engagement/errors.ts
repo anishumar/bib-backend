@@ -17,6 +17,7 @@ export class EngagementError extends Error {
 }
 
 export type EngagementErrorCode =
+  | "ORIGINATOR_NOT_STAFF"
   | "LETTER_DELETED"
   | "LETTER_NOT_DELETABLE"
   | "LETTER_NOT_COPYABLE"
@@ -1037,6 +1038,18 @@ export class RateIsMainCurrency extends EngagementError {
     super(
       "RATE_FOR_MAIN_CURRENCY",
       `${currency} is this letter's main currency. Change its rate with the currency on step 1.`,
+    );
+  }
+}
+
+/** The originator named is not active staff of this firm (0355, Q049): the
+ *  column's key reaches the global user account, so a person from another
+ *  firm could otherwise be credited with this firm's revenue. */
+export class OriginatorNotStaff extends EngagementError {
+  constructor() {
+    super(
+      "ORIGINATOR_NOT_STAFF",
+      "That person is not active staff of this firm, so the work cannot be credited to them. Pick a colleague from the list.",
     );
   }
 }

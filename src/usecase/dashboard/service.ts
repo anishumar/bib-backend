@@ -18,7 +18,14 @@ import { billingWindow, daysSalesOutstanding } from "../../domain/dashboard/mode
 import { defaultCurrencyFor } from "../../domain/document/model";
 import { dayInZone } from "../../domain/scheduler/zone";
 import type { Clock } from "../../platform/clock";
-import type { DashboardRepository, FirmTimeZone, FiscalYearSource, ManagerMonthRow, RateWarmer } from "./ports";
+import type {
+  DashboardRepository,
+  FirmTimeZone,
+  FiscalYearSource,
+  ManagerMonthRow,
+  PersonCurrencyRow,
+  RateWarmer,
+} from "./ports";
 
 export interface Deps {
   readonly dashboards: DashboardRepository;
@@ -66,6 +73,39 @@ export interface RevenueByManager {
    *  counts as "a manager" is whoever invoices name. */
   readonly managers: readonly ManagerRevenue[];
 }
+
+/** One person's figures in one currency (Q049). Amounts are decimal strings in
+ *  `currency`, never converted. */
+export interface RevenueRow {
+  /** Null: invoices (or lines) naming nobody. */
+  readonly userId: string | null;
+  /** This firm's roster's name; null for nobody, or an id it cannot name. */
+  readonly name: string | null;
+  readonly activeStaff: boolean;
+  readonly currency: string;
+  readonly invoiced: string;
+  readonly collected: string;
+  readonly outstanding: string;
+  readonly invoices: number;
+}
+
+/** What `revenueReport` answers. */
+export interface RevenueReport {
+  readonly by: "manager" | "originator";
+  readonly from: string;
+  readonly to: string;
+  /** The day OUTSTANDING is owed at the close of: `to`, or today if sooner. */
+  readonly asOf: string;
+  readonly financialYearStartMonth: number | null;
+  /** One per currency, the firm's whole: each person's rows of the currency
+   *  add up to it. Never one figure across currencies. */
+  readonly currencies: readonly Omit<RevenueRow, "userId" | "name" | "activeStaff">[];
+  /** By name, nobody last, then by currency. */
+  readonly rows: readonly RevenueRow[];
+}
+
+/** How far back a report may reach in one read: three years. */
+export const REVENUE_REPORT_MAX_DAYS = 3 * 366;
 
 /**
  * The window DSO is measured over.
@@ -274,6 +314,73 @@ export class DashboardService {
     };
   }
 
+  /**
+   * THE REVENUE REPORT (Q049; Ashish: "revenue is captured manager-wise and
+   * salesperson-wise"): invoiced, collected and outstanding per manager (the
+   * invoice's) or per originator (the letter's, 0355), per CURRENCY. The
+   * definitions are `RevenueQuery`'s; the adding up is SQL's. A period not
+   * given is this financial year to date (the firm's own year), else the last
+   * twelve months.
+   */
+  async revenueReport(
+    tenantId: string,
+    q: {
+      readonly by: "manager" | "originator";
+      readonly from?: string | undefined;
+      readonly to?: string | undefined;
+      readonly issuerPartyId?: string | undefined;
+      readonly currency?: string | undefined;
+    },
+  ): Promise<RevenueReport> {
+    const today = await this.firmDay(tenantId);
+    const financialYearStartMonth = await this.deps.fiscalYears.fiscalYearStartMonth(tenantId);
+    const to = q.to ?? today;
+    const from = q.from ?? yearToDateFrom(to, financialYearStartMonth);
+    const asOf = to < today ? to : today;
+    const rows = await this.deps.dashboards.revenueByPerson(tenantId, {
+      by: q.by,
+      from,
+      to,
+      asOf,
+      issuerPartyId: q.issuerPartyId,
+      currency: q.currency,
+    });
+    const people = rows.filter((r) => r.scope === "person");
+    const named = [...new Set(people.map((r) => r.userId))].filter((id): id is string => id !== null);
+    const names = new Map((await this.deps.dashboards.managerNames(tenantId, named)).map((n) => [n.userId, n]));
+    const out: RevenueRow[] = people.map((r) => {
+      const person = r.userId === null ? undefined : names.get(r.userId);
+      return {
+        userId: r.userId,
+        name: person?.name ?? null,
+        activeStaff: person?.activeStaff ?? false,
+        currency: r.currency,
+        invoiced: r.invoiced,
+        collected: r.collected,
+        outstanding: r.outstanding,
+        invoices: r.invoices,
+      };
+    });
+    const rank = (r: RevenueRow): number => (r.userId === null ? 2 : r.name === null ? 1 : 0);
+    out.sort(
+      (a, b) =>
+        rank(a) - rank(b) ||
+        (a.name ?? "").localeCompare(b.name ?? "", "en", { sensitivity: "base" }) ||
+        a.currency.localeCompare(b.currency),
+    );
+    const currencies = rows
+      .filter((r) => r.scope === "currency")
+      .map(({ currency, invoiced, collected, outstanding, invoices }: PersonCurrencyRow) => ({
+        currency,
+        invoiced,
+        collected,
+        outstanding,
+        invoices,
+      }))
+      .sort((a, b) => a.currency.localeCompare(b.currency));
+    return { by: q.by, from, to, asOf, financialYearStartMonth, currencies, rows: out };
+  }
+
   /** The last `months` months on the FIRM's calendar (T6.14). */
   private async window(tenantId: string, months: number) {
     return billingWindow(await this.firmDay(tenantId), months);
@@ -331,4 +438,16 @@ export class DashboardService {
       })),
     };
   }
+}
+
+/** The first day of the financial year `day` falls in (the firm's own start
+ *  month), or, with none set, the first of the month eleven months before. */
+export function yearToDateFrom(day: string, startMonth: number | null): string {
+  const [y = 0, m = 1] = day.split("-").map(Number);
+  if (startMonth === null) {
+    const index = y * 12 + (m - 1) - 11;
+    return `${String(Math.floor(index / 12)).padStart(4, "0")}-${String((index % 12) + 1).padStart(2, "0")}-01`;
+  }
+  const year = m >= startMonth ? y : y - 1;
+  return `${String(year).padStart(4, "0")}-${String(startMonth).padStart(2, "0")}-01`;
 }

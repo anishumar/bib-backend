@@ -4,6 +4,8 @@
 //   2. a validation failure returns the SAME envelope as every other error,
 //   3. the principal gate still answers 401 with that envelope.
 import { ClientMailService } from "../../src/usecase/clientmail/service";
+import { OriginatorService } from "../../src/usecase/originator/service";
+import { FakeOriginatorStore } from "../../src/testfakes/originator";
 import { makeFxFakes } from "../../src/testfakes/fx";
 import { NotificationService } from "../../src/usecase/notify/service";
 import { FakeNotificationInbox, FakeNotificationSettings, FakeNotifyFirmSetting } from "../../src/testfakes/notify";
@@ -154,12 +156,14 @@ import { BillingDeskService } from "../../src/usecase/billing/desk";
 import { WorkBillingService } from "../../src/usecase/billing/work-vs-billing";
 import { AdvanceDesk } from "../../src/usecase/billing/advance";
 import { FinalBiller } from "../../src/usecase/billing/final";
+import { EarlyBiller } from "../../src/usecase/billing/early";
 import {
   FakeAutoBillingSetting,
   FakeBillingDueDesk,
   FakeAutoBillingFirms,
   FakeBillingDueWriter,
   FakeBillingManagerFacts,
+  FakeDoneWorkFacts,
   FakeFinalBillFacts,
   FakeIssuerTaxDefaults,
   FakeAdvancePolicy,
@@ -570,6 +574,7 @@ function deps(): RouterDeps {
         fiscalYears: new FakeFiscalYearSource(),
         clock: new FakeClock(),
       }),
+      originators: new OriginatorService({ store: new FakeOriginatorStore(), events: new RecordingEventSink() }),
       authz: new AuthzService({ permissions: permissions }),
     },
     filestore: {
@@ -631,6 +636,17 @@ function deps(): RouterDeps {
         managers: new FakeBillingManagerFacts(),
         setting: new FakeAutoBillingSetting(),
         firms: new FakeAutoBillingFirms(),
+        timeZones: new FakeFirmTimeZone(),
+        clock: new FakeClock(),
+        ids: new FakeIds(),
+        events: new RecordingEventSink(),
+      }),
+      early: new EarlyBiller({
+        dues: new FakeBillingDueWriter(),
+        work: new FakeDoneWorkFacts(),
+        managers: new FakeBillingManagerFacts(),
+        setting: new FakeAutoBillingSetting(),
+        fiscalYears: new FakeFiscalYearSource(),
         timeZones: new FakeFirmTimeZone(),
         clock: new FakeClock(),
         ids: new FakeIds(),

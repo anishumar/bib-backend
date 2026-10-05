@@ -2346,6 +2346,89 @@ with receivables beside it. Read model only: `usecase/billing/work-vs-billing.ts
   the derivations on real SQL, the firm's done day, the filing, hand invoices, the wall). Walk:
   `bib/demo-assets/tools/wvb-walk.mjs` on `wvb-fixture.mjs` (40 checks).
 
+## A yearly bill on its filing's due date, and Raise invoice now (Q071, 0354, 2026-10-05)
+
+Ashish (4 Oct 2026, Q071): (a) most yearly work is statutory: bill it ON the due date (audit
+30 September, GSTR-9 31 December, UAE corporate tax nine months after the client's year end); other
+yearly work on a day set when the letter is finalised; (b) after a job or task closes, offer to
+raise the invoice; (c) monthly and quarterly stay on the period's last day (Q042). (d), UAE VAT on
+the client's own VAT quarter, waits for S3's client VAT quarter.
+
+- **Which filing** (`statutoryBillDay`, domain): for each YEARLY billing period, the client
+  company's yearly filings (an annual period; a monthly or quarterly filing never dates a yearly
+  bill) of the rules the service carries (T6.16, on the lineage; or generated for the engagement:
+  CA#11's predicate, the WvB read) whose due date falls INSIDE the billing year, on or after the
+  first day served. Several (audit, ITR, AOC-4): the EARLIEST (the user, 2026-10-05: the first
+  deliverable). The audit due 30 September 2026 dates the bill of the year April 2026 to March 2027,
+  the year the firm does it; "the filing's own year" would put a new client's first bill 18 months
+  out. Withdrawn filings and filings due before the work began never count.
+- **Only the default is replaced.** `billingDues` reads filings only for a 12-month schedule on the
+  period's last day (arrears). A letter that chose "start of the year" or its own day
+  (`on_date`, "Every year on a date I choose") keeps it: a person's choice beats a derived one.
+  No filing: the year's last day, as before. Bills already written keep their day.
+- **The bill names the FILING's year** (`billLabel`): the audit billed on 30 September 2026 is
+  "Statutory audit, FY2025-26" on the invoice line (the user, 2026-10-05: CA firms invoice an audit
+  that way), while the bill's `period_start`/`period_end` stay the billing year (the anti-join key).
+  `crm.billing_due.dated_by_filing_id` (0354, composite FK, period bills only) records which filing
+  set the day; the ledger's `billing_due.created` carries it.
+- The sweep skips a subject only when neither its schedule's first date nor any filing's due date
+  has come, and cuts periods from `billing_from` (not `first_invoice_on`), so a filing date earlier
+  than the year's end is reached. Work vs Billing places a filing under the bill it dated, and
+  `expectedBill` takes the same filings, so the expected day matches the day the sweep will use.
+- **Raise invoice now** (`usecase/billing/early.ts`, `EarlyBiller`): `GET /billing/bill-early`
+  (`jobId`, `workItemId`, `partyId`, `mine`; `party:read`) lists periods whose work is done (a period
+  job done; or the filing that dates the bill done: its job done, its task completed, or marked filed;
+  `infrastructure/postgres/done-work.ts`) and whose bill date is still ahead; `POST /billing/bill-early`
+  (`subjectKey` `e:`/`g:`, `periodStart`; `party:write`) writes that period's bill dated today on the
+  issuing company's day. It is the sweep's own bill made sooner: the (subject, period) unique key means
+  never a second bill, and a second press is `BILL_EARLY_REFUSED` (409), as is work not done. Ledger
+  `billing_due.created` with `how: billed_early`, `plannedBillOn`, `workKind`, `workId`. Automatic
+  billing off: nothing offered, `AUTO_BILLING_OFF`. `mine` = the bill's manager (`billingManagerFor`).
+- The letter PDF says a yearly arrears fee is "billed on the due date of its annual filing, or at
+  the end of each year", and an `on_date` one "billed every year from <day>".
+- Tests: `tests/billing/yearly-bill-date.test.ts` (19), `yearly-bill-date.integration.test.ts` (5:
+  the filings read, finished work on the firm's day, bill early once, the sweep on the due date, the
+  FK wall), `work-vs-billing.test.ts` (+2). Walk: `bib/demo-assets/tools/bdr-walk.mjs q071` (38) on
+  `bdr-fixture.mjs`.
+
+## Who won the work, and revenue by manager or originator (Q049, 0355, 2026-10-05)
+
+Ashish (4 Oct 2026): how is revenue captured manager-wise or salesperson-wise? The MANAGER is on
+every invoice (0318, frozen at issue). The SALESPERSON is the letter's **originator**, one per letter
+(the deal; the user approved 2026-10-05): a CRM credits the opportunity's owner (Salesforce, Zoho
+CRM, HubSpot), Clio an originating attorney per matter, Karbon and TaxDome a client owner.
+
+- **`crm.letter_originator`** (0355) is a SIDE table, not a letter column: a signed letter is frozen
+  and who sold the work is not a term, so it must stay correctable after signature (it is the fifth
+  `NOT_TERMS` entry in the freeze test, argued there). No row = read off the deal; a row = a
+  partner's word (`originator_user_id` NULL = "nobody", e.g. a renewal). Only its person moves
+  (column GRANT); a deleted draft's row is final (0087's trigger). **`crm.letter_originator_in_force`**
+  (security_invoker view): the person set, else the lead's owner (letter → proposal → lead), else
+  who prepared the proposal; `how` = `set` | `lead_owner` | `proposal_preparer` | `none`.
+- `GET/PUT /api/v1/engagement-letters/{id}/originator` (`usecase/originator`, handler registered by
+  the dashboard's routes). PUT is `tenant:admin` (the default Partner role holds it; no new
+  permission, so no role-seed republish to collide with other branches), active staff only
+  (`ORIGINATOR_NOT_STAFF`, 409), `LETTER_DELETED` for a deleted draft, ledger
+  `engagement_letter.originator_set` (payload the new and previous person, `previousHow`); setting
+  the same person again records nothing. The originator's revenue is read THROUGH the letter, so a
+  correction re-credits its invoices (unlike the manager, which is frozen at issue).
+- **`GET /api/v1/dashboard/revenue/report`** (`by=manager|originator`, `from`, `to`, `issuerPartyId`,
+  `currency`; behind the fee axis like all of `/dashboard`). INVOICED = issued in the period, before
+  tax, less credit notes issued in the period at their pre-tax share; COLLECTED = money received in
+  the period, with tax; OUTSTANDING = owed at the close of `asOf` (`to`, or today if sooner) from
+  `crm.receivable_ageing_on`. **Per CURRENCY, never converted, never added across currencies**: the
+  SQL groups by currency (GROUPING SETS give each currency's total). Default period: the financial
+  year to date (the firm's own year), else twelve months; at most three years.
+- **By originator, line by line**: a line's letter is its engagement's, else the letter of the bill
+  it was raised from (a fee group's, a letter-wide advance's); each line takes its share of the
+  invoice's credit notes (of its net), payments and balance (of its total), to four places, so one
+  invoice carrying two letters' work credits two people and the people of a currency add up to its
+  total. Advances count when invoiced; S4's mapped advance may want its own attribution (follow-up).
+- Tests: `tests/originator/service.test.ts` (6), `tests/dashboard/revenue-report.test.ts` (5),
+  `revenue-report.integration.test.ts` (7: both groupings to the paisa, two currencies, a credit
+  note, a fee-group line through its bill, drafts/cancelled/another firm, the store's defaults and
+  wall). Walk: `bdr-walk.mjs q049` (29) on `bdr-rev-fixture.mjs`.
+
 ## Who a commercial document names — the client, not merely the firm (F-10-1, 0306)
 
 The composite `(id, tenant_id)` keys prove a reference is THIS FIRM's and nothing more. The

@@ -34,10 +34,15 @@ import {
 } from "../../domain/dashboard/model";
 import { toEnvelope } from "../httpresp";
 import { scopeOf } from "../scope";
+import type { OriginatorService } from "../../usecase/originator/service";
+import { REVENUE_REPORT_MAX_DAYS, type RevenueReport } from "../../usecase/dashboard/service";
+import { registerOriginatorRoutes } from "./originator";
 
 export interface DashboardDeps {
   readonly service: DashboardService;
   readonly authz: AuthzService;
+  /** Who won each letter's work (0355, Q049): the report's originators. */
+  readonly originators: OriginatorService;
 }
 
 // ── Response schemas ────────────────────────────────────────────────────────
@@ -433,6 +438,109 @@ const revenueByManagerRoute = createRoute({
   },
 });
 
+const ReportDay = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+
+const RevenueFigures = {
+  currency: z.string().openapi({ description: "Every amount on this row is in this currency, never converted." }),
+  invoiced: AmountString.openapi({
+    description: "Issued in the period, before tax, less credit notes issued in the period at their pre-tax share.",
+  }),
+  collected: AmountString.openapi({ description: "Money received in the period, with tax." }),
+  outstanding: AmountString.openapi({ description: "Owed at the close of `asOf`." }),
+  invoices: z.number().int().openapi({ description: "Invoices issued in the period that count here." }),
+};
+
+const RevenueReportResponse = z
+  .object({
+    by: z.enum(["manager", "originator"]),
+    from: ReportDay,
+    to: ReportDay,
+    asOf: ReportDay.openapi({ description: "The day outstanding is owed at: `to`, or today if sooner." }),
+    financialYearStartMonth: z.number().int().nullable(),
+    currencies: z.array(z.object(RevenueFigures)).openapi({
+      description: "The firm's whole, one per currency: each person's rows of that currency add up to it.",
+    }),
+    rows: z.array(
+      z.object({
+        userId: z.string().uuid().nullable().openapi({ description: "Null: naming nobody." }),
+        name: z.string().nullable(),
+        activeStaff: z.boolean(),
+        ...RevenueFigures,
+      }),
+    ),
+  })
+  .openapi("RevenueReport");
+
+const revenueReportRoute = createRoute({
+  method: "get",
+  path: "/api/v1/dashboard/revenue/report",
+  tags: ["dashboard"],
+  summary: "Revenue by manager or by originator, per currency (Q049)",
+  description:
+    "Invoiced, collected and outstanding per person and per CURRENCY: amounts in two currencies are " +
+    "never added or converted. `by=manager` is the invoice's manager (fixed when it is issued); " +
+    "`by=originator` is who won the letter each invoice line bills (0355), each line taking its share " +
+    "of the invoice's credit notes, money and balance. Drafts and cancelled invoices count nowhere. " +
+    "The period defaults to this financial year to date. Requires commercial visibility.",
+  request: {
+    query: z
+      .object({
+        by: z.enum(["manager", "originator"]).default("manager"),
+        from: ReportDay.optional(),
+        to: ReportDay.optional(),
+        issuerPartyId: z.string().uuid().optional().openapi({ description: "One of the firm's companies." }),
+        currency: z
+          .string()
+          .regex(/^[A-Z]{3}$/)
+          .optional(),
+      })
+      .refine((q) => q.from === undefined || q.to === undefined || q.from <= q.to, {
+        message: "The period starts after it ends.",
+        path: ["from"],
+      })
+      .refine(
+        (q) =>
+          q.from === undefined ||
+          q.to === undefined ||
+          (Date.parse(q.to) - Date.parse(q.from)) / 86_400_000 <= REVENUE_REPORT_MAX_DAYS,
+        { message: "A report covers at most three years.", path: ["from"] },
+      ),
+  },
+  responses: {
+    200: { description: "The report", content: { "application/json": { schema: RevenueReportResponse } } },
+    400: errorResponse("A malformed day, a period that ends before it starts, or more than three years"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("No org selected, or the caller does not have commercial visibility"),
+  },
+});
+
+function reportToWire(r: RevenueReport) {
+  return {
+    by: r.by,
+    from: r.from,
+    to: r.to,
+    asOf: r.asOf,
+    financialYearStartMonth: r.financialYearStartMonth,
+    currencies: r.currencies.map((c) => ({
+      currency: c.currency,
+      invoiced: c.invoiced,
+      collected: c.collected,
+      outstanding: c.outstanding,
+      invoices: c.invoices,
+    })),
+    rows: r.rows.map((row) => ({
+      userId: row.userId,
+      name: row.name,
+      activeStaff: row.activeStaff,
+      currency: row.currency,
+      invoiced: row.invoiced,
+      collected: row.collected,
+      outstanding: row.outstanding,
+      invoices: row.invoices,
+    })),
+  };
+}
+
 const TodaysRateSchema = z
   .object({
     fxRate: z.string().openapi({ description: "One unit of the currency, in the reporting currency." }),
@@ -580,6 +688,28 @@ export function registerDashboardRoutes(app: OpenAPIHono<AppEnv>, deps: Dashboar
     return c.json(revenueToWire(await deps.service.revenueByCompany(s.tenantId, months)), 200);
   });
 
+  app.openapi(revenueReportRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const denied = denyWithoutFees(c.get("principal"));
+    if (denied !== null) return c.json(denied, 403);
+    const q = c.req.valid("query");
+    return c.json(
+      reportToWire(
+        await deps.service.revenueReport(s.tenantId, {
+          by: q.by,
+          from: q.from,
+          to: q.to,
+          issuerPartyId: q.issuerPartyId,
+          currency: q.currency,
+        }),
+      ),
+      200,
+    );
+  });
+
+  registerOriginatorRoutes(app, { service: deps.originators });
+
   app.openapi(revenueByManagerRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
@@ -596,4 +726,5 @@ export const dashboardRoutes = {
   receivablesByClient: receivablesByClientRoute,
   revenueByCompany: revenueByCompanyRoute,
   revenueByManager: revenueByManagerRoute,
+  revenueReport: revenueReportRoute,
 } as const;
