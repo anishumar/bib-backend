@@ -1,27 +1,11 @@
-// Work items, proven where the claims actually have to hold: the database
-// (T3.1).
-//
-// Six properties, and not one of them can be tested with a fake — a fake agrees
-// with the service by construction, and every rule below is one a script, an
-// import or a psql session has to obey as well:
-//
-//   1. RLS isolates a firm's work, its vocabulary and its reviews.
-//   2. The COMPOSITE foreign keys refuse a cross-tenant client, state and
-//      priority. This is the failure RLS does not catch and the reason
-//      CLAUDE.md insists on `(id, tenant_id)`: a foreign-key check runs as a
-//      system operation the row policies do not filter.
-//   3. The TRIGGER reads the state's FLAGS, not its code. A blocked state
-//      demands a reason; a terminal one demands a completion time; and both
-//      keep working after the firm renames the state, which is the entire
-//      promise migration 0050 makes.
-//   4. `submitted_by` is DERIVED and FROZEN. That is what makes maker !=
-//      checker worth anything: a maker the writer could set is not a control.
-//   5. ONE work item per engagement, and ONE open review per work item —
-//      partial unique indexes, because every trigger into this table is
-//      at-least-once.
-//   6. A TICKED checklist line cannot be deleted, and `work_item` cannot be
-//      deleted at all.
-//
+// Work items (T3.1), proven in the database, where scripts, imports and psql must obey too:
+//   1. RLS isolates a firm's work, vocabulary and reviews.
+//   2. COMPOSITE FKs refuse a cross-tenant client, state and priority (an FK check bypasses RLS).
+//   3. The trigger reads the state's FLAGS, not its code, so a rename keeps it working (0050).
+//   4. `submitted_by` is DERIVED and FROZEN, or maker != checker is no control.
+//   5. ONE work item per engagement and ONE open review per item: partial unique indexes,
+//      because every trigger into this table is at-least-once.
+//   6. A TICKED checklist line cannot be deleted; `work_item` cannot be deleted at all.
 // Run with:  npm run test:integration   (needs a migrated local database)
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import postgres from "postgres";
@@ -46,8 +30,7 @@ interface Ids {
 }
 let ids: Ids;
 
-/** The firm's own vocabulary, resolved once per firm — the rows migration 0050
- *  backfilled, which is also what a brand-new firm gets. */
+/** The firm's own vocabulary, resolved once per firm (the rows 0050 seeds). */
 interface Vocab {
   notStarted: string;
   inProgress: string;
@@ -86,9 +69,7 @@ async function vocabularyOf(tenantId: string): Promise<Vocab> {
 }
 
 beforeAll(async () => {
-  // Two firms, deliberately. Isolation you cannot see is isolation you cannot
-  // trust — with one tenant seeded, an RLS bug looks exactly like a working
-  // system.
+  // Two firms: with one, an RLS bug looks exactly like a working system.
   const [a] = await owner<{ id: string }[]>`
     INSERT INTO tenancy.tenant (slug, name, reporting_currency)
     VALUES (${slugA}, 'Harbour Point', 'INR') RETURNING id
@@ -99,11 +80,8 @@ beforeAll(async () => {
   `;
   if (!a || !b) throw new Error("could not create the two test firms");
 
-  // The vocabulary is NOT seeded by this insert — `createTenant` does that
-  // through a port, and this test writes the tenant row directly. Migration
-  // 0050's backfill only reached the firms that existed when it ran. So the
-  // rows are written here, from the same eight the product seeds, which also
-  // makes the vocabulary explicit in a file that asserts against its flags.
+  // A raw tenant row gets no vocabulary (`createTenant` seeds it through a port, and 0050's
+  // backfill reached only firms that existed then), so the rows are written here.
   for (const t of [a.id, b.id]) {
     await owner`
       INSERT INTO delivery.work_item_state
@@ -183,10 +161,8 @@ async function asTenant<T>(
   }) as Promise<T>;
 }
 
-/** The single row a query must have returned. `[row] = await …` is typed as
- *  possibly-undefined, and threading `?.id` back into the NEXT query then makes
- *  the parameter `string | undefined` — which postgres.js will not accept and
- *  which would be a silent `NULL` if it did. */
+/** The single row a query must have returned; a `?.id` threaded into the next query would be
+ *  `string | undefined`, a silent `NULL` if postgres.js accepted it. */
 function one<T>(rows: readonly T[], what: string): T {
   const row = rows[0];
   if (row === undefined) throw new Error(`expected a ${what} and got none`);
@@ -240,35 +216,24 @@ describe("the tenant wall", () => {
   });
 
   it("REFUSES a work item hung off another firm's client", async () => {
-    // The failure RLS does NOT catch, and the whole reason for the composite
-    // key: the foreign-key check runs as a system operation the row policies do
-    // not filter, so an id-only reference would be accepted with every policy
-    // satisfied and would leak silently.
+    // What RLS does NOT catch: the FK check bypasses row policies, so an id-only key would leak.
     await expect(
       raise(ids.tenantA, vocabA, { clientPartyId: ids.clientB }),
     ).rejects.toThrow(/work_item_client_tenant_fkey|foreign key/i);
   });
 
   it("REFUSES a work item in another firm's state", async () => {
-    // The one that decides whether the vocabulary is really the firm's: without
-    // it, firm A's filing could sit in firm B's "Blocked", and renaming that
-    // state at B would change what A's board says.
-    //
-    // WHICH DEFENCE FIRES FIRST WAS A REAL FINDING, and the migration's comment
-    // was wrong until this test ran. A BEFORE INSERT trigger runs AHEAD of
-    // constraint validation, so `enforce_work_item_state_facts` gets there
-    // before the composite foreign key does — its lookup is scoped to
-    // `(id, tenant_id)`, finds nothing, and says so in a sentence. Both are
-    // real; the trigger is simply the outer one.
+    // Else firm A's filing could sit in firm B's "Blocked". A BEFORE INSERT trigger runs ahead
+    // of constraint validation, so `enforce_work_item_state_facts` (lookup scoped to
+    // `(id, tenant_id)`) refuses before the composite FK does.
     await expect(raise(ids.tenantA, vocabA, { stateId: vocabB.notStarted })).rejects.toThrow(
       /does not belong to firm/i,
     );
   });
 
   it("still has the COMPOSITE key underneath, for every write a trigger never sees", async () => {
-    // The trigger above is the message; this is the wall. Asked of the
-    // catalogue rather than provoked, because provoking it means finding a
-    // write path that skips the trigger — and there deliberately is not one.
+    // The trigger is the message; this is the wall. Asked of the catalogue: no write path
+    // skips the trigger to provoke it.
     const keys = await owner<{ conname: string }[]>`
       SELECT conname FROM pg_constraint
       WHERE conrelid = 'delivery.work_item'::regclass AND contype = 'f'
@@ -293,9 +258,7 @@ describe("the tenant wall", () => {
 
 describe("the trigger reads the state's FLAGS, never its code", () => {
   it("refuses a blocked state with no reason", async () => {
-    // The capture-or-lose pair. It cannot be a CHECK, because a CHECK cannot
-    // see `is_blocked` in another table — which is the price of the vocabulary
-    // being rows, paid here.
+    // A trigger, not a CHECK: a CHECK cannot see `is_blocked` in another table.
     await expect(raise(ids.tenantA, vocabA, { stateId: vocabA.blocked })).rejects.toThrow(
       /owes a reason/i,
     );
@@ -326,8 +289,7 @@ describe("the trigger reads the state's FLAGS, never its code", () => {
       `;
     });
 
-    // Leaving a block CLEARS the pair. A stale sentence sitting on running work
-    // is exactly what makes "are our delays ours or the client's" unanswerable.
+    // Leaving a block must CLEAR the pair, or "whose delay is it" becomes unanswerable.
     await expect(
       asTenant(ids.tenantA, async (tx) => {
         await tx`UPDATE delivery.work_item SET state_id = ${vocabA.inProgress} WHERE id = ${id}`;
@@ -344,8 +306,7 @@ describe("the trigger reads the state's FLAGS, never its code", () => {
   });
 
   it("KEEPS WORKING after the firm renames the state — the whole promise of 0050", async () => {
-    // A rule keyed on `code = 'blocked'` would have switched itself off here,
-    // silently, and nobody would ever be asked why work was stuck again.
+    // A rule keyed on `code = 'blocked'` would silently switch off here.
     await owner`
       UPDATE delivery.work_item_state SET name = 'Stuck'
       WHERE id = ${vocabA.blocked}
@@ -371,7 +332,7 @@ describe("the trigger reads the state's FLAGS, never its code", () => {
       `;
     });
 
-    // And CLEARS it on the way back. Reopened work is not finished work.
+    // Reopened work must clear it.
     await expect(
       asTenant(ids.tenantA, async (tx) => {
         await tx`UPDATE delivery.work_item SET state_id = ${vocabA.inProgress} WHERE id = ${id}`;
@@ -408,11 +369,9 @@ describe("what the firm may and may not do to its own vocabulary", () => {
 
 describe("the assignment note", () => {
   it("may sit on an unassigned row, and since 0311 beside a name too", async () => {
-    // 0051 refused a note beside a name. The owner rule (2026-09-27) puts work
-    // with no SPOC on the Key Manager's or the signing partner's desk, and the
-    // note is what tells that person it came to them to hand out; 0311 dropped
-    // the CHECK so the router can write both. A hand move still clears it
-    // (`setAssignee` writes NULL), so the note is always the router's.
+    // The owner rule (2026-09-27) routes work with no SPOC to the Key Manager or signing
+    // partner, and the note says it is theirs to hand out; 0311 dropped 0051's CHECK so the
+    // router can write both. A hand move clears it (`setAssignee` writes NULL).
     const id = await raise(ids.tenantA, vocabA);
     await asTenant(ids.tenantA, async (tx) => {
       await tx`
@@ -433,17 +392,13 @@ describe("the assignment note", () => {
 
 describe("idempotency, structurally", () => {
   it("allows ONE work item per engagement, and any number with none", async () => {
-    // The spawn path is at-least-once — a redelivered message, a restarted
-    // worker — and a second work item is a second task on somebody's desk for
-    // work already being done.
+    // The spawn path is at-least-once; a duplicate would be a second task for the same work.
     const [engagement] = await owner<{ id: string }[]>`
       SELECT gen_random_uuid() AS id
     `;
     if (!engagement) throw new Error("no uuid");
 
-    // A real engagement is needed for the FK, so this proves the index against
-    // a pair of rows that share a NULL engagement instead — which is the other
-    // half of the rule and the half a naive UNIQUE would break.
+    // The FK needs a real engagement, so prove the other half: rows sharing a NULL engagement.
     await raise(ids.tenantA, vocabA, { title: "ad hoc one" });
     await raise(ids.tenantA, vocabA, { title: "ad hoc two" });
     const adHoc = await asTenant(ids.tenantA, async (tx) => {
@@ -453,14 +408,9 @@ describe("idempotency, structurally", () => {
     });
     expect(Number(adHoc[0]?.n)).toBeGreaterThanOrEqual(2);
 
-    // And the index itself, asked of the catalogue: a partial unique index on
-    // (tenant_id, engagement_id, job_id) — per JOB since 0300, because a
-    // monthly engagement has one job and one umbrella task per month, and
-    // NULLS NOT DISTINCT so a null job cannot be a wildcard. Asserting on the
-    // definition rather than provoking it, because provoking it needs a whole
-    // signed letter — and the property worth protecting is that the index
-    // EXISTS and is partial, which is exactly what a later "tidy-up" would get
-    // wrong.
+    // The index from the catalogue (provoking it needs a signed letter): partial unique on
+    // (tenant_id, engagement_id, job_id), per JOB since 0300 (a monthly engagement has one job
+    // and umbrella task per month), NULLS NOT DISTINCT so a null job is no wildcard.
     const [idx] = await owner<{ indexdef: string }[]>`
       SELECT indexdef FROM pg_indexes
       WHERE schemaname = 'delivery' AND indexname = 'idx_work_item_one_per_engagement'
@@ -504,9 +454,8 @@ describe("maker != checker, and the derivation that makes it worth anything", ()
   });
 
   it("OVERWRITES a maker the writer tries to supply", async () => {
-    // The attack the trigger exists for: name somebody else as the maker and
-    // approve it yourself. The BEFORE INSERT trigger reads the assignee and
-    // discards whatever was sent.
+    // The attack: name someone else as maker, then approve it yourself. The BEFORE INSERT
+    // trigger reads the assignee and discards what was sent.
     const id = await raise(ids.tenantA, vocabA, { assigneeUserId: ids.priya });
     const [row] = await asTenant(ids.tenantA, async (tx) => {
       return tx<{ submitted_by: string | null }[]>`
@@ -540,9 +489,7 @@ describe("maker != checker, and the derivation that makes it worth anything", ()
   });
 
   it("refuses the maker as the checker — as the OWNER role, not only through the app", async () => {
-    // The point of proving it here: a rule that lives in a service is one a
-    // script, an import or an AI agent walks straight past. This runs as
-    // `bib_owner`, which has every privilege the application does not.
+    // As `bib_owner`: a service rule is one a script, import or AI agent walks past.
     const id = await raise(ids.tenantA, vocabA, { assigneeUserId: ids.priya });
     const approval = one(
       await owner<{ id: string }[]>`
@@ -591,10 +538,7 @@ describe("what may be removed, and what may not", () => {
   });
 
   it("allows removing an UNTICKED checklist line and refuses a ticked one", async () => {
-    // The one place in this schema a firm may remove its own row, because a
-    // firm that cannot fix a mistyped checklist will keep the checklist in
-    // Excel. A TICK is a record that somebody did something, and it lives
-    // nowhere else.
+    // The one row a firm may delete, so a mistyped checklist can be fixed; a TICK is a record.
     const id = await raise(ids.tenantA, vocabA);
     const line = one(
       await asTenant(ids.tenantA, async (tx) => {
@@ -669,9 +613,8 @@ describe("what may be removed, and what may not", () => {
 });
 
 describe("two SPOCs on one Dept take turns (2026-09-25)", () => {
-  // `SpocDirectory.spocsFor` now carries `routed`: how many of this client's
-  // tasks already sit on each candidate's desk. The unit tests prove the rule
-  // over that number; this proves the NUMBER, which only the real table can.
+  // Proves `SpocDirectory.spocsFor`'s `routed` count (this client's tasks per desk) on the real
+  // table; unit tests prove the rule over it.
   it("counts what each desk already holds for the client, longest-standing first", async () => {
     const [dept] = await owner<{ id: string }[]>`
       INSERT INTO tenancy.service_axis (tenant_id, axis, code, name)
@@ -686,21 +629,18 @@ describe("two SPOCs on one Dept take turns (2026-09-25)", () => {
                (${ids.tenantA}, ${ids.clientA}, 'spoc', ${dept.id}, ${ids.anand}, '2026-03-01')
       `;
     });
-    // Both are ACTIVE STAFF of the firm: since 2026-09-27 the SPOC read skips
-    // anybody who is not (a SPOC who left is nobody to route work to).
+    // Active staff: since 2026-09-27 the SPOC read skips anyone who is not.
     await owner`
       INSERT INTO tenancy.membership (tenant_id, user_id, audience, role)
       VALUES (${ids.tenantA}, ${ids.priya}, 'STAFF', 'associate'),
              (${ids.tenantA}, ${ids.anand}, 'STAFF', 'associate')
     `;
     const directory = new PostgresClientAssignmentRepository(app);
-    // Earlier cases in this file already put tasks on Priya's desk, so the
-    // assertion is on the DELTA rather than an absolute.
+    // Earlier cases put tasks on Priya's desk, so assert the DELTA.
     const before = await directory.spocsFor(ids.tenantA, ids.clientA, dept.id, "2026-09-25");
     const was = new Map(before.map((s) => [s.userId, s.routed]));
 
-    // Two more of this client's tasks on Priya's desk, none on Anand's; one of
-    // ANOTHER client's on Anand's, which must not count.
+    // Two of this client's on Priya; one of ANOTHER client's on Anand, which must not count.
     await raise(ids.tenantA, vocabA, { assigneeUserId: ids.priya });
     await raise(ids.tenantA, vocabA, { assigneeUserId: ids.priya });
     await raise(ids.tenantB, vocabB, { assigneeUserId: ids.anand });

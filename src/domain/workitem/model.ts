@@ -1,29 +1,13 @@
-// The work-item domain (T3.1) — the row on somebody's desk, and the rules that
-// decide whose. Pure nouns and pure rules; imports nothing internal and nothing
-// beyond the standard library (enforced by the arch test).
+// The work-item domain (T3.1): the row on somebody's desk and the rules that decide whose.
+// Pure; imports nothing internal (arch test).
 //
-// ── WHAT THIS IS, AND WHAT IT IS NOT ───────────────────────────────────────
+// A work item is WHAT is owed and WHOSE (client, due date, state, person); `delivery.job` and
+// `job_step` are HOW, and exist only when the firm has published a process (split argued in
+// 0051). Ad hoc work is a work item with no job, still owned, due, reviewable and late.
 //
-// A work item is WHAT is owed and WHOSE it is: a client, a due date, a state in
-// the firm's own words, a person. `delivery.job` and `job_step` are the other
-// half — HOW it gets done, in the engine's vocabulary, and only when the firm
-// has published a process at all. Migration 0051 argues the split at length.
-//
-// The consequence worth stating here: ad hoc work — "prepare the board
-// minutes" — is a work item with no job, no template and no steps, and it is
-// still owned, still due, still reviewable and still late. That is why this
-// module exists rather than a column on `job_step`.
-//
-// ── MEANING IS A FLAG; NAMES ARE THE FIRM'S ────────────────────────────────
-//
-// States and priorities are ROWS (migration 0050), so the firm may rename
-// "Blocked" or add a ninth state without a deploy. Nothing in this file ever
-// compares a `code`. Every rule reads `isInitial`, `isTerminal`, `isBlocked`,
-// `isDefault`, `isStatutoryDefault` or `rank` — because a rule keyed on a name
-// switches itself off the first time somebody exercises the freedom the rows
-// were there to give them.
-//
-// The codes exist for one thing: a seeder and an importer looking a row up.
+// States and priorities are ROWS (0050) the firm may rename, so no rule here compares a `code`:
+// rules read `isInitial`, `isTerminal`, `isBlocked`, `isDefault`, `isStatutoryDefault` or `rank`.
+// Codes exist only for a seeder or importer to look a row up.
 
 import { isCalendarDay } from "../day";
 
@@ -34,49 +18,27 @@ export interface WorkItemState {
   /** The firm's stable handle. Never compared by any rule here. */
   readonly code: string;
   readonly name: string;
-  /** What a new work item starts in. At most one per firm (partial unique
-   *  index); "at least one" is this module's `initialState` returning null and
-   *  the service refusing to create without one. */
+  /** What a new item starts in. At most one per firm (partial unique index); with none,
+   *  `initialState` returns null and the service refuses to create. */
   readonly isInitial: boolean;
-  /** Nothing further happens. `completedAt` is set on entry and cleared on the
-   *  way back out — the row says what is true now. */
+  /** Nothing further happens. `completedAt` is set on entry and cleared on the way out. */
   readonly isTerminal: boolean;
   /** The work is STUCK, and a reason becomes mandatory. See `blockedReason`. */
   readonly isBlocked: boolean;
-  /**
-   * The work was DONE, not abandoned (0054).
-   *
-   * Only meaningful on a terminal state, and the database says so. A firm
-   * starts with TWO terminal states — Completed and Cancelled — and everything
-   * that asks "did this actually happen" has to tell them apart: the compliance
-   * calendar marks an obligation filed from this flag, and `work_item.completed`
-   * fires from it, because a cancelled task is not something the firm finished.
-   *
-   * A flag rather than the code, for the reason at the top of this interface.
-   */
+  /** The work was DONE, not abandoned (0054); terminal states only (DB-enforced). Tells
+   *  Completed from Cancelled: the compliance calendar marks a filing filed, and
+   *  `work_item.completed` fires, from this flag. */
   readonly isSuccess: boolean;
   /**
-   * The work is WITH A CHECKER (0073).
-   *
-   * Sending an item for review moves it here, so the board column and the open
-   * `work_item_approval` cannot disagree — before this they routinely did: the
-   * buttons said Approve / Send back while the header still read "In Progress",
-   * and the firm's own "Under Review" state sat in the state dropdown as a
-   * second answer to the same question. Found by using the product.
-   *
-   * A flag rather than the code, for the reason at the top of this interface,
-   * and FALSE EVERYWHERE until a firm says which of its states means this. None
-   * is a real answer: a firm that never says gets exactly the old behaviour,
-   * because deciding that a state called "Under Review" means under review is
-   * this product having an opinion about the firm's own words.
-   *
-   * At most one per firm, and it can be neither blocked (0051's trigger would
-   * demand a reason nobody typed), terminal, nor initial.
+   * The work is WITH A CHECKER (0073). Sending for review moves the item here, so the board
+   * column and the open `work_item_approval` cannot disagree. False everywhere until the firm
+   * says which state means this; with none, the review opens and the state stays put (never
+   * inferred from a state named "Under Review"). At most one per firm, and never blocked
+   * (0051's trigger would demand a reason), terminal or initial.
    */
   readonly isUnderReview: boolean;
   readonly sortOrder: number;
-  /** Whether the firm still moves work into it. Retired states still READ —
-   *  items sitting in one are not orphaned — they are simply not offered. */
+  /** Whether the firm still moves work into it. Retired states still read; they are not offered. */
   readonly isActive: boolean;
 }
 
@@ -86,22 +48,12 @@ export interface WorkItemPriority {
   readonly tenantId: string;
   readonly code: string;
   readonly name: string;
-  /** 1 = MOST urgent — the opposite direction from `staff_grade.rank`, where 1
-   *  is the most junior. Both read the way the firm says them out loud, and the
-   *  disagreement is called out here because the two are compared in one
-   *  codebase and the next person will assume they agree. */
+  /** 1 = MOST urgent: the opposite of `staff_grade.rank`, where 1 is the most junior. */
   readonly rank: number;
   /** What ordinary work gets. */
   readonly isDefault: boolean;
-  /**
-   * What STATUTORY work gets — the firm's own rule made mechanical:
-   * *"due dates that are statutory should anyway be high priority"*.
-   *
-   * A flag rather than the constant `'high'`, so a firm that decides statutory
-   * work is Critical moves a tick instead of asking for a deploy. It may be the
-   * SAME row as `isDefault`, which is a real setting: a firm that does not want
-   * statutory work treated differently ticks both on one priority.
-   */
+  /** What STATUTORY work gets: "statutory due dates should anyway be high priority". A flag so a
+   *  firm can move it (e.g. to Critical) without a deploy; may be the same row as `isDefault`. */
   readonly isStatutoryDefault: boolean;
   readonly isActive: boolean;
 }
@@ -138,11 +90,9 @@ export interface WorkItem {
 
   /** ISO YYYY-MM-DD, or null for work with no deadline. */
   readonly dueOn: string | null;
-  /** True when the date comes from a STATUTE rather than from the firm. What
-   *  makes priority derivable; T3.2 sets it when it materialises obligations. */
+  /** The date comes from a STATUTE, not the firm; makes priority derivable. Set by T3.2. */
   readonly isStatutoryDue: boolean;
-  /** The SLA in force AT CREATION. A copy, so a catalogue revision cannot make
-   *  finished work retroactively late. */
+  /** The SLA AT CREATION, copied so a catalogue revision cannot make finished work late. */
   readonly slaDaysSnapshot: number | null;
 
   /** Whether the client may see this on their portal (U1). Defaulted true —
@@ -189,22 +139,16 @@ export function isApprovalDecision(v: string): v is ApprovalDecision {
 }
 
 /**
- * One review of one work item.
- *
- * The same shape as `StepApproval` (T2.9) and deliberately a SEPARATE row type:
- * the two hang off different tables, and migration 0051 argues why work that
- * has no process step must still be reviewable. What is NOT duplicated is the
- * rule about who may check — `VerificationPolicy` and `eligibility()` are
- * T2.9's, are pure, and are reused unchanged.
+ * One review of one work item. Same shape as `StepApproval` (T2.9) but a separate row type (0051:
+ * work with no process step must still be reviewable); `VerificationPolicy` and `eligibility()`
+ * are reused unchanged.
  */
 export interface WorkItemApproval {
   readonly id: string;
   readonly tenantId: string;
   readonly workItemId: string;
-  /** WHO MADE THE WORK. Derived by the database from the item's assignee and
-   *  frozen — the application cannot set it. Null when the item was unassigned,
-   *  which makes maker != checker vacuous rather than blocking, and the screen
-   *  says so. */
+  /** WHO MADE THE WORK: derived by the DB from the assignee and frozen. Null when unassigned,
+   *  which makes maker != checker vacuous rather than blocking. */
   readonly submittedBy: string | null;
   readonly submittedAt: string;
   readonly policyVersionId: string | null;
@@ -218,11 +162,8 @@ export interface WorkItemApproval {
   readonly decidedAt: string | null;
 }
 
-/**
- * One note on a task (0330, CA#30): one person's sentence at one moment.
- * Append-only; a correction is a second note. Never in the ledger, which
- * records only that one was written.
- */
+/** One note on a task (0330, CA#30). Append-only (a correction is a second note); the ledger
+ *  records only that one was written. */
 export interface WorkItemNote {
   readonly id: string;
   readonly tenantId: string;
@@ -237,12 +178,7 @@ export interface WorkItemNote {
 /** A note, trimmed, is at most this long: the database's bound too. */
 export const MAX_NOTE_LENGTH = 2000;
 
-// ── Read models ────────────────────────────────────────────────────────────
-//
-// Carrying NAMES, not just ids. This codebase's rule, learnt six times over
-// (`MemberRecord`, `LeadRecord`, `ProposalRecord`, party 360, the ledger's
-// actor, `ClientAssignmentRecord`): a list that returns uuids makes the screen
-// fetch a row per line to render itself.
+// Read models carry NAMES, not just ids: a list of uuids makes the screen fetch a row per line.
 
 /** A person, as a row shows them. */
 export interface WorkItemPerson {
@@ -260,27 +196,17 @@ export interface WorkItemRecord {
   readonly state: WorkItemState;
   readonly priority: WorkItemPriority;
   readonly assignee: WorkItemPerson | null;
-  /** The Dept's own words, so a board can group by it without resolving a
-   *  pinned config version per row. */
+  /** The Dept's own words, so a board groups without resolving a config version per row. */
   readonly deptName: string | null;
-  /** How much of the checklist is done — two numbers rather than the rows,
-   *  because a board shows "3/7" and a task screen shows the list. */
+  /** Checklist progress as two numbers: a board shows "3/7". */
   readonly checklistDone: number;
   readonly checklistTotal: number;
-  /** Whether a review is open right now. A board marks it; the task screen
-   *  loads the approval itself. */
+  /** A review is open now (the task screen loads the approval itself). */
   readonly hasOpenReview: boolean;
-  /** The items this one is still waiting on — ids and titles only, because the
-   *  question a screen asks is "what is in the way", not "tell me about it". */
+  /** The unfinished items this one waits on: ids and titles only. */
   readonly blockedByOpen: readonly WorkItemBlocker[];
-  /**
-   * SENT BACK AND NOT YET SENT AGAIN (audit 2026-10-03, CA#29): the latest
-   * DECIDED review was a send-back, no review is open, and the task is not
-   * finished. The checker's note, when, and by whom. Null otherwise. My day
-   * puts it on the maker's desk as "Sent back to you"; before this the
-   * roleplay's article was sent back with a note and My day said she was up
-   * to date.
-   */
+  /** SENT BACK AND NOT YET SENT AGAIN (audit 2026-10-03, CA#29): the latest decided review was a
+   *  send-back, none is open, the task is unfinished. My day shows it as "Sent back to you". */
   readonly sentBack: WorkItemSentBack | null;
 }
 
@@ -298,20 +224,9 @@ export interface WorkItemBlocker {
 }
 
 /**
- * One dependency edge with the item at the OTHER end of it resolved.
- *
- * A bare `WorkItemDependency` is three uuids, which is right for the aggregate
- * and renders as three uuids — and that is exactly what a screen showing "this
- * waits on 8f0e1c5f-…" would say. The same joined-read-model shape as
- * `WorkItemCheck`, `RelationshipRecord`, `MemberRecord` and `LeadRecord`, for
- * the same reason, and the sixth time this codebase has learnt it.
- *
- * `dependsOnIsTerminal` is the FLAG, never a state code: a firm owns the names
- * of its states and may call the finished one anything. It is what separates a
- * dependency that is still holding this item back from one that is a record of
- * what it used to wait on — the first refuses a start, the second does not, and
- * a screen that drew them the same would be offering somebody a reason to
- * remove a dependency that costs nothing.
+ * A dependency edge with the item at the other end resolved (a bare edge renders as uuids).
+ * `dependsOnIsTerminal` is the FLAG, never a state code: it separates a dependency still holding
+ * this item back (refuses a start) from a record of what it used to wait on (does not).
  */
 export interface WorkItemDependencyRecord {
   readonly dependency: WorkItemDependency;
@@ -328,19 +243,15 @@ export interface WorkItemCheck {
   readonly clientName: string;
   /** The client by id, so a list can LINK it (V2.1's My day). */
   readonly clientPartyId: string;
-  /** WHICH of the client's companies the work is for, when it names one
-   *  (audit 2026-10-03, F32): a group of four files four sets of returns, and
-   *  My day printed the group on a task titled for one of its companies. */
+  /** Which of the client's companies the work is for, if one (audit 2026-10-03, F32): My day
+   *  printed the group on a task titled for one company. */
   readonly entityPartyId: string | null;
   readonly entityName: string | null;
   /** The task's own due day, `YYYY-MM-DD`, or null when it has none. */
   readonly dueOn: string | null;
-  /** Who made it, by name. Null when the item was unassigned — "—" is the
-   *  honest cell, and it is also what tells a checker there is no maker to
-   *  compare against. */
+  /** Who made it, by name. Null when unassigned: no maker to compare against. */
   readonly submittedByName: string | null;
-  /** The policy's own label, pinned with it, so a queue can say "Manager
-   *  review" without resolving a config version per row. */
+  /** The policy's label, pinned with it, so a queue need not resolve a config version per row. */
   readonly policyLabel: string | null;
 }
 
@@ -357,32 +268,15 @@ export interface StateDefinition {
 }
 
 /**
- * The eight states a firm STARTS with — seed data, not the runtime answer.
+ * The eight states a firm STARTS with: seed data written into a new tenant's rows and read by
+ * nothing afterwards (same contract as `DEFAULT_GRADES`, `DEFAULT_ROLES`). The names are the
+ * previous vendor's and still UNCONFIRMED, 10x included; renaming is a screen edit, not a
+ * migration. `migrations/0050` backfills the same eight; `tests/workitem/seed-parity.test.ts`
+ * fails the build if they drift.
  *
- * These names are the previous vendor's vocabulary, carried across the rebuild,
- * and they are STILL UNCONFIRMED including for 10x itself. Asked about it the
- * client said to get the system working and settle the naming later — which
- * costs nothing precisely because this is a table: confirming one is an UPDATE
- * on a screen, not a migration somebody asks an engineer for.
- *
- * Same contract as `DEFAULT_GRADES` and `DEFAULT_ROLES`: written into a new
- * tenant's rows at creation and consulted by nothing afterwards. The firm owns
- * its vocabulary from that moment.
- *
- * `migrations/0050` backfills the same eight for firms that existed before it,
- * and `tests/workitem/seed-parity.test.ts` fails the build if the two drift.
- *
- * **Only `blocked` is flagged blocking**, and that is a judgement worth stating.
- * "Waiting for Client" and "Waiting Internal" are arguably stuck too — but
- * "Waiting for Client" already says whose fault the delay is, which is most of
- * what a reason field is for. A firm that wants the prose as well ticks the box
- * itself, which is the configurability being real rather than advertised.
- *
- * **Exactly one of the two terminal states is a SUCCESS** (0054), and that is
- * the whole reason the flag exists. Cancelled is terminal and is not a firm
- * finishing anything — reading `isTerminal` alone would have the compliance
- * calendar record a statutory return as FILED because somebody tidied their
- * board.
+ * Only `blocked` is flagged blocking ("Waiting for Client" already says whose the delay is; a
+ * firm can tick more). Exactly one terminal state is a SUCCESS (0054): reading `isTerminal`
+ * alone would have the compliance calendar record a cancelled return as FILED.
  */
 export const DEFAULT_WORK_ITEM_STATES: readonly StateDefinition[] = [
   { code: "not_started", name: "Not Started", isInitial: true, isTerminal: false, isBlocked: false, isSuccess: false, sortOrder: 10 },
@@ -403,9 +297,7 @@ export interface PriorityDefinition {
   readonly isStatutoryDefault: boolean;
 }
 
-/** The four priorities a firm starts with. `rank` is what code compares; the
- *  names are display and may change. Statutory work lands on High by default —
- *  one tick from Critical the day the firm decides otherwise. */
+/** The four priorities a firm starts with. Statutory work lands on High by default. */
 export const DEFAULT_WORK_ITEM_PRIORITIES: readonly PriorityDefinition[] = [
   { code: "critical", name: "Critical", rank: 1, isDefault: false, isStatutoryDefault: false },
   { code: "high", name: "High", rank: 2, isDefault: false, isStatutoryDefault: true },
@@ -415,14 +307,8 @@ export const DEFAULT_WORK_ITEM_PRIORITIES: readonly PriorityDefinition[] = [
 
 // ── Pure rules ─────────────────────────────────────────────────────────────
 
-/**
- * A code is a lowercase handle, 2–40 chars.
- *
- * Duplicated from `domain/staffgrade/model.ts` rather than imported, and the
- * arch wall requires it: the two domains are siblings and neither may import
- * the other. The agreement between them is held by a test, not by a shared
- * import — the same duplication `isIsoDate` already carries.
- */
+/** A code is a lowercase handle, 2–40 chars. Duplicated from `domain/staffgrade/model.ts`
+ *  (sibling domains may not import each other); a test holds them in agreement. */
 export function isValidVocabularyCode(code: string): boolean {
   return /^[a-z0-9](?:[a-z0-9_-]{0,38}[a-z0-9])$/.test(code);
 }
@@ -431,35 +317,25 @@ export function normalizeVocabularyCode(code: string): string {
   return code.trim().toLowerCase();
 }
 
-/** A well-formed ISO date, YYYY-MM-DD. Duplicated for the arch wall's reason;
- *  see `isValidVocabularyCode`. */
+/** A well-formed ISO date, YYYY-MM-DD. Duplicated for the arch wall's reason. */
 export function isIsoDate(s: string): boolean {
-  // A day that EXISTS, not just the shape (audit 2026-10-03, B43): 2026-13-45
-  // passed the shape and reached Postgres as an unmapped 22008, a 500.
+  // A day that EXISTS (audit 2026-10-03, B43): 2026-13-45 reached Postgres as 22008, a 500.
   return isCalendarDay(s);
 }
 
-/** Ranks are positive integers. Not unique and not contiguous — nothing
- *  compares within a rank, only across, so uniqueness would turn "insert a
- *  priority between two others" into a renumbering. */
+/** Positive integers; neither unique nor contiguous, so a priority can be inserted between two
+ *  others without renumbering. */
 export function isValidRank(rank: number): boolean {
   return Number.isInteger(rank) && rank > 0;
 }
 
-/** What a new work item starts in, or null when the firm has none. Null is a
- *  refusal the service turns into a sentence, never a crash — see the note on
- *  `isInitial`. */
+/** What a new item starts in, or null when the firm has none (the service refuses in words). */
 export function initialState(states: readonly WorkItemState[]): WorkItemState | null {
   return states.find((s) => s.isInitial) ?? null;
 }
 
-/**
- * Where a task goes when the job it belongs to is cancelled (V2.4): the firm's
- * own state that is TERMINAL and NOT a success, active, first in the firm's
- * order. Read by its flags, never its code, like every rule here; the product
- * seeds "Cancelled" at every firm. Null when the firm has none, and the
- * caller refuses rather than calling a cancellation a completion.
- */
+/** Where a task goes when its job is cancelled (V2.4): the first active terminal non-success
+ *  state in the firm's order. Null when none; the caller refuses rather than complete it. */
 export function cancelledState(states: readonly WorkItemState[]): WorkItemState | null {
   return (
     [...states]
@@ -468,33 +344,17 @@ export function cancelledState(states: readonly WorkItemState[]): WorkItemState 
   );
 }
 
-/**
- * Where work goes when somebody sends it to be checked, or null (0073).
- *
- * NULL IS A SUPPORTED ANSWER AND NOT A GAP. A firm that has not said which of
- * its own states means "with a checker" gets the behaviour that shipped before
- * this flag existed: the review opens and the state stays where it is. There is
- * no fallback to a state called "Under Review" and there must not be — the
- * whole reason these are rows is that the firm owns the words, and a product
- * that reads a name is a product that breaks the moment a firm renames it.
- */
+/** Where work goes when sent to be checked (0073), or null. Null is supported: the review opens
+ *  and the state stays put. Never fall back to a state NAMED "Under Review". */
 export function underReviewState(states: readonly WorkItemState[]): WorkItemState | null {
   return states.find((s) => s.isUnderReview) ?? null;
 }
 
 /**
- * Where APPROVED work goes (audit 2026-10-03, CA#28): the firm's own state that
- * is TERMINAL and a SUCCESS, active, first in the firm's order. The mirror of
- * `cancelledState`, and read by the same two flags 0054 added for exactly this
- * question ("was the work DONE, or abandoned"). Null when the firm has none:
- * the approval still stands and the task stays where it is.
- *
- * Before this an approval moved nothing, on the ground that picking one of a
- * firm's terminal states would be deciding what approval means. `isSuccess`
- * already answers that: Completed and Cancelled are told apart by it, and an
- * approval is not a cancellation. The roleplay's manager approved a GSTR-3B
- * and the task went on reading "In Progress" with Send for review offered
- * again.
+ * Where APPROVED work goes (audit 2026-10-03, CA#28): the first active terminal SUCCESS state in
+ * the firm's order; the mirror of `cancelledState`. `isSuccess` (0054) is what lets an approval
+ * pick a terminal state without it reading as a cancellation. Null when none: the approval
+ * stands and the task stays put.
  */
 export function completedState(states: readonly WorkItemState[]): WorkItemState | null {
   return (
@@ -504,14 +364,9 @@ export function completedState(states: readonly WorkItemState[]): WorkItemState 
   );
 }
 
-/**
- * Where SENT-BACK work goes, when it is sitting in the firm's "with a checker"
- * state (CA#28): the first active state in the firm's order that is none of
- * the special ones. Not the starting state (somebody has started it), not a
- * blocked one (a send-back is not a block and has no block reason to give),
- * not terminal, not "with a checker". The product seeds "In Progress" there.
- * Null when the firm has no such state, and the task then stays where it is.
- */
+/** Where SENT-BACK work in the "with a checker" state goes (CA#28): the first active state that
+ *  is not initial, blocked (a send-back has no block reason), terminal or under review. The seed
+ *  has "In Progress" there. Null when none; the task stays put. */
 export function reworkState(states: readonly WorkItemState[]): WorkItemState | null {
   return (
     [...states]
@@ -531,17 +386,8 @@ export function openChecklistLines(lines: readonly ChecklistItem[]): readonly st
     .map((l) => l.label);
 }
 
-/**
- * The priority this work gets by default.
- *
- * The whole of *"statutory due dates should anyway be high priority"*, and the
- * reason priority is not a field a human sets on every task: a field somebody
- * has to fill in on every row is a field that is wrong on most of them.
- *
- * Falls through to the ordinary default when the firm has flagged no statutory
- * one, rather than picking the most urgent row — inventing an urgency the firm
- * never set is exactly what this function exists to avoid.
- */
+/** The default priority: the statutory default for statutory work, else the ordinary default.
+ *  Never the most urgent row as a fallback; that would invent an urgency the firm never set. */
 export function defaultPriorityFor(
   priorities: readonly WorkItemPriority[],
   isStatutoryDue: boolean,
@@ -554,23 +400,10 @@ export function defaultPriorityFor(
 }
 
 /**
- * The due date: a calendar date plus whole days.
- *
- * ISO strings in and out, and the arithmetic runs in explicit UTC — never
- * through the process's local clock. A `Date` is an INSTANT, and an instant
- * moves the day for anybody east or west of UTC; this product has already been
- * bitten by exactly that (a client assigned at 04:11 IST was absent from its
- * holder's own book, because the row started "tomorrow" as far as the server
- * was concerned). Constructing and reading the date in UTC on both sides means
- * the calendar arithmetic is the same wherever this runs.
- *
- * The BASE is `engagement.effective_from`, which is a `date` column resolved
- * once at signature — the day the work actually begins. Deliberately not
- * `signed_at`, which is a timestamptz: converting an instant to a day is the
- * bug above, and the firm already has the calendar-native field.
- *
- * Null `slaDays` means the firm has not stated a turnaround for that service,
- * and the answer is NO DUE DATE rather than a deadline this product invented.
+ * The due date: a calendar day plus whole days, computed in explicit UTC so the result does not
+ * depend on the server's zone (a `Date` is an instant; local arithmetic moves the day). The base
+ * is `engagement.effective_from` (a `date`, the day work begins), not the `signed_at` instant.
+ * Null `slaDays` (no turnaround stated) means NO due date, never an invented one.
  */
 export function dueOnFrom(startDate: string, slaDays: number | null): string | null {
   if (slaDays === null || !isIsoDate(startDate)) return null;
@@ -580,59 +413,32 @@ export function dueOnFrom(startDate: string, slaDays: number | null): string | n
   return due.toISOString().slice(0, 10);
 }
 
-/**
- * The result of routing a filing to a Dept SPOC.
- *
- * Two fields and never both set: either somebody owns it, or nobody does and
- * the row says which of the two ways the lookup failed. `note` is what makes an
- * unassigned queue actionable instead of a pile.
- */
+/** The result of routing a filing. Never both set: an owner, or a note saying why none, which
+ *  makes an unassigned queue actionable. */
 export interface AssignmentOutcome {
   readonly userId: string | null;
   readonly note: string | null;
 }
 
-/** A SPOC as the router sees one — narrow on purpose, so this rule can be
- *  tested against two names and no database. */
+/** A SPOC as the router sees one: narrow, so the rule is testable without a database. */
 export interface SpocCandidate {
   readonly userId: string;
   readonly displayName: string | null;
   readonly email: string;
-  /** How many of THIS client's tasks the router has already put on this
-   *  desk, ever. The turn-taking counter: with several SPOCs on a Dept the
-   *  next task goes to whoever has had the fewest, so two SPOCs alternate and
-   *  three rotate, with no state beyond the rows themselves. */
+  /** How many of THIS client's tasks the router has put on this desk, ever. The fewest gets the
+   *  next, so two SPOCs alternate and three rotate, with no state beyond the rows. */
   readonly routed: number;
 }
 
 /**
- * THE acceptance line's rule: a filing arrives pre-assigned to the client's
- * Dept SPOC.
- *
- * Three outcomes, and the two failures are as deliberate as the success:
- *
- *   ONE SPOC — assigned. The case the firm described, and the common one.
- *
- *   NONE — no SPOC, with a note naming the Dept. From 2026-08-30 that left the
- *   work on nobody's desk, because falling back to the Key Manager was a rule
- *   the firm never gave. The firm has now given one (Shrestha, 2026-09-27):
- *   work always has an owner. So this function still answers "none", and
- *   `resolveOwner` below is what takes that answer to the Key Manager and then
- *   to the partner who signs for the firm.
- *
- *   MORE THAN ONE — TURN-TAKING (Shrestha, 2026-09-25). G3.2 deliberately
- *   allows several per Dept (leave cover, a joint SPOC on a group, a
- *   fortnight's parallel handover). From 2026-08-30 to 2026-09-25 this case
- *   was left unassigned with a note, on the ground that "take the first" is
- *   a rule nobody gave. The firm has now given one: share the work. So the
- *   task goes to whichever of them has had the FEWEST of this client's tasks
- *   so far (`routed`), ties broken by the order the directory returns (the
- *   longer-standing assignment first). Two SPOCs alternate; three rotate. No
- *   state is kept: the count is read off the rows every time, so a SPOC who
- *   returns from leave simply catches up.
- *
- * The note names PEOPLE, which is why it is prose on an erasable row and never
- * in a ledger payload.
+ * The acceptance line's rule: a filing arrives pre-assigned to the client's Dept SPOC.
+ *   - ONE SPOC: assigned.
+ *   - NONE: unassigned with a note naming the Dept; `resolveOwner` then falls back to the Key
+ *     Manager and the signing partner (Shrestha, 2026-09-27).
+ *   - SEVERAL (G3.2 allows them: leave cover, joint SPOC, handover): TURN-TAKING (Shrestha,
+ *     2026-09-25). Fewest `routed` wins, ties to the directory's order (longer-standing
+ *     assignment first). Counts are read off the rows, so a SPOC back from leave catches up.
+ * The note names PEOPLE: prose on an erasable row, never in a ledger payload.
  */
 export function resolveAssignee(
   spocs: readonly SpocCandidate[],
@@ -649,41 +455,33 @@ export function resolveAssignee(
     };
   }
   if (spocs.length === 1) return { userId: first.userId, note: null };
-  // Whoever has had the fewest of this client's tasks. `reduce` keeps the
-  // EARLIER candidate on a tie, so the directory's order is the tie-break.
+  // Fewest wins; `reduce` keeps the EARLIER candidate on a tie (directory order).
   const next = spocs.reduce((best, s) => (s.routed < best.routed ? s : best), first);
   return { userId: next.userId, note: null };
 }
 
-/** Which rung of the owner rule named the person. `null` on an outcome means
- *  nobody could be named at all. Goes on the ledger as `how`, so it is a
- *  closed vocabulary and never a name. */
+/** Which rung of the owner rule named the person; null on an outcome means nobody. Goes on the
+ *  ledger as `how`, so it is a closed vocabulary, never a name. */
 export type OwnerSource = "spoc" | "key_manager" | "partner";
 
-/** Somebody the owner rule may hand work to: an ACTIVE member of the firm's
- *  staff. The adapters filter; this type is what they hand over. */
+/** Somebody the owner rule may hand work to: an ACTIVE staff member (the adapters filter). */
 export interface OwnerPerson {
   readonly userId: string;
   readonly displayName: string | null;
 }
 
-/**
- * Why the SPOC lookup could not even be asked. Distinct from "asked, and the
- * client has nobody for that Dept", which is `noLookup: null` with no SPOCs:
- * each has its own fix, and the note says which.
- */
+/** Why the SPOC lookup could not be asked; distinct from "asked, nobody for that Dept"
+ *  (`noLookup: null`, no SPOCs). Each has its own fix, and the note says which. */
 export type NoSpocLookup =
   /** The service is filed under no Dept. */
   | { readonly kind: "no_dept" }
   /** The service names a Dept code the firm does not have. */
   | { readonly kind: "unknown_dept"; readonly code: string }
-  /** A JOB holding work for several Depts (possible when the firm keeps a
-   *  client's work together): no one Dept's SPOC can take all of it. */
+  /** A JOB with work for several Depts (client's work kept together): no one SPOC takes it all. */
   | { readonly kind: "several_depts"; readonly names: readonly string[] };
 
-/** Everything the owner rule reads, gathered by whoever is asking. The task
- *  router and the job's step desk gather it differently (a task has one
- *  service, a job may have several) and decide it with the SAME function. */
+/** Everything the owner rule reads. The task router and the job's step desk gather it
+ *  differently (one service vs several) and decide with the SAME function. */
 export interface OwnerFacts {
   /** The Dept or team the work belongs to, as a person reads it. */
   readonly deptName: string | null;
@@ -701,35 +499,13 @@ export interface OwnerOutcome extends AssignmentOutcome {
 }
 
 /**
- * WHO OWNS A PIECE OF WORK WHEN IT IS CREATED (Shrestha, 2026-09-27).
- *
- * Work always has an owner. Unassigned work is work nobody looks at, and the
- * firm's rule is a ladder with one answer at each rung:
- *
- *   1. The client's SPOC for the work's Dept (`resolveAssignee`, turn-taking
- *      and all). The ordinary case, and the only one with no note.
- *   2. No SPOC: the client's Key Manager, who owns the whole relationship.
- *   3. No Key Manager either: the person who signs for the firm.
- *   4. Nobody at all: unassigned, and the note says which three things are
- *      missing.
- *
- * A fallback owner is there to HAND THE WORK OUT, not to do it, and the note
- * says so. That is what answers this codebase's old objection to a fallback,
- * that a wrong assignee is worse than none because it sits on a desk whose
- * owner believes it is not theirs: the owner is told, on the row, why it came
- * to them and what to do with it. Handing the task on takes the job's steps
- * with it (`OrchestratorService.adoptUnheldSteps`), so handing it out is one
- * act and not eleven.
- *
- * Pure, and the ONE statement of the ladder. The task router and the job's
- * step desk both call it, so a task and its steps can no longer land on
- * different desks because they asked two different questions, which is the
- * bug that made this function (2026-09-27: with the firm keeping a client's
- * work together, every job's steps went to nobody while its task went to the
- * SPOC).
- *
- * The note names PEOPLE, so it is prose on an erasable row and never in a
- * ledger payload; `how` is what the ledger keeps.
+ * WHO OWNS WORK WHEN IT IS CREATED (Shrestha, 2026-09-27): 1. the client's SPOC for the Dept (no
+ * note); 2. else the Key Manager; 3. else the person who signs for the firm; 4. else nobody,
+ * with a note naming what is missing. A fallback owner HANDS THE WORK OUT, and the note says why
+ * it came to them; handing the task on takes the job's steps with it
+ * (`OrchestratorService.adoptUnheldSteps`). The ONE statement of the ladder: the task router and
+ * the step desk both call it, so a task and its steps cannot land on different desks. Notes name
+ * PEOPLE (erasable row only); `how` is what the ledger keeps.
  */
 export function resolveOwner(facts: OwnerFacts): OwnerOutcome {
   if (facts.noLookup === null && facts.spocs.length > 0) {
@@ -765,14 +541,9 @@ export function resolveOwner(facts: OwnerFacts): OwnerOutcome {
   };
 }
 
-/**
- * The note a task carries when a PERSON took it off a desk and left it with
- * nobody (`WorkItemService.assign` with no assignee). One constant, because
- * the catch-up below must tell it apart from the router's own "nobody could
- * be given this": a person deciding a task should sit unassigned is a
- * decision, and the router re-deciding it would overrule them. Worded as it
- * has been since T3.1, so rows written before this constant match it.
- */
+/** The note on a task a PERSON left with nobody (`WorkItemService.assign`, no assignee). One
+ *  constant so the catch-up can tell this decision from the router's "nobody could be given
+ *  this" and not overrule it. Worded as since T3.1, so older rows match. */
 export const TAKEN_OFF_BY_HAND_NOTE = "Taken off a desk by hand; nobody has it now.";
 
 /** Where a task the owner rule placed sits now, as the catch-up reads it. */
@@ -788,22 +559,12 @@ export type CatchUpDecision =
   | { readonly kind: "renote"; readonly note: string | null };
 
 /**
- * THE CATCH-UP (T6.17, Shrestha 2026-09-27): the account team was named after
- * the work was created, so ask the owner rule again and say what changes.
- *
- * Called only on a task the ROUTER placed and nobody has decided on since (on
- * a fallback desk with its note, or on nobody's with the router's note), and
- * only while it has not been started: the caller's read guarantees that, and
- * this is the rule about what the new answer means.
- *
- *   - The rule names nobody: nothing. Work is never taken OFF a desk by this;
- *     a Key Manager who has left leaves the task where it is for somebody to
- *     hand out, which is what the note on it already says.
- *   - The rule names somebody else: the task MOVES to them, with the new
- *     rung's note (none, when it is the SPOC).
- *   - The rule names the person who already holds it, by another rung (the
- *     Key Manager is now also the Dept's SPOC): the desk stays and only the
- *     sentence changes, because "no SPOC is recorded" would now be false.
+ * THE CATCH-UP (T6.17, Shrestha 2026-09-27): the account team was named after the work was
+ * created, so ask the owner rule again. Called only on an unstarted task the ROUTER placed and
+ * nobody has decided on since (the caller's read guarantees it).
+ *   - Names nobody: nothing; work is never taken OFF a desk by this.
+ *   - Names somebody else: MOVE, with the new rung's note (none for a SPOC).
+ *   - Names the current holder by another rung: keep the desk, correct only the note.
  */
 export function catchUpMove(task: PlacedTask, now: OwnerOutcome): CatchUpDecision | null {
   if (now.userId === null || now.how === null) return null;
@@ -850,18 +611,9 @@ function joinNames(names: readonly string[]): string {
   return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1] ?? ""}`;
 }
 
-/**
- * Would adding `workItemId → dependsOn` close a cycle?
- *
- * A depth-first walk from the proposed blocker: if it can already reach the
- * item that would wait on it, the edge closes a loop and neither would ever be
- * startable. The database catches only the trivial self-edge — reachability is
- * not expressible in a CHECK — so this is the rest of the rule, and it is the
- * same argument `validateWorkflowTemplateBody` makes about a workflow graph.
- *
- * Takes the whole edge list rather than a repository, so the rule is testable
- * against a drawing on paper.
- */
+/** Would adding `workItemId → dependsOn` close a cycle? DFS from the proposed blocker. The DB
+ *  catches only the self-edge (reachability is not a CHECK); same argument as
+ *  `validateWorkflowTemplateBody`. */
 export function wouldCycle(
   edges: readonly Pick<WorkItemDependency, "workItemId" | "dependsOnWorkItemId">[],
   workItemId: string,
@@ -887,17 +639,9 @@ export function wouldCycle(
 }
 
 /**
- * The order a board reads in.
- *
- * Overdue first — the only thing anybody is actually looking for — then by
- * urgency, then by the date it is due, then by title so two identical rows do
- * not swap places between two loads. A list that reorders itself looks broken
- * even when it is not; `ladderOrder`, `axisOrder` and `accountTeamOrder` all
- * make the same argument.
- *
- * `today` is the CALLER's calendar day, passed in. The server's own day is not
- * the firm's — a server in UTC is a day behind a firm in India every morning —
- * and "is this overdue" is exactly the kind of question that gets that wrong.
+ * The board's order: overdue first, then urgency, due date, title (stable: a list that reorders
+ * itself looks broken). `today` is the CALLER's day: a server in UTC is a day behind a firm in
+ * India every morning.
  */
 export function boardOrder(
   records: readonly WorkItemRecord[],
@@ -905,9 +649,7 @@ export function boardOrder(
 ): readonly WorkItemRecord[] {
   const overdue = (r: WorkItemRecord): number =>
     r.item.dueOn !== null && r.item.dueOn < today && !r.state.isTerminal ? 0 : 1;
-  // Undated work sorts after dated work rather than before it: a task with no
-  // deadline is not the most urgent thing on the board, and an empty string
-  // would sort it to the top.
+  // Undated work sorts after dated work (an empty string would sort it to the top).
   const due = (r: WorkItemRecord): string => r.item.dueOn ?? "9999-12-31";
   return [...records].sort(
     (a, b) =>
@@ -918,14 +660,12 @@ export function boardOrder(
   );
 }
 
-/** The states a picker offers. Retired ones still render everywhere they are
- *  already held; they are simply not offered for a move. */
+/** The states a picker offers; retired ones still render where held. */
 export function assignableStates(states: readonly WorkItemState[]): readonly WorkItemState[] {
   return states.filter((s) => s.isActive);
 }
 
-/** The vocabulary in the order the firm arranged it, then by name so two rows
- *  sharing a sort order still have ONE stable order. */
+/** The firm's order, then name, so equal sort orders still have ONE stable order. */
 export function stateOrder(states: readonly WorkItemState[]): readonly WorkItemState[] {
   return [...states].sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
 }

@@ -1,23 +1,8 @@
-// The service's public surface, composed in one place. A reviewer reads this to
-// see every route the service exposes, how it is gated, and where the docs are:
-//
-//   /health, /ready                    ops, auth-free
-//   /api/v1/auth/...                   sign in / prove / switch org / sign out
-//   /internal/v1/...                   service-to-service / platform (not app-facing)
-//   /api/v1/tenancy/...                app-facing (user principal)
-//   /api/v1/config/...                 the firm's own services and roles (T2.5)
-//   /api/v1/leads/...                  the commercial pipeline (T2.1)
-//   /api/v1/work-items/...             the board — what is owed and whose (T3.1)
-//   /api/v1/escalations                what the firm's own ladder has escalated (T4.5)
-//   /api/v1/work-vocabulary/...        the firm's own states and priorities (T3.1)
-//   /api/v1/firm-entities/...          which of the firm's own entities issues (G1.2)
-//   /api/v1/invoices/...               invoicing, and the one gapless series (T3.4)
-//   /api/v1/documents/...              the document store — bytes, versions, links (T3.6)
-//   /api/v1/dashboard/...              MRR, ageing and DSO — behind the fee axis (T3.7)
-//   /openapi.json, /docs               generated spec + Swagger UI (gated)
-//
-// Per-module routes live in their handler module's registrar (registerTenancy…)
-// and are mounted here; ops, error mapping and docs are cross-cutting and stay.
+// Every route the service exposes, and how it is gated. Prefixes: /health, /ready (ops,
+// auth-free); /api/v1/... (app, session); /internal/v1/... (S2S); /openapi.json, /docs (gated).
+// Module routes come from each handler's registrar; ops, error mapping and docs stay here.
+// Origin tasks: config T2.5, leads T2.1, work-items/work-vocabulary T3.1, escalations T4.5,
+// firm-entities G1.2, invoices T3.4, documents T3.6, dashboard T3.7 (behind the fee axis).
 import { swaggerUI } from "@hono/swagger-ui";
 import { createRoute } from "@hono/zod-openapi";
 import { cors } from "hono/cors";
@@ -111,34 +96,23 @@ import type { AuthDeps } from "./handler/auth";
 import { mapError } from "./domainerr";
 import { toEnvelope } from "./httpresp";
 
-/**
- * The largest JSON body this API will read, in bytes.
- *
- * 256 KB is roughly two orders of magnitude more than the biggest form in the
- * product and small enough that buffering one costs nothing. It is deliberately
- * not configurable: a body limit somebody can raise in an environment variable
- * is one that gets raised the first time a request is refused.
- */
+/** Largest JSON body, in bytes. Deliberately not configurable: an env-var limit gets raised
+ *  the first time a request is refused. */
 const MAX_JSON_BODY_BYTES = 256 * 1024;
 
-/** What a multipart envelope costs on top of the file itself — boundaries, part
- *  headers and the other form fields. Generous; the point is that the SERVICE's
- *  check on the file's own bytes stays the one that decides. */
+/** Allowance for the multipart envelope; the SERVICE's check on the file's bytes decides. */
 const MULTIPART_OVERHEAD_BYTES = 64 * 1024;
 
 /**
- * The routes that carry a file, as patterns over the CONCRETE path.
- *
- * Matched here rather than mounted per-path, because `app.use(path, …)`
- * registers an entry in Hono's route table and `tests/api/auth-coverage.test.ts`
- * reads that table to prove every route declares who may reach it. A body limit
- * is not a route and must not look like one.
+ * The routes that carry a file, matched on the concrete path. Not mounted per path:
+ * `app.use(path, …)` adds a route-table entry, and `tests/api/auth-coverage.test.ts` reads
+ * that table, so a body limit must not look like a route.
  */
 const UPLOAD_PATHS = [
   /^\/api\/v1\/documents$/,
   /^\/api\/v1\/documents\/[^/]+\/versions$/,
   /^\/api\/v1\/portal\/asks\/[^/]+\/documents$/,
-  // The client import: three spreadsheets in one multipart body.
+  // Client import: three spreadsheets in one multipart body.
   /^\/api\/v1\/client-imports$/,
 ] as const;
 
@@ -147,8 +121,8 @@ function isUploadPath(path: string): boolean {
 }
 
 export interface RouterOptions {
-  /** Serve /openapi.json and /docs. Off in production-like environments unless
-   *  BIB_DOCS_ENABLED is set — the spec enumerates every endpoint. */
+  /** Serve /openapi.json and /docs. Off in production-like unless BIB_DOCS_ENABLED: the spec
+   *  enumerates every endpoint. */
   readonly docsEnabled: boolean;
   /** The provisioning callers, each with its own key and capabilities. */
   readonly internalClients: readonly InternalClient[];
@@ -159,25 +133,16 @@ export interface RouterOptions {
   readonly rateLimit: RateLimitConfig;
   /** Exact browser origins allowed to send credentialed requests. */
   readonly corsOrigins: readonly string[];
-  /**
-   * The largest upload the store accepts, in bytes (BIB_MAX_UPLOAD_BYTES).
-   *
-   * The edge needs it because the SERVICE's check is too late: `parseBody()`
-   * has already pulled the whole multipart body into memory by the time the
-   * use case measures it. Passed in rather than imported so the one number
-   * lives in config and both layers read the same value.
-   */
+  /** BIB_MAX_UPLOAD_BYTES. The edge needs it: by the time the service measures,
+   *  `parseBody()` has already buffered the whole multipart body. */
   readonly maxUploadBytes: number;
-  /** Whether to send Strict-Transport-Security. On in production-like only —
-   *  the header pins a browser to https for the WHOLE host, which on localhost
-   *  breaks every other service the developer runs. */
+  /** Send HSTS. Production-like only: on localhost it pins the whole host to https. */
   readonly hstsEnabled: boolean;
-  /** Which build this process is, for GET /health (V0.2). Nulls when the
-   *  image was not stamped. */
+  /** This build, for GET /health (V0.2). Nulls when the image was not stamped. */
   readonly build: { readonly commit: string | null; readonly builtAt: string | null };
 }
 
-/** Per-module dependencies the router mounts. One field per capability. */
+/** Per-module dependencies the router mounts. */
 export interface RouterDeps {
   readonly tenancy: TenancyDeps;
   readonly staffGrades: StaffGradeDeps;
@@ -189,17 +154,14 @@ export interface RouterDeps {
   readonly portalAccess: PortalAccessDeps;
   readonly portalInvites: PortalInviteDeps;
   readonly portalHome: PortalHomeDeps;
-  /** The firm's side of a client-directed ask, and the client's. Two handler
-   *  sets over ONE service — the rules about an ask are the same whoever is
-   *  looking, and only the scope the adapter opens differs. */
+  /** Firm and portal handlers share ONE ask service; only the adapter's scope differs. */
   readonly clientAsks: ClientAskDeps;
   readonly clientRequests: ClientRequestDeps;
   readonly portalAsks: PortalAskDeps;
   readonly portalLibrary: PortalLibraryDeps;
   readonly portalRequests: PortalRequestDeps;
-  /** Stopping the chaser on one client (T4.4). The SWEEP has no route — it is a
-   *  cron in the worker, and a "chase now" button would make the ledger's
-   *  SYSTEM actor a lie on some rows and not others. */
+  /** Stopping the chaser on one client (T4.4). The sweep has no route: it is a worker cron,
+   *  and a "chase now" button would make the ledger's SYSTEM actor untrue on some rows. */
   readonly chaser: ChaserDeps;
   readonly workItems: WorkItemDeps;
   readonly orchestrator: OrchestratorDeps;
@@ -257,9 +219,7 @@ export function buildRouter(
 ): OpenAPIHono<AppEnv> {
   const app = createOpenAPIApp();
 
-  // One place maps every thrown error to the envelope — and logs the ones that
-  // are unexpected (INTERNAL), so a 500 is never silent. A gRPC edge would have
-  // its own version of this and nothing inward would change.
+  // Every thrown error maps to the envelope here; INTERNAL is logged so a 500 is never silent.
   app.onError((err, c) => {
     const m = mapError(err);
     if (m.code === "INTERNAL") {
@@ -268,12 +228,7 @@ export function buildRouter(
     return c.json(toEnvelope(m), m.status);
   });
 
-  // An unknown path, in the SAME envelope as every other refusal.
-  //
-  // Hono's own 404 is `text/plain` with no CORS headers, so a browser client
-  // could not read it and a typed client could not parse it — the one response
-  // in the product that did not look like the product. Registered here rather
-  // than per-module because nobody owns a path that does not exist.
+  // Unknown path, in the same envelope: Hono's own 404 is text/plain with no CORS headers.
   app.notFound((c) =>
     c.json(
       toEnvelope({ status: 404, code: "NOT_FOUND", message: "no such endpoint" }),
@@ -281,31 +236,17 @@ export function buildRouter(
     ),
   );
 
-  // SECURITY HEADERS on every response, ops routes included.
-  //
-  // This is a JSON API and never a rendered page, so most of what a browser
-  // could be told is irrelevant — except for two things it genuinely does with
-  // these bytes. `nosniff` matters because document downloads echo an
-  // uploader-supplied media type, and without it a browser may sniff an
-  // uploaded file into script. `frame-ancestors 'none'` and X-Frame-Options
-  // matter because /docs is a real page. The referrer policy keeps a token
-  // that rode in a URL from travelling on in a Referer header.
-  //
-  // HSTS is set only in production-like: a Strict-Transport-Security header on
-  // http://localhost pins the developer's browser to https for the whole host
-  // and breaks every other local service on it.
+  // Security headers on every response. `nosniff`: downloads echo an uploader-supplied media
+  // type. frame-ancestors/X-Frame-Options: /docs is a real page. no-referrer: a token in a URL
+  // must not travel on. HSTS only in production-like (see hstsEnabled).
   app.use(
     "*",
     secureHeaders({
       contentSecurityPolicy: {
         defaultSrc: ["'none'"],
         frameAncestors: ["'none'"],
-        // Swagger UI, when it is served, loads its bundle and styles from
-        // jsDelivr and runs an inline bootstrap — that is what @hono/swagger-ui
-        // renders, and naming the host it actually uses is the difference
-        // between a policy and a blank page. Everything here is behind
-        // `docsEnabled`, which is off in every production-like environment, so
-        // the policy a public deployment sends is the strict one below.
+        // Swagger UI loads from jsDelivr with an inline bootstrap. Only when docsEnabled,
+        // which is off in production-like, so a public deployment sends the strict policy.
         scriptSrc: opts.docsEnabled
           ? ["'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net"]
           : ["'none'"],
@@ -320,87 +261,44 @@ export function buildRouter(
       strictTransportSecurity: opts.hstsEnabled
         ? "max-age=31536000; includeSubDomains"
         : false,
-      // The default sends `require-corp`, which would refuse the cross-origin
-      // fetches this whole API exists to answer.
+      // The default `require-corp` would refuse the cross-origin fetches this API serves.
       crossOriginEmbedderPolicy: false,
       crossOriginResourcePolicy: "cross-origin",
     }),
   );
 
-  // Ops — always auth-free. Deliberately mounted BEFORE the guards: a load
-  // balancer cannot hold a credential, and neither endpoint reveals anything
-  // beyond which commit is running.
-  //
-  // /health SAYS WHICH BUILD IS LIVE (V0.2): the commit and the build time the
-  // image was stamped with, or null for an unstamped one. Nobody could tell
-  // which build QA ran, or whether a migration had gone out, without asking the
-  // person who deployed it. It is in the OpenAPI spec, unlike /ready, because a
-  // staff screen reads it through the generated client; and it gets its own
-  // CORS for that reason, with the product surface's exact origin list.
+  // Ops, auth-free and before the guards: a load balancer holds no credential. /health names
+  // the live build (V0.2) and, unlike /ready, is in the spec with its own CORS because a staff
+  // screen reads it through the generated client.
   app.use("/health", cors({ origin: [...opts.corsOrigins], credentials: true }));
   app.openapi(healthRoute, (c) =>
     c.json({ status: "ok" as const, commit: opts.build.commit, builtAt: opts.build.builtAt }, 200),
   );
   app.get("/ready", (c) => c.json({ status: "ready" }));
 
-  // CORS, first of all, and only on the product surface.
-  //
-  // The frontend is a separate app on a separate origin, so without this a
-  // browser discards every response before the page sees it — T1.8's whole
-  // acceptance ("calls a real endpoint through the generated client") is
-  // unreachable until these headers exist.
-  //
-  // Mounted ahead of the rate limiter on purpose: a browser sends a preflight
-  // OPTIONS before each credentialed request, and cors() answers it and stops.
-  // Behind the limiter, every login would cost TWO of the ten attempts a minute
-  // and the tight auth bucket would bite at five real sign-ins.
-  //
-  // Exact origins only, never a reflection of whatever Origin arrived. With
-  // credentials: true, reflecting the origin lets any site on the internet make
-  // authenticated requests with the user's cookie and read the replies.
-  //
-  // /internal gets NO CORS, deliberately: it is service-to-service and no
-  // browser should reach it. Its preflight 404s, which is the correct answer.
+  // CORS on the product surface only; the frontend is another origin (T1.8). Ahead of the rate
+  // limiter: cors() answers the preflight, which would otherwise cost a second login attempt.
+  // Exact origins, never reflected: with credentials, reflection lets any site read replies.
+  // /internal gets none; its preflight 404s, which is correct.
   app.use(
     "/api/v1/*",
     cors({
       origin: [...opts.corsOrigins],
       credentials: true,
-      // EVERY method any registered route actually uses. A method missing here
-      // is the worst kind of failure: the browser discards the response before
-      // either app sees it, with no server log and no error the API could have
-      // returned — so it looks like the endpoint is broken rather than like a
-      // header is short.
-      //
-      // PATCH was missing until T3.1 added the first routes that use it, and it
-      // was found by clicking a checkbox on a screen, not by any test.
-      // `tests/api/cors-methods.test.ts` now reads the registered routes and
-      // fails if this list falls behind them again.
+      // Every method a registered route uses: a missing one fails silently in the browser.
+      // `tests/api/cors-methods.test.ts` fails if this falls behind the routes.
       allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
       allowHeaders: ["Content-Type", "Authorization"],
-      // Readable by the workspace, which waits this long before asking again
-      // when the API is busy (429) instead of treating it as signed out (F15).
+      // The workspace waits this long on a 429 instead of treating it as signed out (F15).
       exposeHeaders: ["Retry-After"],
       maxAge: 600,
     }),
   );
 
-  // BODY LIMITS, before anything reads a body.
-  //
-  // Hono has no default: without this every route buffers whatever arrives, and
-  // an unauthenticated caller could hand the login route thirty megabytes and
-  // have the server scrypt-hash all of it. Mounted ahead of the guards for the
-  // same reason the rate limiter is — the cost of a huge body is paid on the
-  // way IN, before anything knows who is calling.
-  //
-  // Two sizes, because the product has two kinds of request. Everything that
-  // carries JSON is a form somebody filled in and fits in a fraction of a
-  // megabyte; the three multipart routes carry a scanned PDF and are the reason
-  // BIB_MAX_UPLOAD_BYTES exists. The upload limit is the CONFIGURED one plus a
-  // small allowance for the multipart envelope, so the edge refuses a file that
-  // is genuinely over budget and never one the service would have accepted.
-  // Typed to THIS app's env. `bodyLimit` is declared over an untyped one, and
-  // handing it a typed context without saying so is an unsafe-argument error.
+  // Body limits before anything reads a body or knows the caller: Hono has none by default, so
+  // an anonymous caller could make login scrypt-hash 30 MB. JSON forms get MAX_JSON_BODY_BYTES;
+  // upload routes get the configured limit plus the envelope, so the edge never refuses a file
+  // the service would accept. Typed to AppEnv: `bodyLimit` is declared over an untyped env.
   const uploadLimit: MiddlewareHandler<AppEnv> = bodyLimit({
     maxSize: opts.maxUploadBytes + MULTIPART_OVERHEAD_BYTES,
     onError: (c) =>
@@ -425,51 +323,30 @@ export function buildRouter(
         413,
       ),
   });
-  // Named and annotated rather than inline: an inline handler is inferred from
-  // `app.use`'s overload with an untyped Input, and handing THAT context to
-  // another middleware is an unsafe argument. One annotation settles both.
+  // Annotated, not inline: an inline handler infers an untyped Input (unsafe-argument).
   const limitBody: MiddlewareHandler<AppEnv> = async (c, next) =>
     isUploadPath(c.req.path) ? uploadLimit(c, next) : jsonLimit(c, next);
   app.use("*", limitBody);
 
-  // And a ceiling on any ONE string inside a body that is itself within the
-  // limit. See bounds.ts: the body limit stops a caller sending a megabyte, this
-  // stops them spending the whole allowance on a single stored field.
+  // A ceiling on any ONE string inside an in-limit body (see bounds.ts).
   app.use("*", boundedStrings());
 
-  // CSRF, the half that does not depend on the cookie's SameSite. See origin.ts.
-  // Only on the product surface: /internal is service-to-service and no browser
-  // reaches it, so it has no origin to check.
+  // CSRF, the half that does not rely on SameSite (see origin.ts). /internal has no browser.
   app.use("/api/v1/*", originGuard(opts.corsOrigins));
 
-  // RATE LIMITING, before anything else that costs something. It runs ahead of
-  // the guards so an unauthenticated flood is refused at the cheapest possible
-  // point — on the login route in particular, reaching the handler means
-  // spending ~32 MB and ~50 ms of scrypt on a caller who has proved nothing.
-  //
-  // The tight bucket covers exactly the routes that are reachable without
-  // credentials, which is the same list the session guard exempts. Deriving it
-  // from PUBLIC_PATHS rather than restating it means the two cannot drift.
+  // Rate limiting ahead of the guards: reaching login costs ~32 MB and ~50 ms of scrypt. The
+  // tight bucket is derived from PUBLIC_PATHS, the session guard's exemptions, so they agree.
   app.use("*", rateLimit(opts.rateLimiter, opts.rateLimit, PUBLIC_PATHS));
 
-  // AUTHENTICATION, BY PREFIX. These two lines cover every route below them —
-  // including routes nobody has written yet, which is the point. A per-handler
-  // check is a thing a new file can forget; a prefix guard is not.
-  //
-  // They run before request validation, so an unauthenticated call gets 401
-  // rather than a 400 that tells an anonymous caller about the request shape.
+  // Authentication by prefix, so a route nobody has written yet is covered too. Before
+  // validation: an anonymous call gets 401, not a 400 that reveals the request shape.
   app.use("/internal/*", internalGuard(opts.internalClients));
   app.use("/api/v1/*", sessionGuard(opts.principalOf));
-  // The general budget for a SIGNED-IN request is the session's, not the
-  // office's address (audit 2026-10-03, B28). Straight after the guard, so the
-  // principal it counts against is the one the guard just resolved.
+  // A signed-in request's budget is per session, not per office IP (audit 2026-10-03, B28).
   app.use("/api/v1/*", sessionRateLimit(opts.rateLimiter, opts.rateLimit));
-  // Gate 3 rides behind the session guard: by here the caller is authenticated
-  // and their audience is settled, so the only question left is whether their
-  // ROLE carries what this route needs.
+  // Gate 3 (role), once the caller and audience are settled.
   app.use("/api/v1/*", permissionGuard(opts.authz));
 
-  // App + platform routes, one registrar per module.
   registerAuthRoutes(app, deps.auth);
   registerTenancyRoutes(app, deps.tenancy);
   registerStaffGradeRoutes(app, deps.staffGrades);
@@ -506,7 +383,7 @@ export function buildRouter(
   registerClientMailRoutes(app, deps.clientMail);
   registerFxRoutes(app, deps.fx);
 
-  // Docs are generated FROM the routes above, so this must come after them.
+  // Docs are generated from the routes above, so this comes after them.
   if (opts.docsEnabled) {
     app.doc("/openapi.json", {
       openapi: "3.0.0",

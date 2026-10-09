@@ -1,17 +1,10 @@
-// The seams identity needs. Note what is a port and what is not: the POLICY
-// (how long a session lives, what makes a password acceptable) is domain, and
-// the MECHANISM (how bytes are hashed, how randomness is drawn, how an email
-// leaves the building) is a port — because each of those is a platform
-// decision we expect to change without the login flow noticing.
+// Identity's seams. POLICY (session life, password rules) is domain; MECHANISM (hashing, randomness,
+// sending mail) is a port, since each is a platform choice that may change under the login flow.
 import type { Membership, UserAccount } from "../../domain/tenancy/model";
 import type { MagicLink, MagicLinkPurpose, Session } from "../../domain/identity/model";
 import type { ClientSender } from "../../domain/mail/model";
 
-// ── Directory: the narrow slice of tenancy identity needs ────────────────────
-// Stated as its own interfaces rather than importing tenancy's ports: this use
-// case reads users and memberships and never creates them, and a port should
-// describe what its owner needs, not what its implementer happens to offer.
-// The existing tenancy adapters satisfy these as they stand.
+// Directory: the narrow slice of tenancy identity reads (never creates); tenancy's adapters satisfy it.
 
 export interface UserDirectory {
   findByEmail(email: string): Promise<UserAccount | null>;
@@ -19,32 +12,18 @@ export interface UserDirectory {
 }
 
 export interface MembershipDirectory {
-  /** Every membership of a user, across tenants — read under the identity RLS
-   *  context, never a tenant bypass. */
+  /** Every membership of a user across tenants, read under the identity RLS context, never a bypass. */
   listByUser(userId: string): Promise<Membership[]>;
 }
 
 /**
- * Whether a FIRM is still open for business.
- *
- * `tenancy.tenant.status` has existed since 0001 and, until now, had no reader
- * anywhere: suspending a firm changed a string in a row and nothing else, so a
- * suspended firm kept working exactly as before. That is worse than not having
- * the column — an operator suspends a tenant, sees the status change, and
- * believes something happened.
- *
- * Declared in identity's own words because this is the module that decides
- * whether a request has a tenant context at all; the tenancy repository
- * satisfies it. `tenancy.tenant` is GLOBAL and carries no RLS, so this is a
- * primary-key read on a small table and costs a fraction of a millisecond.
+ * Whether a FIRM is still open. `tenancy.tenant.status` (0001) had no reader, so a suspended firm kept
+ * working while the operator believed it was stopped. `tenancy.tenant` is GLOBAL (no RLS): a cheap PK read.
  */
 export interface TenantStanding {
-  /** False when the firm is suspended, and when it does not exist at all —
-   *  which are different facts with the same consequence here. */
+  /** False when the firm is suspended or does not exist: different facts, same consequence here. */
   isOpen(tenantId: string): Promise<boolean>;
 }
-
-// ── Credentials ──────────────────────────────────────────────────────────────
 
 export interface CredentialRepository {
   findByUserId(userId: string): Promise<{ readonly passwordHash: string } | null>;
@@ -54,31 +33,20 @@ export interface CredentialRepository {
 
 export interface PasswordHasher {
   hash(plain: string): Promise<string>;
-  /** Constant-time where the algorithm allows it. Never throws on a malformed
-   *  stored hash — it returns false, so a corrupt row denies access rather than
-   *  crashing the login route. */
+  /** Constant-time where possible. Never throws on a malformed stored hash: returns false, so a corrupt
+   *  row denies access rather than crashing login. */
   verify(plain: string, encoded: string): Promise<boolean>;
-  /**
-   * A syntactically valid hash that matches nothing.
-   *
-   * The login path verifies against this when the email is unknown, so an
-   * unknown address costs the same milliseconds as a known one. Without it the
-   * endpoint answers "does this person bank with you?" by response time alone.
-   */
+  /** A valid hash that matches nothing. Login verifies against it for an unknown email, so response time
+   *  does not reveal whether the address has an account. */
   dummyHash(): string;
 }
 
-// ── Tokens ───────────────────────────────────────────────────────────────────
-
 export interface TokenFactory {
-  /** A fresh, high-entropy, url-safe bearer token. This value is handed to the
-   *  client and never stored. */
+  /** A fresh, high-entropy, url-safe bearer token, handed to the client and never stored. */
   newToken(): string;
   /** The digest actually stored, so a database dump yields nothing usable. */
   hash(token: string): string;
 }
-
-// ── Sessions and magic links ─────────────────────────────────────────────────
 
 export interface NewSession {
   readonly id: string;
@@ -98,30 +66,19 @@ export interface SessionRepository {
     tenantId: string,
     audience: NonNullable<Session["activeAudience"]>,
   ): Promise<Session>;
-  /** Revocation is an UPDATE, not a DELETE: the fact that a session existed and
-   *  when it ended is itself worth keeping. */
+  /** An UPDATE, not a DELETE: that the session existed and when it ended is worth keeping. */
   revoke(sessionId: string, at: string): Promise<void>;
   /** Every session of one user — a password change, or "log me out everywhere". */
   revokeAllForUser(userId: string, at: string): Promise<number>;
   /**
-   * Record that this session was just used — the IDLE clock's write.
-   *
-   * Called only when the stored value is already stale (`shouldTouch`), so this
-   * is one write per session per few minutes rather than one per request. It
-   * returns nothing and its failure is not the caller's problem: a touch that
-   * does not land costs the session a few minutes of its idle budget, and
-   * failing the REQUEST over it would turn a bookkeeping write into an outage.
+   * The IDLE clock's write, called only when stale (`shouldTouch`), so one write per few minutes.
+   * Its failure is not the caller's: a lost touch costs minutes of idle budget; failing the request
+   * would turn bookkeeping into an outage.
    */
   touch(sessionId: string, at: string): Promise<void>;
   /**
-   * Delete sessions and links that are already dead — expired, revoked or
-   * spent, and old enough that nobody is going to ask about them.
-   *
-   * The one place in this schema with a DELETE grant, and migration 0075 says
-   * why: these rows are CREDENTIALS, not records. The trail of who signed in and
-   * when is `ledger.event`, which has no DELETE grant and never will.
-   *
-   * Returns how many of each went, so the sweep can say what it did.
+   * Delete dead sessions and links (expired, revoked or spent, and old). The schema's one DELETE grant
+   * (0075): these rows are CREDENTIALS, not records; the sign-in trail is `ledger.event`. Returns counts.
    */
   purgeExpired(before: string): Promise<{ readonly sessions: number; readonly magicLinks: number }>;
 }
@@ -137,73 +94,43 @@ export interface NewMagicLink {
 export interface MagicLinkRepository {
   create(m: NewMagicLink): Promise<MagicLink>;
   findByTokenHash(tokenHash: string): Promise<MagicLink | null>;
-  /**
-   * Marks the link used and reports whether THIS call was the one that did it.
-   * False means someone else consumed it first: the check and the write are one
-   * conditional UPDATE, so two simultaneous clicks cannot both open a session.
-   */
+  /** Marks the link used; true only if THIS call did it. One conditional UPDATE, so two simultaneous
+   *  clicks cannot both open a session. */
   consume(id: string, at: string): Promise<boolean>;
 
   /**
-   * Spend every unused, unexpired link of one purpose for one user, and say how
-   * many were spent.
-   *
-   * ── WHY ISSUING A LINK MUST KILL THE ONES BEFORE IT ─────────────────────
-   *
-   * An `invite` link is redeemed by SETTING A PASSWORD. One still live after
-   * the contact has set theirs is therefore a password reset sitting in an
-   * inbox for a week (`PORTAL_INVITE_TTL_DAYS`), and the resend route is what makes
-   * several of them exist at once. Superseding is the standard shape for a
-   * re-issued invitation and it is what makes the route safe to offer at all.
-   *
-   * Marked CONSUMED rather than deleted, for the same reason `revoke` on a
-   * session is an update: that a link was issued and when it stopped being
-   * usable is itself worth keeping, and `bib_app` holds no DELETE grant here.
+   * Spend every unused, unexpired link of one purpose for one user; returns how many. An `invite` still
+   * live after a password is set is a week-long password reset in an inbox (`PORTAL_INVITE_TTL_DAYS`),
+   * and resend creates several, so issuing must supersede. Marked CONSUMED, not deleted: the history is
+   * worth keeping and `bib_app` holds no DELETE grant here.
    */
   consumeUnusedFor(userId: string, purpose: MagicLinkPurpose, at: string): Promise<number>;
 }
 
-// ── Notifications ────────────────────────────────────────────────────────────
-
 export interface Mailer {
-  /** Sends the sign-in link. The use case decides WHAT is sent and to whom; the
-   *  adapter decides how it looks and which vendor carries it. */
+  /** The sign-in link. The use case decides what and to whom; the adapter, the look and vendor. */
   sendMagicLink(to: string, url: string, expiresAt: string): Promise<void>;
 
   /**
-   * Sends a client contact their invitation to the portal.
-   *
-   * A SEPARATE method rather than a flag on the one above, because the two
-   * letters say different things to different people: one is "here is the link
-   * you just asked for", the other arrives unasked, from a firm the reader may
-   * not be expecting mail from, and has to name that firm or it reads as
-   * phishing. `firmName` exists for exactly that sentence.
+   * A client contact's portal invitation. Its own method: it arrives unasked from a firm the reader may
+   * not expect, so it must name the firm (`firmName`) or it reads as phishing.
    */
   sendPortalInvite(
     to: string,
     url: string,
     expiresAt: string,
     firmName: string | null,
-    /** The firm's zone, so the expiry reads on the firm's clock (CA#50).
-     *  Absent or null: UTC, named. */
+    /** The firm's zone, so the expiry reads on the firm's clock (CA#50). Absent or null: UTC, named. */
     timeZone?: string | null,
-    /** The client's Key Manager (Q059): the letter is from them by name, a
-     *  reply reaches them, and their own address is the From when the firm
-     *  listed its domain. Absent or null: from the firm, as before. */
+    /** The client's Key Manager (Q059): letter from them by name, replies reach them, their address is
+     *  the From when the firm listed its domain. Absent or null: from the firm. */
     sender?: ClientSender | null,
   ): Promise<void>;
 
   /**
-   * Sends a new colleague the letter that tells them the account exists.
-   *
-   * A THIRD letter, for the same reason the second one is not a flag on the
-   * first: this one is pushed at somebody who did not ask, like the portal
-   * invite, and so it has to name the firm or it reads as phishing — but it
-   * goes to a COLLEAGUE, not a client, and what it hands over is a session
-   * rather than a password form. Neither of the other two says the right thing.
-   *
-   * `firmName` is nullable for the same reason as above: a tenant row that does
-   * not resolve degrades the wording rather than trapping somebody outside.
+   * A new colleague's welcome. Pushed unasked like the portal invite, so it names the firm, but it goes
+   * to a COLLEAGUE and hands over a session, not a password form. `firmName` null (tenant row did not
+   * resolve) degrades the wording rather than locking somebody out.
    */
   sendStaffWelcome(
     to: string,
@@ -215,21 +142,9 @@ export interface Mailer {
   ): Promise<void>;
 
   /**
-   * Sends a client contact who ALREADY HAS A LOGIN their way into the portal.
-   *
-   * A FOURTH letter, and the reason it exists is a security bug rather than a
-   * wording preference. Accounts in this product are global (ADR-02): one
-   * person, one login, however many firms they deal with. So a firm can invite
-   * somebody who is already staff somewhere else, or already a client contact
-   * at another firm — and the ordinary invitation is a link on which a password
-   * is CHOSEN, which would have overwritten the password they already had and
-   * signed them out of everything.
-   *
-   * This letter carries a single-use SIGN-IN link instead. Same firm-naming,
-   * same expiry, same "if you were not expecting this" paragraph — the only
-   * difference is that it hands over a session rather than a password form,
-   * because the reader already has a password and it is none of this firm's
-   * business.
+   * A portal way-in for a contact who ALREADY HAS A LOGIN. Accounts are global (ADR-02), so the ordinary
+   * invite (a password is CHOSEN) would overwrite their existing password and sign them out everywhere.
+   * This carries a single-use SIGN-IN link instead; same firm-naming, expiry and "not expecting this" text.
    */
   sendPortalWelcome(
     to: string,
@@ -242,37 +157,18 @@ export interface Mailer {
   ): Promise<void>;
 
   /**
-   * Sends somebody the link that replaces a password they have forgotten.
-   *
-   * ── WHY IT IS A FIFTH METHOD AND NOT `sendMagicLink` WITH ANOTHER URL ────
-   *
-   * Because the letter has to say what the link DOES, and these two do opposite
-   * things. A sign-in link's letter closes with *"if you did not ask for this,
-   * nothing has happened and you can ignore this message"* — true, and exactly
-   * the wrong thing to tell somebody holding a link that REPLACES their
-   * credential. A reader who has been sent an unrequested reset needs to know
-   * that the password still works until the link is used, and that ignoring the
-   * letter is what keeps it that way.
-   *
-   * ── AND WHY IT TAKES NO `firmName` WHEN THREE OF ITS NEIGHBOURS DO ───────
-   *
-   * The other three arrive UNASKED, from a firm the reader may not be expecting
-   * mail from, so naming that firm is what stops them reading as phishing. This
-   * one is pulled: somebody typed their address into a form seconds ago and is
-   * watching for it. And the account is GLOBAL (ADR-02) — one login, however
-   * many firms — so there is no single firm this letter could honestly name,
-   * and picking one of them would tell the reader something false about which
-   * password they are resetting.
+   * The forgotten-password link. Not `sendMagicLink`: the letter must say the password still works until
+   * the link is used and that ignoring it keeps it so (a sign-in letter's "nothing has happened" is wrong
+   * here). No `firmName`: it is pulled, not unasked, and the account is GLOBAL (ADR-02), so no single
+   * firm could honestly be named.
    */
   sendPasswordReset(to: string, url: string, expiresAt: string): Promise<void>;
 }
 
 /** What else the staff welcome says (audit 2026-10-03). */
 export interface StaffWelcomeExtras {
-  /** The name of the colleague who added them, so the letter can say who
-   *  rather than "somebody there" (CA#50). Null when they have no name yet. */
+  /** Who added them, so the letter names a person (CA#50). Null when they have no name yet. */
   readonly addedBy?: string | null | undefined;
-  /** The account has no password, and the link opens the page that chooses
-   *  the first one (CA#38). False: the link only signs them in. */
+  /** No password yet: the link opens the first-password page (CA#38). False: it only signs them in. */
   readonly choosePassword?: boolean | undefined;
 }

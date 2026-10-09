@@ -1,26 +1,11 @@
-// What a document LOOKS LIKE, described without saying anything about PDFs
-// (T3.8). Pure — stdlib only.
-//
-// THIS TYPE IS THE WHOLE POINT OF THE TASK'S DECOMPOSITION. The renderer must
-// not read the database and the modules that hold the data must not know what a
-// PDF is, so they meet here: engagement letters and invoicing each build a
-// `RenderableDocument`, and one renderer turns it into bytes.
-//
-// The alternative — a renderer holding repositories — was considered and is
-// worse in a specific way rather than merely inelegant: it would duplicate read
-// logic that already exists in two services, and the duplicate would be the one
-// that drifts, because nothing renders often enough for anyone to notice.
-//
-// ── WHAT IS DELIBERATELY NOT HERE ──────────────────────────────────────────
-//
-// No fonts, no colours, no margins, no page size. Those are the RENDERER's, and
-// putting them here would mean a firm's engagement letter module had opinions
-// about typography. What is here is the document's STRUCTURE — what it says and
-// in what order — which is the part the business owns.
+// What a document looks like, with nothing about PDFs (T3.8). Pure, stdlib only.
+// Letters and invoicing each build a `RenderableDocument`; one renderer turns it into bytes.
+// The renderer reads no database (a renderer holding repositories would duplicate two
+// services' read logic, and the copy would drift unseen). Fonts, colours, margins and page
+// size are the renderer's; this is only the STRUCTURE the business owns.
 
-/** A block of the firm's own prose. Line breaks inside a paragraph are the
- *  firm's and are preserved: "under 1,000 entries; under 8 bank accounts" is
- *  what protects the firm in a dispute (G1.7). */
+/** The firm's prose. Its line breaks are preserved: "under 1,000 entries; under 8 bank
+ *  accounts" is what protects the firm in a dispute (G1.7). */
 export interface Section {
   readonly heading: string | null;
   readonly paragraphs: readonly string[];
@@ -31,51 +16,35 @@ export type Align = "left" | "right";
 export interface Column {
   readonly label: string;
   readonly align: Align;
-  /** Share of the table's width, as a weight. Normalised by the renderer, so
-   *  these are proportions and not points — the business does not know how wide
-   *  the page is. */
+  /** A width weight, normalised by the renderer: proportions, not points. */
   readonly weight: number;
 }
 
 export interface LineTable {
   readonly columns: readonly Column[];
-  /** Already formatted. Money arrives as a decimal STRING the caller has
-   *  formatted, because the renderer must never turn an amount into a number
-   *  and the caller is the only thing that knows the currency. */
+  /** Already formatted. Money is a decimal STRING the caller formatted: the renderer
+   *  never makes an amount a number, and only the caller knows the currency. */
   readonly rows: readonly (readonly string[])[];
-  /** Which piece of the record each row prints, by the same position as
-   *  `rows` — see `Anchor`. Never drawn. */
+  /** Per-row `Anchor`, by position in `rows`. Never drawn. */
   readonly rowAnchors?: readonly (Anchor | null)[] | undefined;
-  /**
-   * Kept on ONE page when it fits on one (CA#60, audit 2026-10-03): a Summary
-   * of Fees that would start at the foot of a page with one row on it starts
-   * on the next page instead. A table longer than a page still breaks, with
-   * its header repeated. Absent, the table breaks wherever the page ends, as
-   * every document already out was drawn.
-   */
+  /** Keep on one page when it fits (CA#60, audit 2026-10-03), so a Summary of Fees never
+   *  starts with one row at a page foot. Longer tables still break, header repeated.
+   *  Absent: breaks wherever the page ends, as every document already out was drawn. */
   readonly keepTogether?: boolean | undefined;
-  /** How many lines of the flow after the table to keep with it (the total
-   *  under a Summary of Fees). Only with `keepTogether`. */
+  /** Lines of following flow kept with the table (the Summary of Fees total). Only with `keepTogether`. */
   readonly keepWithNextLines?: number | undefined;
 }
 
 /**
- * WHICH PIECE OF THE RECORD a drawn thing prints — `proposal.background`,
- * `line:<id>.scope`, `block:<id>`, `fee:line:<id>` — so a screen showing the
- * PDF can say where on the page that piece sits, and open its editor there.
- *
- * NEVER DRAWN, and that is the whole contract. The renderer reports where it
- * drew an anchored piece only when asked (`renderWithAnchors`), as a side
- * output of the same pass; the bytes are the same either way, which a test
- * proves by hash. An anchor is a key a screen understands, not a word on paper.
+ * Which piece of the record a drawn thing prints (`proposal.background`, `line:<id>.scope`,
+ * `block:<id>`, `fee:line:<id>`), so a screen can locate it on the PDF and open its editor.
+ * NEVER DRAWN: `renderWithAnchors` reports positions as a side output of the same pass, and
+ * a test proves by hash the bytes are identical either way.
  */
 export type Anchor = string;
 
-/**
- * Where an anchored piece was drawn: one rectangle per page it touched, in
- * PDF points from the page's TOP-LEFT corner (the way a screen measures), the
- * union of every line of text drawn for it on that page. `page` counts from 1.
- */
+/** One rectangle per page an anchored piece touched, in PDF points from the page's
+ *  TOP-LEFT (as a screen measures), the union of its text lines. `page` counts from 1. */
 export interface PlacedAnchor {
   readonly key: Anchor;
   readonly page: number;
@@ -100,103 +69,66 @@ export interface TotalRow {
 
 export interface RenderableParty {
   readonly name: string;
-  /** Address, registration number, GSTIN — whatever the document should show
-   *  under the name. Each on its own line, in the order given. */
+  /** Address, registration number, GSTIN: one per line, in the order given. */
   readonly lines: readonly string[];
 }
 
-/** A raster image the document carries — the firm's logo or a signature. */
+/** A raster image the document carries: the firm's logo or a signature. */
 export interface RenderableImage {
   readonly bytes: Uint8Array;
-  /** Only what the renderer can actually decode. Anything else is refused by
-   *  the caller rather than silently dropped. */
+  /** Only what the renderer can decode; the caller refuses anything else, never drops it silently. */
   readonly mediaType: "image/png" | "image/jpeg";
 }
 
-/**
- * What the renderer can actually embed, as a list rather than as two string
- * comparisons repeated in three files.
- *
- * Exported because the DOOR needs it: a logo or a signature is refused at upload
- * against this, so the person who chose the file is the one told about it. Keep
- * it and `RenderableImage["mediaType"]` in step — the type is what the renderer
- * is held to, and this is the same statement in a form a caller can check.
- */
+/** What the renderer can embed. Exported so upload refuses a logo or signature at the door,
+ *  telling the person who chose it. Keep in step with `RenderableImage["mediaType"]`. */
 export const DRAWABLE_IMAGE_MEDIA_TYPES: readonly RenderableImage["mediaType"][] = [
   "image/png",
   "image/jpeg",
 ];
 
-/** Whether the renderer could draw bytes of this type — the guard the upload
- *  path and the render source both ask, so they cannot drift apart. */
+/** The one guard both the upload path and the render source ask, so they cannot drift. */
 export function isDrawableImage(mediaType: string): mediaType is RenderableImage["mediaType"] {
   return (DRAWABLE_IMAGE_MEDIA_TYPES as readonly string[]).includes(mediaType);
 }
 
 /**
- * Where an e-signature provider puts the client's signature and the date.
- *
- * DocuSign places a field by searching the PDF's TEXT for a string (an anchor),
- * so the renderer prints these in the page colour where the signature goes.
- * Invisible on paper, found by the provider. Declared here, in the one module
- * both the letter's render source and the DocuSign adapter import, so the
- * string printed and the string searched for are the same constant — a
- * mismatch would send the client an envelope with nowhere to sign.
- *
- * Deliberately text no letter would ever contain: the provider places a field
- * at EVERY match, and a real sentence matching would put a signature box in
- * the middle of a clause.
+ * Where the e-sign provider puts the client's signature and date. DocuSign places a field
+ * by searching the PDF's TEXT, so the renderer prints these in the page colour (invisible).
+ * One constant shared by the letter's render source and the DocuSign adapter: a mismatch
+ * sends an envelope with nowhere to sign. Text no letter contains, because a field lands
+ * at EVERY match.
  */
 export const CLIENT_SIGN_ANCHOR = "/bib-client-sign/";
 export const CLIENT_DATE_ANCHOR = "/bib-client-date/";
 
-/**
- * One party's signature block: who signs for whom, and what goes under the
- * line. A letter carries the firm's (snapshotted when it was sent) and the
- * client's.
- */
+/** One party's signature block. A letter carries the firm's (snapshotted at send) and the client's. */
 export interface SignatureBlock {
   /** "For Cobalt Foods Private Limited". */
   readonly heading: string;
-  /** Printed under the signature line — a name, a capacity. */
+  /** Printed under the signature line: a name, a capacity. */
   readonly lines: readonly string[];
   /**
-   * The mark drawn ON the signature line — the firm's signature image.
-   *
-   * ON THE BLOCK AND NOT ON THE DOCUMENT, deliberately. A document-level
-   * `signature` field beside `logo` would be reachable from either block, and
-   * the block it must never reach is the CLIENT's: drawing a mark on the line a
-   * client has not signed is forgery, and the provider stamps that line itself.
-   * Here the type says which half may carry one, so the answer cannot be got
-   * wrong by a later edit to the render source.
-   *
-   * Null is ordinary — a firm that has uploaded no signature, and every letter
-   * issued before the mark was pinned, get the bare rule they already had.
+   * The firm's signature image drawn ON the line. On the block, not the document, so the
+   * type keeps it off the CLIENT's block: a mark on a line the client has not signed is
+   * forgery, and the provider stamps that line itself. Null is ordinary (no upload, or a
+   * letter issued before the mark was pinned): the bare rule.
    */
   readonly image?: RenderableImage | null | undefined;
-  /** Invisible text on the signature line, for a provider to find. Null on a
-   *  block nobody will sign electronically — the firm's, which it signed by
-   *  sending. */
+  /** Invisible text on the line for a provider to find. Null on the firm's block (signed by sending). */
   readonly signAnchor: string | null;
   /** The same, beside "Date". */
   readonly dateAnchor: string | null;
 }
 
-// ── The Annexure letter (0083) ───────────────────────────────────────────────
-//
-// The firm's own engagement-letter format: a cover letter on page one, then
-// Annexure 1 (scope, deliverables and fees) and Annexure 2 (the terms), each on
-// a page of its own. Still STRUCTURE only — which headings, which paragraphs, in
-// what order — and nothing about how big anything is.
+// The Annexure letter (0083): a cover letter on page one, then Annexure 1 (scope,
+// deliverables and fees) and Annexure 2 (the terms), each on its own page. Structure only.
 
 /**
- * One piece of an annexure's running text, drawn in order.
- *
- * A heading's LEVEL is its place in the document's outline — 1 is a section of
- * an annexure ("B. Ongoing recurring services"), 2 is one service inside it
- * ("B1. Accounting / CAS"), 3 is a labelled part of one ("Exclusions") — never a
- * size. A paragraph keeps the firm's own line breaks, and a line that starts
- * with "- ", "• " or "* " is a bullet.
+ * One piece of an annexure's running text, in order. Heading LEVEL is outline, never size:
+ * 1 = an annexure section ("B. Ongoing recurring services"), 2 = a service ("B1. Accounting
+ * / CAS"), 3 = a labelled part ("Exclusions"). A paragraph keeps the firm's line breaks;
+ * a line starting "- ", "• " or "* " is a bullet.
  */
 export type Flow = (
   | { readonly kind: "heading"; readonly level: 1 | 2 | 3; readonly text: string }
@@ -204,17 +136,14 @@ export type Flow = (
       readonly kind: "paragraph";
       readonly text: string;
       readonly muted?: boolean | undefined;
-      /**
-       * A LABEL run into the paragraph's first line in the heading weight —
-       * the proposal's "Fees H3: INR 50,000 Yearly" (0084). A label and not a
-       * heading, because it is read as part of the sentence it starts.
-       */
+      /** A label run into the first line in heading weight, read as part of the sentence:
+       *  the proposal's "Fees H3: INR 50,000 Yearly" (0084). */
       readonly lead?: string | undefined;
     }
   | { readonly kind: "table"; readonly table: LineTable }
   | { readonly kind: "figures"; readonly rows: readonly TotalRow[] }
 ) & {
-  /** The piece of the record this prints, for a screen — never drawn. */
+  /** See `Anchor`. Never drawn. */
   readonly anchor?: Anchor | undefined;
 };
 
@@ -226,23 +155,22 @@ export interface Annexure {
   readonly flow: readonly Flow[];
 }
 
-/** Page one: a letter, from the firm to the client, with both signatures. */
+/** Page one: the firm's letter to the client, with both signatures. */
 export interface CoverLetter {
   readonly dateLine: string;
   /** The person, then the organization, one per line. */
   readonly addressee: readonly string[];
   readonly subject: string;
   readonly salutation: string;
-  /** The firm's own cover paragraphs. */
   readonly body: readonly Flow[];
   readonly closing: string;
   /** The firm's block, once the letter has gone out carrying one. */
   readonly firm: SignatureBlock | null;
   readonly acceptanceHeading: string;
-  /** What the client accepts under — the firm's own acceptance paragraphs. */
+  /** The firm's own acceptance paragraphs. */
   readonly acceptance: readonly Flow[];
   readonly client: SignatureBlock;
-  /** Which piece of the letter each head line prints — see `Anchor`. */
+  /** See `Anchor`. */
   readonly anchors?: {
     readonly date?: Anchor | undefined;
     readonly addressee?: Anchor | undefined;
@@ -256,13 +184,9 @@ export interface AnnexureLetter {
   readonly annexures: readonly Annexure[];
 }
 
-// ── The proposal (0084) ─────────────────────────────────────────────────────
-//
-// The firm's "Proposal For Services": a COVER — the firm's own artwork, full
-// page, with who it is prepared for and by printed over it — then the proposal
-// itself under the firm's logo. Still structure only: WHERE on the artwork the
-// two names go, how big anything is and what colour a heading takes are the
-// renderer's.
+// The proposal (0084), the firm's "Proposal For Services": a full-page artwork COVER with
+// prepared-for and prepared-by printed over it, then the proposal under the firm's logo.
+// Where the names sit, sizes and heading colours are the renderer's.
 
 /** One line of a name block on the cover. */
 export interface CoverLine {
@@ -272,22 +196,18 @@ export interface CoverLine {
 }
 
 export interface ProposalCover {
-  /**
-   * The issuing entity's cover artwork (brand asset `proposal_cover`), drawn
-   * over the whole first page. Null is ordinary — a firm that has uploaded
-   * none gets a plain cover the renderer draws, headed with `title`.
-   */
+  /** The issuing entity's brand asset `proposal_cover`, over the whole first page. Null is
+   *  ordinary: the renderer draws a plain cover headed with `title`. */
   readonly artwork: RenderableImage | null;
-  /** What a plain cover is headed — "Proposal for Services". The artwork
-   *  carries its own, so this prints only without one. */
+  /** "Proposal for Services"; printed only on a plain cover (artwork carries its own). */
   readonly title: string;
   /** Printed under the title on a plain cover: the proposal's own title. */
   readonly subtitle: string;
-  /** "Prepared for:" — the person, then the client. */
+  /** "Prepared for:" the person, then the client. */
   readonly preparedFor: readonly CoverLine[];
-  /** "Prepared by:" — the colleague, the firm's company, the email. */
+  /** "Prepared by:" the colleague, the firm's company, the email. */
   readonly preparedBy: readonly CoverLine[];
-  /** Which piece of the proposal each cover block prints — see `Anchor`. */
+  /** See `Anchor`. */
   readonly anchors?: {
     readonly subtitle?: Anchor | undefined;
     readonly preparedFor?: Anchor | undefined;
@@ -297,23 +217,19 @@ export interface ProposalCover {
 
 export interface ProposalDocument {
   readonly cover: ProposalCover;
-  /** The small line opposite the logo on every page after the cover — the
-   *  reference and the date, which is how a client refers to it. */
+  /** Opposite the logo on every page after the cover: the reference and the date. */
   readonly running: string;
   readonly flow: readonly Flow[];
-  /**
-   * The issuing company's letterhead (CA#18, audit 2026-10-03): its address,
-   * how to reach it and its registration numbers, at the foot of every page
-   * after the cover, one entry per line. Absent or empty, nothing is drawn.
-   */
+  /** The issuing company's letterhead (CA#18, audit 2026-10-03): address, contacts and
+   *  registration numbers at the foot of every page after the cover, one per line. Absent
+   *  or empty draws nothing. */
   readonly letterhead?: readonly string[] | undefined;
 }
 
-/** The block a GST invoice draws after its totals (Q056: drawn after the total in words). */
+/** What a GST invoice draws after its total in words (Q056). */
 export interface TaxInvoicePrint {
   /** "Tax amount in words": Indian Rupees One Thousand Eight Hundred Only. */
   readonly taxInWords: string | null;
-  /** The SAC-wise tax summary. */
   readonly summary: LineTable;
   /** Reverse charge, the LUT declaration, the tax in INR on a foreign invoice. */
   readonly declarations: readonly string[];
@@ -324,18 +240,13 @@ export interface TaxInvoicePrint {
 }
 
 export interface RenderableDocument {
-  /** "Engagement Letter", "Tax Invoice" — what the page is headed. */
+  /** "Engagement Letter", "Tax Invoice". */
   readonly documentTitle: string;
-  /** The firm's own reference. Printed prominently: it is how a client refers
-   *  to this document on the phone. */
+  /** Printed prominently: it is how a client refers to the document on the phone. */
   readonly reference: string;
-  /**
-   * Which copy this is, printed under the reference: "Original for recipient"
-   * on a GST tax invoice (Rule 48: a supply of services is invoiced in
-   * duplicate, the original marked for the recipient; the supplier's copy is
-   * the copy of record BiB keeps). Absent on every other document, whose
-   * bytes therefore do not move.
-   */
+  // Each optional field is absent on the documents that predate or lack it, so their bytes do not move.
+  /** Printed under the reference: "Original for recipient" on a GST tax invoice (Rule 48:
+   *  services are invoiced in duplicate; the supplier's copy is BiB's copy of record). */
   readonly copyMark?: string | undefined;
   readonly issuer: RenderableParty;
   readonly recipient: RenderableParty;
@@ -344,76 +255,42 @@ export interface RenderableDocument {
   readonly sections: readonly Section[];
   readonly table: LineTable | null;
   readonly totals: readonly TotalRow[];
-  /**
-   * The emphasised total in words, printed under the totals (B12 / CA#1, audit
-   * 2026-10-03): "Indian Rupees Five Thousand Nine Hundred Only". Absent on
-   * every document drawn before it, whose bytes therefore do not move.
-   */
+  /** The total in words under the totals (B12 / CA#1, audit 2026-10-03): "Indian Rupees
+   *  Five Thousand Nine Hundred Only". */
   readonly amountInWords?: string | undefined;
-  /**
-   * What a GST tax invoice prints after its total in words (Q056, S5): the tax
-   * in words, the SAC-wise tax summary, the reverse-charge and LUT
-   * declarations, the bank details and the signatory line. Absent on every
-   * other document, and on an invoice from before 0370 or a plain one, whose
-   * bytes therefore do not move.
-   */
+  /** A GST tax invoice's block after the total in words (Q056, S5): tax in words, SAC-wise
+   *  summary, reverse-charge and LUT declarations, bank details, signatory line. Absent on
+   *  a plain invoice and one from before 0370. */
   readonly taxInvoice?: TaxInvoicePrint | undefined;
   /**
-   * The agreement's TERMS — an engagement letter's pinned clauses.
-   *
-   * Separate from `sections` and not merged into it, because they print in a
-   * different PLACE: `sections` is the firm's prose about the work and runs
-   * before the fee table, and terms are what both sides are bound to, which on
-   * every engagement letter ever written comes after the commercials and
-   * immediately before the signatures. One array could not say both.
-   *
-   * Optional, so a document with no terms — an invoice — draws nothing here and
-   * its bytes do not move.
+   * An engagement letter's pinned clauses. Not merged into `sections` because they print
+   * elsewhere: `sections` (prose about the work) runs before the fee table; terms come after
+   * the commercials, immediately before the signatures. Absent on an invoice.
    */
   readonly terms?: readonly Section[] | undefined;
   readonly footer: string | null;
-  /** Signature blocks after the totals. Absent on a document nobody signs —
-   *  an invoice — and then nothing is drawn, so its bytes do not move. */
+  /** Signature blocks after the totals. Absent on a document nobody signs (an invoice). */
   readonly signatures?: readonly SignatureBlock[] | undefined;
-  /**
-   * The letter in the firm's Annexure format (0083) — when present, the
-   * document IS this: a cover letter and its annexures are drawn, and
-   * `sections`, `table`, `totals`, `terms` and `signatures` are not (the source
-   * leaves them empty). Absent on every classic letter and every invoice, whose
-   * bytes therefore do not move.
-   */
+  /** The firm's Annexure format (0083). When present the document IS this, and `sections`,
+   *  `table`, `totals`, `terms` and `signatures` are not drawn (the source leaves them
+   *  empty). Absent on classic letters and invoices. */
   readonly annexureLetter?: AnnexureLetter | undefined;
-  /**
-   * The proposal (0084) — when present, the document IS this: a cover and the
-   * proposal's flow, and nothing else is drawn. Absent on every letter and
-   * invoice, whose bytes therefore do not move.
-   */
+  /** The proposal (0084). When present the document IS this: cover and flow, nothing else. */
   readonly proposal?: ProposalDocument | undefined;
   readonly logo: RenderableImage | null;
   /**
-   * The instant the document was ISSUED, as an ISO date.
-   *
-   * Load-bearing for determinism, not decoration. A PDF carries a creation
-   * timestamp in its metadata; if the renderer used a clock, re-rendering the
-   * same letter would produce different bytes and therefore a different content
-   * hash — which would break the one thing this document's hash is for. So the
-   * date comes from the DOCUMENT, and rendering is a pure function of this
-   * structure.
+   * When the document was ISSUED, an ISO date. Load-bearing for determinism: the PDF's
+   * creation timestamp comes from here, never a clock, so re-rendering gives the same bytes
+   * and the same content hash.
    */
   readonly issuedOn: string;
 }
 
 /**
- * Break a paragraph into lines that fit a width.
- *
- * In the domain rather than the renderer because it is the one piece of layout
- * that is testable without a PDF, and because getting it wrong is invisible in
- * a byte comparison and obvious to a client. `measure` is injected so this stays
- * pure: the renderer knows what a font is, this knows what a line is.
- *
- * A word longer than the whole line is NOT broken mid-word — it overflows. That
- * is deliberate: the things that are too long here are reference numbers and
- * GSTINs, and hyphenating one produces a document a client cannot use.
+ * Wrap a paragraph to a width. In the domain because it is the one layout piece testable
+ * without a PDF, and a mistake is invisible in a byte comparison but obvious to a client.
+ * `measure` is injected to keep it pure. A word longer than the line overflows rather than
+ * break: those are reference numbers and GSTINs, unusable hyphenated.
  */
 export function wrapParagraph(
   text: string,
@@ -421,8 +298,7 @@ export function wrapParagraph(
   measure: (s: string) => number,
 ): readonly string[] {
   const out: string[] = [];
-  // The firm's own line breaks survive — a paragraph is wrapped between them,
-  // never across them.
+  // Wrapped between the firm's own line breaks, never across them.
   for (const hard of text.split("\n")) {
     const words = hard.split(/\s+/).filter((w) => w.length > 0);
     if (words.length === 0) {

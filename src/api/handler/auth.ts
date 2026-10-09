@@ -1,11 +1,6 @@
-// The auth HTTP surface — sign in, prove, switch org, sign out.
-//
-// One rule shapes every response here: THE SESSION TOKEN IS NEVER IN A BODY.
-// It leaves the server exactly once, in an httpOnly Set-Cookie, which no script
-// can read and therefore no XSS can steal. A convenience copy in the JSON would
-// undo that in one line, so there isn't one — a non-browser client sends the
-// same cookie back, or uses Authorization: Bearer with a token it was given
-// out of band.
+// Auth routes: sign in, prove, switch org, sign out. The session token is NEVER in a body: it
+// leaves once, in an httpOnly Set-Cookie no XSS can read. A non-browser client sends the
+// cookie back, or Authorization: Bearer with a token given out of band.
 import { createRoute } from "@hono/zod-openapi";
 import type { OpenAPIHono } from "@hono/zod-openapi";
 import type { AppEnv } from "../guards";
@@ -23,28 +18,12 @@ import { tokenFrom } from "../principal";
 
 export interface AuthDeps {
   readonly service: IdentityService;
-  /** So the caller can be told what it may DO, not only who it is. A screen
-   *  that cannot ask has to offer everything and let the API refuse. */
+  /** Tells the caller what it may DO, so a screen offers only what will work. */
   readonly authz: AuthzService;
-  /**
-   * So the caller can be told what its firm is CALLED.
-   *
-   * The principal carries a tenant uuid, which names the firm to the database
-   * and to nobody else: every screen that showed whose session this is had to
-   * print `b35c4196-b81c-…` at a person who has never seen a uuid. One lookup
-   * here turns that into "Kaveri & Co" everywhere at once, because every screen
-   * reads its identity from this one response.
-   */
+  /** Names the firm: every screen reads its identity from this response, not a tenant uuid. */
   readonly tenancy: TenancyService;
-  /**
-   * So a CLIENT PORTAL session can be told WHICH companies it is looking at.
-   *
-   * Gate 4 decides what a portal session may read; this is the session being
-   * told the answer, which is a different thing and is needed for the portal to
-   * render at all — a screen that cannot name the company it is showing is one
-   * where a contact for two group companies cannot tell which set of filings is
-   * on the page. Staff sessions never touch it.
-   */
+  /** Tells a CLIENT PORTAL session which companies it is looking at (gate 4's answer). Staff
+   *  sessions never touch it. */
   readonly portalAccess: PortalAccessService;
   readonly cookieName: string;
   readonly cookieSecure: boolean;
@@ -53,40 +32,17 @@ export interface AuthDeps {
 
 // ── Schemas ──────────────────────────────────────────────────────────────────
 
-/**
- * What the caller is told about itself.
- *
- * `role` and `commercialVisibility` were on the wire long before they were in
- * this schema — the handler returned the domain Principal straight through, and
- * zod-openapi documents a response without validating it, so the spec quietly
- * described four fields while six were sent. In a codebase whose frontend
- * generates its entire client from this spec, that is the seam failing silently.
- * Every field is now named here AND named again by the mapper below, so the two
- * cannot drift: adding one to the domain Principal no longer puts it on the wire
- * by itself.
- */
+/** What the caller is told about itself. Every field is named here AND in `principalBody`, so
+ *  a new domain Principal field never reaches the wire undocumented. */
 const PrincipalSchema = z
   .object({
     userId: z.string().uuid(),
-    /**
-     * What a colleague calls the person signed in, and the address that
-     * identifies them when nobody has said.
-     *
-     * BOTH, because `display_name` is nullable and genuinely empty at real
-     * firms. Without them the shell had only `role` to put under the avatar, so
-     * every sidebar in the product read "partner · Signed in" — the product
-     * telling somebody what they ARE rather than who they are, and identical
-     * for every partner at the firm.
-     */
+    /** Name and email both: `display_name` is nullable and genuinely empty at real firms. */
     displayName: z.string().nullable(),
     email: z.string().nullable(),
     sessionId: z.string().uuid(),
     tenantId: z.string().uuid().nullable(),
-    /** What that firm is CALLED. Null when no firm is selected, and null again
-     *  in the state that cannot normally happen — a session pointed at a tenant
-     *  row that is gone. A screen prints the id in that case rather than an
-     *  empty space, because a blank name is indistinguishable from a firm
-     *  called nothing. */
+    /** Null when no firm is selected, or the tenant row is gone; a screen then prints the id. */
     tenantName: z.string().nullable(),
     audience: z.enum(["STAFF", "CLIENT_PORTAL"]).nullable(),
     /** Null until an org is chosen — a session can belong to several firms. */
@@ -104,9 +60,7 @@ const PrincipalSchema = z
           "facts and the portal must not render them the same way: null is 'this question " +
           "does not apply', empty is 'nothing yet, ask the firm'.",
       }),
-    /** What this caller may do, so a screen can offer only what will work.
-     *  What it HOLDS, never the vocabulary it does not — the full set is
-     *  GET /api/v1/config/permissions, behind config:read. */
+    /** What this caller HOLDS; the full vocabulary is GET /api/v1/config/permissions (config:read). */
     permissions: z.array(z.string()),
     hasPassword: z.boolean().openapi({
       description:
@@ -126,9 +80,7 @@ const MembershipSummarySchema = z
   .object({
     id: z.string().uuid(),
     tenantId: z.string().uuid(),
-    /** The firm's own name. This list is a CHOICE offered to somebody who
-     *  belongs to more than one firm, and "partner · b35c4196" is not a choice
-     *  anybody can make. */
+    /** The firm's name: this list is the org switcher's choice. */
     tenantName: z.string().nullable(),
     audience: z.enum(["STAFF", "CLIENT_PORTAL"]),
     role: z.string(),
@@ -143,20 +95,8 @@ const SignInSchema = z
   })
   .openapi("SignInResponse");
 
-/**
- * `.max(MAX_PASSWORD_LENGTH)`, and it is not cosmetic.
- *
- * The cap was enforced only where a password is SET, so the sign-in route
- * accepted any length — and sign-in is the one route an anonymous caller can
- * reach. A multi-megabyte string was fed straight into scrypt, which is
- * memory-hard by design: the work factor that makes a stolen hash expensive to
- * crack is the same work factor that makes hashing junk expensive to serve.
- * Refusing at the schema costs nothing and happens before the hasher is asked
- * for anything.
- *
- * `.max()` on the LOGIN password does not weaken anything: nobody can have set
- * a password longer than this, so a longer one cannot be right.
- */
+/** `.max(MAX_PASSWORD_LENGTH)` is not cosmetic: sign-in is anonymous and scrypt is memory-hard,
+ *  so an unbounded string is unbounded server work. No longer password can have been set. */
 const LoginBody = z
   .object({
     email: z.string().email().max(MAX_EMAIL_LENGTH),
@@ -195,13 +135,7 @@ const SetPasswordBody = z
   .object({ password: z.string().min(1).max(MAX_PASSWORD_LENGTH) })
   .openapi("SetPasswordRequest");
 
-/**
- * `.max(MAX_PASSWORD_LENGTH)` on every password field below, for the reason
- * spelled out on `LoginBody`: three of these four routes are reachable by an
- * anonymous caller, scrypt is memory-hard on purpose, and an unbounded string
- * fed to it is a way to make the server do unbounded work. Refusing at the
- * schema happens before the hasher is asked for anything.
- */
+// `.max(MAX_PASSWORD_LENGTH)` on every password field below: see `LoginBody`.
 const PasswordResetBody = z
   .object({ email: z.string().email().max(MAX_EMAIL_LENGTH) })
   .openapi("PasswordResetRequest");
@@ -434,8 +368,7 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AuthDeps): vo
   const unauthorized = (message: string): ReturnType<typeof toEnvelope> =>
     toEnvelope({ status: 401, code: "UNAUTHORIZED", message });
 
-  /** Sets the session cookie. maxAge mirrors the session's own TTL, so the
-   *  browser forgets it at roughly the moment the server stops honouring it. */
+  /** Sets the session cookie; maxAge mirrors the session's TTL. */
   const issue = (c: Parameters<Parameters<typeof app.openapi>[1]>[0], result: SignInResult): void => {
     setCookie(c, deps.cookieName, result.token, {
       httpOnly: true,
@@ -446,28 +379,13 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AuthDeps): vo
     });
   };
 
-  /**
-   * The wire shape of a principal, field by field.
-   *
-   * Named explicitly rather than forwarding the domain object: that is what let
-   * `role` and `commercialVisibility` reach the wire undocumented. A mapper is
-   * a compile error when the schema and the domain disagree; a pass-through is
-   * a silent one.
-   */
+  /** The wire shape of a principal, field by field: a mapper fails to compile on drift, a
+   *  pass-through drifts silently. */
   const principalBody = async (
     principal: Principal,
   ): Promise<z.infer<typeof PrincipalSchema>> => {
-    // Only when there IS a firm. A session that has not chosen one has nothing
-    // to look up, and asking anyway would be a query per call on every screen
-    // of the one flow where the answer is known to be null.
-    // The portal scope is asked for ONLY on a portal session with a firm chosen.
-    // A staff session is not scoped this way at all, and paying a query per
-    // screen load for a null would be the per-request cost this response is
-    // careful about everywhere else.
-    // `hasPassword` joins the fan-out rather than adding a fifth round trip: it
-    // is one primary-key read on a small table, and it is asked on EVERY
-    // principal response because the account screen reads it from the same
-    // place every other screen reads its identity from.
+    // Names only when a firm is chosen; portal scope only for a portal session with a firm.
+    // Every lookup runs on every screen load, so a known-null answer is not queried.
     const [names, account, portalScope, hasPassword] = await Promise.all([
       principal.tenantId === null
         ? Promise.resolve(null)
@@ -490,16 +408,14 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AuthDeps): vo
       role: principal.role,
       commercialVisibility: principal.commercialVisibility,
       permissions: [...(await deps.authz.permissionsOf(principal))],
-      // Null and [] mean different things — see the schema. Spread because the
-      // service returns a readonly list and the wire type is mutable.
+      // Null and [] differ (see the schema); spread because the service list is readonly.
       portalScope: portalScope === null ? null : [...portalScope],
       hasPassword,
     };
   };
 
   const signInBody = async (result: SignInResult): Promise<z.infer<typeof SignInSchema>> => {
-    // ONE lookup for the whole list, not one per row: this is the response that
-    // fans out to three firms for somebody who works at three.
+    // One lookup for the whole list, not one per membership.
     const names = await deps.tenancy.tenantNames(result.memberships.map((m) => m.tenantId));
     return {
       principal: await principalBody(result.principal),
@@ -515,9 +431,8 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AuthDeps): vo
 
   app.openapi(loginRoute, async (c) => {
     const { email, password } = c.req.valid("json");
-    // The caller's key, from the rate limiter. The per-account attempt budget
-    // is spent per caller, so ten wrong guesses cost the guesser their own
-    // budget instead of locking out the person whose address they typed.
+    // The rate limiter's caller key: wrong guesses spend the guesser's budget, not lock out
+    // the account owner.
     const result = await deps.service.login(email, password, c.get("clientKey"));
     issue(c, result);
     return c.json(await signInBody(result), 200);
@@ -539,9 +454,7 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AuthDeps): vo
     return c.json(await signInBody(result), 200);
   });
 
-  // The guard has already refused an unauthenticated caller on these two, so
-  // the null branch is unreachable in practice — but the type says nullable and
-  // an unreachable branch that returns 401 is cheaper than a cast that lies.
+  // The guard already refused an anonymous caller; the null branch beats a lying cast.
   app.openapi(meRoute, async (c) => {
     const principal = c.get("principal");
     if (!principal) return c.json(unauthorized("no authenticated session"), 401);
@@ -557,17 +470,14 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AuthDeps): vo
       principal.userId,
       tenantId,
     );
-    // Rebuilt after the switch, not before: the caller's role — and therefore
-    // everything it may do — belongs to the membership at the firm it just
-    // moved to, and is usually different from the one it left.
+    // Rebuilt after the switch: role and permissions belong to the new firm's membership.
     return c.json(await principalBody(switched), 200);
   });
 
   app.openapi(logoutRoute, async (c) => {
     const token = tokenFrom((name) => c.req.header(name), deps.cookieName);
     if (token !== null) await deps.service.logout(token);
-    // Clear the cookie whatever happened: the browser must not keep presenting
-    // a token the server has stopped honouring.
+    // Clear the cookie whatever happened.
     setCookie(c, deps.cookieName, "", {
       httpOnly: true,
       secure: deps.cookieSecure,
@@ -580,9 +490,8 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AuthDeps): vo
 
   app.openapi(passwordResetRoute, async (c) => {
     const { email } = c.req.valid("json");
-    // Nothing is inspected and nothing is branched on: the service swallows an
-    // unknown address, a deactivated account, a spent budget and a failed send
-    // alike, and this route answers the one thing it is allowed to answer.
+    // No branching: the service swallows unknown address, deactivated account, spent budget
+    // and failed send alike.
     await deps.service.requestPasswordReset(email);
     return c.json({ status: "accepted" as const }, 202);
   });
@@ -590,9 +499,7 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AuthDeps): vo
   app.openapi(passwordResetConfirmRoute, async (c) => {
     const { token, password } = c.req.valid("json");
     const result = await deps.service.resetPassword(token, password);
-    // Every session the account held was revoked a moment ago inside
-    // `setPassword`; this is the replacement, and it leaves in the cookie like
-    // every other session this file issues.
+    // `setPassword` revoked every old session; this is the replacement.
     issue(c, result);
     return c.json(await signInBody(result), 200);
   });
@@ -605,9 +512,7 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AuthDeps): vo
       principal.userId,
       currentPassword,
       password,
-      // So the new session lands back at the firm this one was acting as
-      // instead of on the org switcher. The service re-checks the membership
-      // and the firm's standing rather than trusting this.
+      // Land the new session at the same firm; the service re-checks membership and standing.
       principal.tenantId,
     );
     issue(c, result);

@@ -1,27 +1,8 @@
-// The real Mailer — the letters, and nothing about how they travel.
-//
-// ── WHY THIS FILE HAS NO VENDOR IN IT ────────────────────────────────────────
-//
-// `MailTransport` below is the only thing this adapter needs from a mail
-// server: take a rendered letter, hand it to somebody. `nodemailer-transport.ts`
-// is the one file that knows what SMTP is, and it is the only file in the
-// product that imports the driver. The split is not tidiness — it is what makes
-// the LETTERS testable, and the letters are the part with judgement in them. A
-// test can read exactly what a client will receive without a socket, a relay,
-// or a mock of somebody else's API.
-//
-// ── AND THE INVITE IS THE ONE THAT HAS TO BE WRITTEN CAREFULLY ───────────────
-//
-// A sign-in link is expected: somebody pressed a button ten seconds ago. A
-// portal invite is not. It arrives unasked, at a person who never signed up for
-// anything, from an address they have no reason to recognise, and it asks them
-// to click a link and type a password. That is, feature for feature, a phishing
-// email — so the letter has to do the work of not being one: name the firm in
-// the subject and the first line, say why they are receiving it, say what they
-// will be able to do, and say what to do if it was not expected.
-//
-// `usecase/identity/ports.ts` says the same thing from the other side, which is
-// why `sendPortalInvite` takes `firmName` at all.
+// The real Mailer: the letters, and nothing about how they travel. `nodemailer-transport.ts` is
+// the only file that knows SMTP, so a test reads exactly what a client receives without a socket.
+// An UNASKED letter (portal invite, staff welcome, proposal) is a phishing email feature for
+// feature, so it names the firm in the subject and first line, says why it arrived and what it
+// allows, and what to do if unexpected. That is why `sendPortalInvite` takes `firmName`.
 import type { Mailer, StaffWelcomeExtras } from "../../usecase/identity/ports";
 import type {
   DecisionNotice,
@@ -35,33 +16,17 @@ import { displayMoney } from "../../domain/money/model";
 import { senderDisplayName } from "../../domain/mail/model";
 import type { ClientSender } from "../../domain/mail/model";
 
-/**
- * A rendered letter, ready to hand over.
- *
- * Both bodies, always. `text` is not a fallback nobody reads — it is what a
- * screen reader, a plain-text client and every spam filter actually look at,
- * and an HTML-only letter scores worse for it.
- */
+/** A rendered letter. Both bodies always: screen readers, plain-text clients and spam filters read `text`. */
 export interface Letter {
   readonly to: string;
   readonly subject: string;
   readonly text: string;
   readonly html: string;
-  /**
-   * The display name to send AS, in place of the deployment's (0085). A
-   * proposal goes out under the FIRM's name, because that is who is offering
-   * the work. Only the name: the address is the one the relay authenticates,
-   * and a letter claiming another would be refused or, worse, delivered.
-   */
+  /** Display name to send as, e.g. the firm's (0085). Name only: the address is the one the relay authenticates. */
   readonly fromName?: string | undefined;
-  /**
-   * The address to send FROM in place of the deployment's (Q059): only a
-   * client email whose SPOC's domain the firm has listed as one the relay may
-   * send for (SPF/DKIM set up). Any other letter leaves it absent.
-   */
+  /** From address (Q059): only a client email whose SPOC's domain the firm listed for the relay (SPF/DKIM). */
   readonly fromAddress?: string | undefined;
-  /** Where a reply goes, when not to the sender — the client's SPOC (Q059) or
-   *  the colleague who prepared a proposal, so the answer reaches a person. */
+  /** Where a reply goes: the client's SPOC (Q059) or the proposal's preparer, so it reaches a person. */
   readonly replyTo?: string | { readonly name: string; readonly address: string } | undefined;
   readonly attachments?: readonly Attachment[] | undefined;
 }
@@ -75,14 +40,11 @@ export interface Attachment {
 
 /** The one thing this adapter needs from a mail server. */
 export interface MailTransport {
-  /** Rejects if the letter was not accepted. The caller decides what that
-   *  means — see `IdentityService.requestMagicLink`, where it must NOT change
-   *  the answer, and `invitePortalContact`, where it must. */
+  /** Rejects if not accepted; `requestMagicLink` must not change its answer on that, `invitePortalContact` must. */
   send(letter: Letter): Promise<void>;
 }
 
-/** The product's name in a subject line. Not a firm's — one server serves every
- *  tenant, and the FIRM is named in the invite's own text. */
+/** The product's name; one server serves every tenant, so the firm is named in the letter text. */
 const PRODUCT = "BiB";
 
 export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer, NotificationMailer {
@@ -127,11 +89,7 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer, Notifi
     timeZone?: string | null,
     sender?: ClientSender | null,
   ): Promise<void> {
-    // Null is a real state — `PortalInviteService` passes it when the tenant row
-    // does not resolve, and its comment is explicit that the letter should go
-    // anyway rather than trapping a client outside. So the wording degrades
-    // instead of the send failing: "the firm you work with" says less, and says
-    // nothing untrue.
+    // Null firm (tenant did not resolve): the wording degrades, the send does not fail.
     const firm = headerSafe(firmName);
     const who = firm ?? "The firm you work with";
     const subject =
@@ -158,9 +116,7 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer, Notifi
 
     return this.transport.send({
       to,
-      // FROM THE FIRM, by name (CA#12, CA#40), and since Q059 from the
-      // client's Key Manager at the firm: "Priya Sharma, 10x Global", a reply
-      // reaching her. Her own address only when the firm listed its domain.
+      // From the firm by name (CA#12, CA#40), or the client's Key Manager (Q059); see clientHeaders.
       ...clientHeaders(firm, sender ?? null),
       subject,
       text,
@@ -183,22 +139,9 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer, Notifi
   }
 
   /**
-   * The letter a new colleague gets.
-   *
-   * ── IT IS THE PORTAL INVITE'S PROBLEM, NOT THE SIGN-IN LINK'S ────────────
-   *
-   * Unasked-for, from an address the reader has no reason to recognise, with a
-   * link in it that logs somebody in. So it does the same work of not being a
-   * phishing email: the firm is named in the subject and the first line, the
-   * reason it arrived is stated, and there is a sentence about what to do if it
-   * was not expected. The one thing it must NOT copy from the invite is the
-   * password step — staff have no password to set, and telling them to choose
-   * one would send them looking for a screen that does not exist.
-   *
-   * The line that matters most is the last one. A colleague who lets this
-   * expire is not stuck, and saying so here is what makes the seventy-two hour
-   * life affordable — otherwise the letter would have to be a week long like
-   * the client's, for a person who has a login page.
+   * The letter a new colleague gets: unasked, so written like the portal invite. Saying an
+   * expired link is not a dead end (ask the sign-in page) is what makes the 72-hour life
+   * affordable; a client's link lasts a week because a client has no login page to fall back on.
    */
   sendStaffWelcome(
     to: string,
@@ -213,16 +156,13 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer, Notifi
     const subject =
       firm === null ? `You have been given access to ${PRODUCT}` : `${firm} has added you to ${PRODUCT}`;
     const when = readableInstant(expiresAt, timeZone);
-    // WHO added them (CA#50): "somebody there" read as a form letter from
-    // nobody. The name is the colleague's own, so it is data like the firm's.
+    // Who added them (CA#50); header-safe because it is data like the firm's name.
     const adder = headerSafe(extra?.addedBy ?? null);
     const opening =
       adder === null
         ? { text: `${who} runs its practice on ${PRODUCT}, and has given you access with this`, html: `<strong>${esc(who)}</strong> runs its practice on ${esc(PRODUCT)}, and has given you access with this email address.` }
         : { text: `${adder} at ${firm ?? "your firm"} has given you access to ${PRODUCT} with this`, html: `<strong>${esc(adder)}</strong> at <strong>${esc(firm ?? "your firm")}</strong> has given you access to ${esc(PRODUCT)} with this email address.` };
-    // THE FIRST PASSWORD IS CHOSEN ON THIS LINK (CA#38). It used to sign the
-    // colleague in and stop, and the only way to a password was a second email
-    // titled "Reset your password" for a password they never had.
+    // The first password is chosen on this link (CA#38).
     const choose = extra?.choosePassword === true;
     const action = choose
       ? { line: `Open this link to choose your password and sign in:`, button: "Choose your password" }
@@ -248,8 +188,7 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer, Notifi
 
     return this.transport.send({
       to,
-      // FROM THE FIRM, by name (CA#12): only the display name; the address is
-      // the one the relay authenticates. No firm known, the deployment's name.
+      // From the firm by name (CA#12); no firm known, the deployment's name.
       ...(firm === null ? {} : { fromName: firm }),
       subject,
       fromName: firm ?? undefined,
@@ -276,24 +215,9 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer, Notifi
   }
 
   /**
-   * The letter a client contact gets when the address ALREADY HAS A LOGIN.
-   *
-   * ── WHY THIS IS NOT THE PORTAL INVITE WITH A DIFFERENT BUTTON ────────────
-   *
-   * Because the invite's button says "Choose a password", and this reader has
-   * one. Accounts are global here: the CFO being invited may be staff at
-   * another firm on this same product, or a contact somebody else invited last
-   * year. Sending them the password-setting link would replace the password
-   * they use everywhere and sign them out of everything, on a letter they had
-   * every reason to open. So this one hands over a session instead.
-   *
-   * Everything else it copies from the invitation deliberately: it arrives
-   * unasked from a firm the reader may not expect mail from, so it names that
-   * firm in the subject and the first line, says what the portal is for, and
-   * ends with what to do if it was not expected. The one sentence it adds is
-   * the reassuring half of the difference — nothing about their existing
-   * password has changed, which is the first thing a person wonders when a
-   * second firm emails them about an account they already have.
+   * The portal letter when the address ALREADY HAS A LOGIN. Accounts are global (ADR-02), so a
+   * set-password link would replace the password they use everywhere; this hands over a session
+   * and says their password has not changed. Otherwise written like the invite.
    */
   sendPortalWelcome(
     to: string,
@@ -362,26 +286,9 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer, Notifi
   }
 
   /**
-   * The letter that replaces a forgotten password.
-   *
-   * ── WHY IT IS NOT THE SIGN-IN LETTER WITH A DIFFERENT URL ────────────────
-   *
-   * Because of its last paragraph, which has to say the opposite of the
-   * sign-in link's. That one closes with *"if you did not ask for this, nothing
-   * has happened and you can ignore this message"* — true there, and the wrong
-   * thing to tell somebody holding a link that REPLACES their credential. A
-   * reader who did not ask for this needs two facts in order to do nothing
-   * safely: their password still works, and it goes on working for as long as
-   * the link is left alone. That is the whole difference, and it is the reason
-   * for the method.
-   *
-   * ── AND IT NAMES NO FIRM, WHERE THREE OF ITS NEIGHBOURS DO ───────────────
-   *
-   * The unasked-for letters name the firm because that is what stops them
-   * reading as phishing. This one was asked for seconds ago, and the account it
-   * belongs to is GLOBAL (ADR-02) — one login, however many firms — so there is
-   * no single firm it could name without telling the reader something false
-   * about which password is being reset.
+   * The password reset letter. Its last paragraph differs from sign-in's: a reader who did not
+   * ask must learn their password still works while the link is left alone. Names no firm: the
+   * account is global (ADR-02), so any one firm's name would mislead.
    */
   sendPasswordReset(to: string, url: string, expiresAt: string): Promise<void> {
     const when = readableInstant(expiresAt);
@@ -423,23 +330,9 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer, Notifi
   }
 
   /**
-   * THE PROPOSAL ITSELF (0085) — the PDF attached, and two buttons.
-   *
-   * ── IT IS AN UNASKED LETTER WITH LINKS IN IT, SO IT HAS TO LOOK LIKE ONE ─
-   *
-   * The portal invite's problem, and the same answer: the FIRM is named in the
-   * From name, the subject and the first line; the reader is told why they got
-   * it; and every link says what it does before anybody presses it. A reply
-   * goes to the colleague who prepared it, never into a no-reply box.
-   *
-   * ── WHY THE BUTTONS DO NOT ANSWER ───────────────────────────────────────
-   *
-   * Company mail filters open every link in a message to scan it. A button that
-   * accepted on opening would be pressed by the filter before the client read
-   * the proposal. So each opens the proposal's page with that answer READY, and
-   * the answer is given there — with a name, and for an acceptance a statement
-   * ticked. The letter says so, because "I only opened it" should never be a
-   * worry anybody has to have.
+   * The proposal (0085): PDF attached, firm named, replies to a person. The buttons do NOT
+   * answer: mail filters open every link to scan it, so each opens the proposal's page with the
+   * answer ready, confirmed there with a name.
    */
   sendProposal(letter: ProposalLetter): Promise<void> {
     const firm = headerSafe(letter.firmName) ?? "Your adviser";
@@ -447,8 +340,7 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer, Notifi
     const greeting = letter.greetingName === null ? "Hello," : `Dear ${letter.greetingName},`;
     const validity =
       letter.validUntil === null ? null : `It is valid until ${longDay(letter.validUntil)}.`;
-    // Q059: from the SPOC (else the Key Manager) by name, replies to them.
-    // Without one, replies go to the colleague who prepared it, as before.
+    // Q059: from the SPOC (else the Key Manager), replies to them; else to the preparer.
     const sender = letter.sender;
     const replyTo = sender !== null ? (headerSafe(sender.name) ?? sender.email) : (letter.preparedBy ?? firm);
     const intro =
@@ -515,11 +407,7 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer, Notifi
     });
   }
 
-  /**
-   * The colleague who prepared a proposal hears the moment the client answers
-   * on its link (0085) — who, which way, when, and why on a decline. It goes to
-   * somebody at the firm, so it names the product rather than the firm.
-   */
+  /** Tells the proposal's preparer the client answered on its link (0085): who, which way, when, why. */
   sendDecisionNotice(notice: DecisionNotice): Promise<void> {
     const accepted = notice.decision === "accepted";
     const verb = accepted ? "accepted" : "declined";
@@ -550,8 +438,7 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer, Notifi
     const firm = headerSafe(notice.firmName ?? null);
     return this.transport.send({
       to: notice.to,
-      // From the firm (CA#12): a colleague at one firm must not hear about its
-      // client from another firm's name, which the deployment's one was.
+      // From the firm (CA#12), not the deployment's name.
       ...(firm === null ? {} : { fromName: firm }),
       subject: `${client} ${verb} ${ref}`,
       text,
@@ -566,15 +453,9 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer, Notifi
   }
 
   /**
-   * The weekly summary of advances to a firm's administrator (0322).
-   *
-   * Ashish: "once every week it should escalate to ceo coo ... through system
-   * notification/email". It goes to a COLLEAGUE about the firm's own money, so
-   * it names the firm in the subject (one person may administer two firms) and
-   * says plainly that the work has started: the summary exists because the
-   * advance no longer holds it. Amounts only where the reader may see fees (the
-   * use case leaves them out otherwise). No client data beyond what the
-   * administrator already sees on the Advances list.
+   * Weekly advances summary to a firm's administrator (0322; Ashish: "once every week it should
+   * escalate to ceo coo"). Firm in the subject (one person may administer two firms). Amounts
+   * only for a fee-seeing reader; no client data beyond the Advances list.
    */
   sendAdvanceDigest(letter: AdvanceDigestLetter): Promise<void> {
     const firm = headerSafe(letter.firmName);
@@ -601,7 +482,7 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer, Notifi
 
     return this.transport.send({
       to: letter.to,
-      // From the firm (CA#12), as every letter about one firm's business is.
+      // From the firm (CA#12).
       ...(firm === null ? {} : { fromName: firm }),
       subject: `${what} not paid yet${firm === null ? "" : ` · ${firm}`}`,
       text,
@@ -629,12 +510,9 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer, Notifi
 }
 
 /**
- * Notifications by email (0324): the urgent ones at once, everything else in
- * one email a day. The words are the bell's, already rendered for this reader
- * (no amount for somebody who may not see fees), so this letter adds only the
- * frame: who it is for, which firm, a link per notification, and where to
- * switch these emails off. Every one of those is required: an email a person
- * cannot stop is an email they learn to filter.
+ * Notifications by email (0324): urgent at once, the rest in a daily email. The words are the
+ * bell's, already fee-redacted for this reader; this adds the frame, including the required
+ * switch-off link.
  */
 function notificationLetter(letter: NotificationLetter): { subject: string; text: string; html: string } {
   const firm = headerSafe(letter.firmName);
@@ -716,20 +594,9 @@ function digestLine(r: AdvanceDigestRow): string {
 }
 
 /**
- * An ISO instant as words, WITH the zone said out loud.
- *
- * The reader's own zone would be better and this server does not know it: an
- * email has no browser to ask. So the choice is between a zone nobody chose and
- * a zone that is named, and naming it is the same rule `instant.ts` applies to
- * every date this product renders — "2 September 2026, 14:05 UTC" is
- * unambiguous everywhere, and a bare "14:05" is wrong for most of the planet.
- *
- * A letter that comes FROM A FIRM is written on the firm's clock (audit
- * 2026-10-03, CA#50): an Indian firm's new colleague read "06:53 UTC" for a
- * link that stopped at 12:23 their time. With `timeZone` the time is that
- * zone's and the zone is named in words ("19:35 India Standard Time"); without
- * it, or for UTC, it is UTC as before. The sign-in and reset letters belong to
- * a global account with no one firm, and pass none.
+ * An ISO instant as words with the zone named; an email has no browser to ask the reader's zone.
+ * A firm's letter uses the firm's zone, named in words ("19:35 India Standard Time", CA#50);
+ * without one, or for UTC, it is UTC. Sign-in and reset letters (global account) pass none.
  */
 function readableInstant(iso: string, timeZone?: string | null): string {
   const at = new Date(iso);
@@ -764,18 +631,9 @@ function readableInstant(iso: string, timeZone?: string | null): string {
 }
 
 /**
- * A tenant's name, made safe to put in a Subject header.
- *
- * A header ends at a newline, so a name carrying one could append headers of
- * its own — a `Bcc:` among them. A firm's name is written by whoever provisioned
- * the tenant, which is not the same as being trustworthy input, and the cost of
- * assuming otherwise is silent. Blank after stripping is the same as absent.
- */
-/**
- * The From name, From address and Reply-To of a letter to a CLIENT (Q059).
- * With a sender: "Priya Sharma, 10x Global", Reply-To Priya, and Priya's own
- * address as the From only when her domain is on the firm's list. Without
- * one: the firm's name, as before. Every name made header-safe here.
+ * From name, From address and Reply-To of a letter to a CLIENT (Q059). With a sender:
+ * "Priya Sharma, 10x Global", Reply-To Priya, her own From address only when her domain is on
+ * the firm's list. Without one: the firm's name.
  */
 function clientHeaders(
   firm: string | null,
@@ -791,13 +649,7 @@ function clientHeaders(
   };
 }
 
-/**
- * The phishing guard at the foot of an unasked-for letter. It used to say
- * "rather than replying to this message", because a reply went to a no-reply
- * box. With a named person at the firm (Q059) the reader is told to check with
- * THEM, on a number or address they already have: the guard still never
- * trusts the letter itself.
- */
+/** The phishing guard at the foot of an unasked letter: check with the named person (Q059) on a channel already known, never via the letter. */
 function checkWithText(who: string, sender: ClientSender | null): string[] {
   if (sender === null) {
     return [`If you were not expecting this, please check with your contact at`, `${who} before opening it, rather than replying to this message.`];
@@ -823,14 +675,14 @@ function checkWithHtml(who: string, sender: ClientSender | null): string {
   );
 }
 
+/** Safe for a header: a newline in a tenant-supplied name could inject headers (a `Bcc:`). Blank means absent. */
 function headerSafe(name: string | null): string | null {
   if (name === null) return null;
   const flat = name.replace(/[\r\n]+/g, " ").trim();
   return flat === "" ? null : flat;
 }
 
-/** HTML-escaped. The firm's name reaches the body, and an apostrophe or an
- *  ampersand in a real company name must not become markup. */
+/** HTML-escaped: an ampersand in a real company name must not become markup. */
 function esc(s: string): string {
   return s
     .replace(/&/g, "&amp;")
@@ -839,12 +691,8 @@ function esc(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
-// ── The HTML, deliberately from 2005 ────────────────────────────────────────
-//
-// Inline styles and nothing else: no stylesheet (most clients drop `<style>`),
-// no image (they are blocked by default, so a logo-shaped hole is worse than no
-// logo), no web font, no script. Everything below has to survive Outlook, which
-// renders with Word.
+// HTML: inline styles only. No `<style>` (most clients drop it), no image (blocked by default),
+// no web font, no script; it must survive Outlook, which renders with Word.
 
 function page(blocks: readonly string[]): string {
   return [
@@ -868,11 +716,7 @@ function button(url: string, label: string): string {
   );
 }
 
-/**
- * Two buttons on one line — Accept and Decline. The second is outlined rather
- * than filled, so the letter has one obvious next step and a second that is
- * plainly there, never hidden.
- */
+/** Two buttons on one line; the secondary is outlined, visible but not the obvious step. */
 function buttons(
   items: readonly { readonly url: string; readonly label: string; readonly primary: boolean }[],
 ): string {
@@ -890,8 +734,7 @@ function multiline(s: string): string {
   return esc(s).replace(/\r?\n/g, "<br>");
 }
 
-/** The link in full, because a button is not copyable and some clients do not
- *  render one at all. */
+/** The link in full: a button is not copyable and some clients do not render one. */
 function fallback(url: string): string {
   return (
     `<p style="margin:24px 0 0;font-size:13px;color:#666">` +

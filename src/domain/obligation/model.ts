@@ -1,33 +1,12 @@
-// The obligation domain (T3.2) — what the LAW asks of an entity, and when.
-// Pure nouns and pure rules; imports nothing internal and nothing beyond the
-// standard library (enforced by the arch test).
-//
-// ── AN OBLIGATION IS NOT A TASK ────────────────────────────────────────────
-//
-// The obligation is what the law requires of the ENTITY — Kaveri Foods must
-// file GSTR-3B for August by 20 September. The task (`domain/workitem`) is what
-// somebody at the firm must DO about it. Merge them and the calendar can never
-// be generated, only typed, which is the Excel this product replaces. Migration
-// 0052 argues it at length; this file is what makes it computable.
-//
-// ── EVERY DATE HERE IS A `YYYY-MM-DD` STRING, NEVER A `Date` ───────────────
-//
-// A `Date` carries a time and a zone, and "the 20th" in a process running in
-// one zone is the 19th in another — which for a statutory deadline is a
-// penalty, not a rounding error. This is the same rule the repo already learned
-// the hard way with `toISOString()` producing yesterday in India, and it is why
-// nothing below constructs a `Date` except to ask the calendar how long a month
-// is.
-//
-// ── AND NOTHING HERE READS A CLOCK ─────────────────────────────────────────
-//
-// Every function is a pure transform from a rule and a window to dates. A
-// statutory deadline is something a client is held to, so it has to be testable
-// exhaustively and cheaply, and a function that reaches for `new Date()` cannot
-// be. The clock lives in the use case, which passes `today` in.
+// Obligation domain (T3.2): what the LAW asks of an entity, and when. Pure; stdlib only.
+// An obligation is not a task: it is what the entity must file (GSTR-3B for August by
+// 20 September); the task (`domain/workitem`) is what the firm does about it. Merged, the
+// calendar could only be typed, never generated (0052).
+// Every date is a `YYYY-MM-DD` string, never a `Date`: "the 20th" in one zone is the 19th in
+// another, a penalty on a statutory deadline (`toISOString()` gives yesterday in India).
+// Nothing here reads a clock; the use case passes `today` in, so deadlines test exhaustively.
 
-/** A calendar date, `YYYY-MM-DD`, always UTC-free — it names a day, not an
- *  instant. */
+/** A calendar date, `YYYY-MM-DD`: names a day, not an instant. */
 export type IsoDate = string;
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -41,16 +20,10 @@ export function isIsoDate(s: string): boolean {
 // ── the rule ───────────────────────────────────────────────────────────────
 
 /**
- * How often the work comes round.
- *
- * `half_yearly` is here and is not in the demo this was built from: MSME-1 is
- * explicitly half-yearly on the firm's own sheet, and rounding it to quarterly
- * would have produced four filings a year for an obligation that has two.
- *
- * `event` has no period and therefore no schedule — a director changes and a
- * clock starts. It PRODUCES NOTHING today because nothing in this system knows
- * the event happened. It exists as a member so the firm can see that we know
- * about FC-GPR and DIR-12, rather than finding them silently absent.
+ * How often the work comes round. `half_yearly` is not in the demo: MSME-1 is half-yearly on the
+ * firm's sheet, and quarterly would file it four times a year. `event` (FC-GPR, DIR-12) has no
+ * period and generates nothing, since nothing here knows the event happened; it exists so the
+ * firm can see we know about them.
  */
 export type ObligationRecurrence = "monthly" | "quarterly" | "half_yearly" | "annual" | "event";
 
@@ -66,8 +39,7 @@ export function isObligationRecurrence(v: string): v is ObligationRecurrence {
   return (OBLIGATION_RECURRENCES as readonly string[]).includes(v);
 }
 
-/** How many months one period covers. `event` has no period; callers must not
- *  ask, and `periodsBetween` returns nothing for it. */
+/** Months per period. `event` has none; `periodsBetween` returns nothing for it. */
 const MONTHS_PER_PERIOD: Record<Exclude<ObligationRecurrence, "event">, number> = {
   monthly: 1,
   quarterly: 3,
@@ -76,17 +48,10 @@ const MONTHS_PER_PERIOD: Record<Exclude<ObligationRecurrence, "event">, number> 
 };
 
 /**
- * How the statutory date is computed from the period. DATA, not a formula
- * string somebody has to parse.
- *
- * - `day_of_month` — `dueMonthOffset` months after the period ends, then
- *   `dueDayOfMonth`. "The 20th of the month following the period end." Advance
- *   Tax falls out of the same shape at offset 0 (Q1 Apr–Jun ends 30 June →
- *   15 June), which is BEFORE the period ends and needed no new kind.
- * - `days_after` — `dueDaysAfter` days after the period ends.
- *
- * A third kind is deliberately absent — see 0052. When a conditional rule
- * arrives it becomes a column, not a rewrite.
+ * How the statutory date is computed, as data. `day_of_month`: `dueMonthOffset` months after the
+ * period ends, on `dueDayOfMonth` (offset 0 gives Advance Tax: Q1 Apr–Jun due 15 June, before the
+ * period ends). `days_after`: `dueDaysAfter` days after it ends. No third kind (see 0052): a
+ * conditional rule becomes a column, not a rewrite.
  */
 export type DueRuleKind = "day_of_month" | "days_after";
 
@@ -96,12 +61,9 @@ export function isDueRuleKind(v: string): v is DueRuleKind {
   return (DUE_RULE_KINDS as readonly string[]).includes(v);
 }
 
-/**
- * Whose year a rule's quarters, half-years and years are cut on (Q070 Part B,
- * 0358): its own (`rule_calendar`, every rule before 0358) or the CLIENT's
- * financial year end (`client_year_end`), which is how UAE corporate tax and
- * Singapore's annual filings run. See `period-basis.ts`.
- */
+/** Whose year a rule's quarters, half-years and years are cut on (Q070 Part B, 0358): its own
+ *  (`rule_calendar`, every rule before 0358) or the client's FY end (`client_year_end`: UAE
+ *  corporate tax, Singapore annual filings). See `period-basis.ts`. */
 export type PeriodBasis = "rule_calendar" | "client_year_end" | "authority_assigned";
 
 /** `authority_assigned` (Q073, 0359): the client's own return period for the
@@ -112,14 +74,12 @@ export function isPeriodBasis(v: string): v is PeriodBasis {
   return (PERIOD_BASES as readonly string[]).includes(v);
 }
 
-/** What a generated row's period actually followed: a rule's basis, or
- *  `rule_fallback` when the rule asked for the client's year end and the
- *  client had none recorded (the rule's own month was used, and said so). */
+/** What a row's period followed: the rule's basis, or `rule_fallback` when the rule wanted the
+ *  client's year end and none was recorded (the rule's own month was used, and said so). */
 export type InstancePeriodBasis = PeriodBasis | "rule_fallback";
 
-/** Whether the FIRM has checked this rule against the statute. Everything seeds
- *  `unconfirmed`, India included — the shipped dates came from a previous
- *  vendor's document, and the firm's own practice may be earlier. */
+/** Whether the FIRM has checked this rule against the statute. Every seed is `unconfirmed`, India
+ *  too: the dates came from a previous vendor's document; the firm's practice may be earlier. */
 export type RuleStatus = "unconfirmed" | "confirmed";
 
 export const RULE_STATUSES: readonly RuleStatus[] = ["unconfirmed", "confirmed"];
@@ -141,8 +101,7 @@ export interface DueRule {
 export interface DueRuleException extends DueRule {
   /** The calendar month the filed PERIOD ends in. March is 3. */
   readonly periodEndMonth: number;
-  /** Why this period is different, in the firm's own words. Mandatory: an
-   *  exception nobody explained is one a partner cannot review. */
+  /** Why this period differs, in the firm's words. Mandatory: an unexplained one cannot be reviewed. */
   readonly note: string;
 }
 
@@ -151,34 +110,22 @@ export interface ObligationTemplate {
   readonly tenantId: string;
   /** ISO 3166-1 alpha-2. */
   readonly jurisdiction: string;
-  /** Null means EVERY entity type, which is the common case: GST does not care
-   *  what shape the company is. */
+  /** Null = every entity type, the common case (GST ignores the company's shape). */
   readonly entityType: string | null;
   /**
-   * The rule's supersession CHAIN: the first rule's own id, inherited by every
-   * successor (0303). Read back from the row and never supplied: a trigger
-   * derives it on insert and refuses to let it move.
-   *
-   * It is what a catalogue service is linked to (0309), not this row's id. A
-   * link naming one row would fall off the day the law changed and the rule
-   * was superseded; a link on the chain carries every successor with it.
-   *
-   * WHICH SERVICES OWE THIS FILING IS NOT ON THE RULE AT ALL. It was, as one
-   * nullable column where NULL meant "every service", and that reading is how
-   * 98 GST filings reached a bookkeeping-only client on 2026-09-18. It lives in
-   * `delivery.obligation_rule_service` now, one row per link, written only
-   * from the catalogue.
+   * The supersession CHAIN id: the first rule's id, inherited by every successor (0303); set by
+   * a trigger on insert, immutable. Catalogue services link to the chain (0309), so a link
+   * survives supersession. Which services owe the filing is NOT on the rule: a nullable "NULL =
+   * every service" column sent 98 GST filings to a bookkeeping-only client on 2026-09-18. Links
+   * live in `delivery.obligation_rule_service`, written only from the catalogue.
    */
   readonly lineageId: string;
-  /** The statute's own grouping — "GST", "TDS", "MCA". NOT `ServiceBody.module`,
-   *  which is the firm's revenue axis. Two axes, deliberately uncrossed. */
+  /** The statute's grouping ("GST", "TDS", "MCA"), NOT `ServiceBody.module` (revenue axis). */
   readonly module: string | null;
   readonly name: string;
   readonly authority: string | null;
   readonly recurrence: ObligationRecurrence;
-  /** 4 for India, 1 for a calendar year. On the rule because an Indian QUARTER
-   *  is Apr–Jun, and computing quarters on the calendar would put every Indian
-   *  quarterly filing in the wrong period. */
+  /** 4 for India, 1 for a calendar year. On the rule because an Indian quarter is Apr–Jun. */
   readonly fiscalYearStartMonth: number;
   /** Whose year the periods are cut on (0358). Part of the period SHAPE with
    *  `recurrence` and `fiscalYearStartMonth`: locked once rows exist. */
@@ -193,62 +140,31 @@ export interface ObligationTemplate {
   readonly supersedesId: string | null;
   readonly status: RuleStatus;
   readonly isActive: boolean;
-  /**
-   * The first period START this rule governs. Null means from the beginning.
-   *
-   * Half-open with `effectiveTo`, and tested against the period's START rather
-   * than its due date: the rule that governs a filing is the one in force for
-   * the PERIOD BEING FILED. August's return is August's law even though it
-   * falls due on 20 September.
-   */
+  /** First period START this rule governs; null = from the beginning. Half-open with
+   *  `effectiveTo`, tested on period start: August's return is August's law, due 20 September. */
   readonly effectiveFrom: IsoDate | null;
-  /** The first period start this rule does NOT govern — the day its successor
-   *  takes over. Null means forever. */
+  /** First period start this rule does NOT govern (its successor's); null = forever. */
   readonly effectiveTo: IsoDate | null;
 }
 
 // ── what a rule is actually doing, and why ─────────────────────────────────
 
 /**
- * Whether a rule can produce dates, and if not, why not.
- *
- * DERIVED from the columns rather than stored, so there is no fourth thing to
- * keep in step. It exists because the alternative is silence: a firm that
- * cannot find GSTR-9C on its calendar must be told which rule is missing what,
- * on a screen, in these terms — never left to wonder whether the software is
- * broken.
- *
- *   `generating`     it produces dates, and the calendar shows them.
- *   `needs_formula`  a real obligation whose timing this system cannot derive.
- *                    Around forty of the firm's fifty-five are here, and the
- *                    reason is on the row. NOT a bug and never rendered as one.
- *   `event_driven`   no period, so nothing to count from until the event
- *                    happens — and nothing here knows that it has.
- *   `retired`        the firm has moved on. Past instances still read.
- *   `unlinked`       a rule no catalogue service carries (T6.16, 0309). It
- *                    generates NOTHING, whatever else is true of it: a rule
- *                    reaches a client only through a service the client
- *                    bought, and the catalogue is the one place a rule is
- *                    linked to one. Checked BEFORE `unconfirmed` because it is
- *                    the more useful answer for a shipped pack row: adding it
- *                    to a service in the catalogue confirms it in the same act.
- *   `unconfirmed`    a formula this system could run and nobody at the firm has
- *                    checked against the statute — every row a pack seeds. It
- *                    generates NOTHING until the firm confirms it (2026-09-18):
- *                    a shipped rule that named no service reached every live
- *                    engagement at every company in its country, and a firm
- *                    whose one service EXCLUDES the filing was watching its
- *                    client's portal call those filings "missed".
- *
- * ── THE LINK COUNT IS A PARAMETER, NOT A FIELD ON THE RULE ─────────────────
- *
- * Which services owe a filing is a fact about the CHAIN (`lineageId`), held in
- * its own table and read in the same query as the rule wherever a screen or
- * the sweep needs it. It is passed in rather than stored on
- * `ObligationTemplate` so that no reader can mistake "the rule can produce
- * dates" for "the rule reaches somebody": the second question needs the
- * links, and a caller that has not read them cannot answer it by accident.
- * Whether a rule reaches ONE engagement is `generatesFor`, below.
+ * Whether a rule can produce dates and, if not, why. Derived, not stored, so a firm missing
+ * GSTR-9C on its calendar is told which rule lacks what instead of suspecting a bug.
+ *   `generating`     produces dates.
+ *   `needs_formula`  real, but its timing cannot be derived (~40 of the firm's 55; reason on the
+ *                    row). Not a bug and never shown as one.
+ *   `event_driven`   no period; nothing here knows the event happened.
+ *   `retired`        the firm moved on; past instances still read.
+ *   `unlinked`       no catalogue service carries it (T6.16, 0309): generates nothing, since a
+ *                    rule reaches a client only through a service it bought. Checked before
+ *                    `unconfirmed`: linking it in the catalogue confirms it in the same act.
+ *   `unconfirmed`    a pack-seeded formula the firm has not checked: generates nothing
+ *                    (2026-09-18: a shipped rule naming no service reached every engagement in
+ *                    its country, and a client's portal called filings it excluded "missed").
+ * The link count is a parameter, not a field, so a caller cannot answer "reaches somebody"
+ * without reading the links. One engagement: `generatesFor`.
  */
 export type RuleCoverage =
   | "generating"
@@ -262,22 +178,16 @@ export function coverageOf(t: ObligationTemplate, linkedServices: number): RuleC
   if (!t.isActive) return "retired";
   if (t.dueRule === null) return "needs_formula";
   if (t.recurrence === "event") return "event_driven";
-  // DECISION 1 (T6.16): a rule linked to no service generates nothing. The
-  // "every service" reading a NULL used to carry is gone as a generating
-  // reading, because it is the reading that made a filing a claim about every
-  // client the firm has.
+  // DECISION 1 (T6.16): no linked service, no dates. A NULL "every service" reading made a
+  // filing a claim about every client.
   if (linkedServices <= 0) return "unlinked";
-  // CONFIRMATION IS LOAD-BEARING. `status` was informational from T3.2 to
-  // 2026-09-17 — "the firm has checked this against the statute" — while the
-  // calendar generated from every active formula regardless. A rule the firm
-  // WRITES is created confirmed (it is the firm's own statement); a rule a pack
-  // SEEDS is not, and stays off the calendar until a partner answers it.
+  // Confirmation gates generation (since 2026-09-17): a rule the firm writes is created
+  // confirmed; a pack-seeded one stays off the calendar until a partner confirms it.
   if (t.status !== "confirmed") return "unconfirmed";
   return "generating";
 }
 
-/** The rules that will actually put rows on the calendar. The generator's own
- *  filter, named once so the screen and the sweep cannot disagree about it. */
+/** The generator's own filter, named once so the screen and the sweep agree. */
 export function generatesDates(t: ObligationTemplate, linkedServices: number): boolean {
   return coverageOf(t, linkedServices) === "generating";
 }
@@ -289,34 +199,12 @@ export interface RuleServiceLink {
 }
 
 /**
- * The generation predicate for one engagement, STATED in the domain's own
- * words. Nothing in production calls it, and that is said here so nobody
- * mistakes its tests for tests of the generator.
- *
- * A rule generates for an engagement exactly when it produces dates at all
- * (`generatesDates`: active, a formula, not event-driven, confirmed, linked to
- * something) AND one of its chain's live links is to the service THIS
- * engagement bought. Jurisdiction, entity type and the rule's window are the
- * other half of the predicate and are asked of the entity and the period
- * (`governsPeriod`), not of the service.
- *
- * The generator does not ask it per engagement: it asks `generatesDates` of
- * each rule and lets `subjectsFor` join the link, because the engagements a
- * rule reaches are one set-based statement and a function over an in-memory
- * list is one row at a time. So the service half lives in SQL, restated by
- * `subjectsFor` and `gaps` in the calendar adapter, `listGenerating`, and
- * `obligation-coverage.ts` for the work board, and what guards the LIVE code
- * is `coverage.integration.test.ts` (those readers against one database) and
- * `service-filings.integration.test.ts` and `service.test.ts` (the generator
- * over real SQL and over the fakes). The domain tests of this function pin
- * the statement a reader of the SQL can check it against; they would stay
- * green if the generator dropped its link test, which is why the tests above
- * exist.
- *
- * An engagement whose pinned service cannot be resolved (`serviceEntryId`
- * null) is reached by nothing, which is the safe direction under decision 1:
- * the coverage screen names the gap, where a guess would put a filing on a
- * client who did not buy it.
+ * The generation predicate for one engagement, stated for readers; production does not call it.
+ * True when `generatesDates` AND a live link on the chain names this engagement's service
+ * (jurisdiction, entity type and window are `governsPeriod`'s half). The generator joins links
+ * in SQL (`subjectsFor`, `gaps`, `listGenerating`, `obligation-coverage.ts`); the live guards are
+ * `coverage.integration.test.ts`, `service-filings.integration.test.ts` and `service.test.ts`,
+ * not this function's tests. A null `serviceEntryId` reaches nothing: the safe direction.
  */
 export function generatesFor(
   t: ObligationTemplate,
@@ -329,25 +217,11 @@ export function generatesFor(
 }
 
 /**
- * Whether this rule governs a period beginning on `periodStart`.
- *
- * ── THE HALF-OPEN BOUND IS THE WHOLE FUNCTION ─────────────────────────────
- *
- * `effectiveTo` is the first day NOT in force, so a rule ending 2027-04-01 and
- * its successor starting 2027-04-01 govern one period each and never the same
- * one. An inclusive bound would give April to both — and two rules governing
- * one period is TWO FILINGS for one return, generated under different template
- * ids that the re-run key cannot deduplicate. The demo made the inclusive
- * mistake on client assignments and showed two SPOCs on every changeover day;
- * the cost here is a client filing twice.
- *
- * ── AND IT IS THE PERIOD START, NOT THE STATUTORY DATE ────────────────────
- *
- * Named once, here, so the generator and the screen cannot disagree about it.
- * A law changing on 1 September must not reach back and restate August's
- * return, which falls due on 20 September under August's rule. Testing the due
- * date would move every date by exactly one period and look entirely
- * plausible.
+ * Whether this rule governs a period beginning on `periodStart`. Half-open: `effectiveTo` is the
+ * first day NOT in force, so a rule and its successor never share a period (inclusive gives two
+ * filings under two template ids the re-run key cannot dedupe; the demo did this with SPOCs).
+ * Tested on period START, not due date: a 1 September change must not restate August's return
+ * (due 20 September); testing the due date shifts every date one period, plausibly.
  */
 export function governsPeriod(t: ObligationTemplate, periodStart: IsoDate): boolean {
   if (t.effectiveFrom !== null && periodStart < t.effectiveFrom) return false;
@@ -365,23 +239,11 @@ export interface ChainOnDay<T extends ObligationTemplate> {
 }
 
 /**
- * The start of the first period a row governs, or null when its window holds
- * no period start at all (review of the T6.16 follow-ups, 2026-09-26).
- *
- * ── A ROW'S `effectiveFrom` IS NOT WHEN IT TAKES OVER ─────────────────────
- *
- * It is the day the change was recorded from, and the supersede form takes
- * any day. `governsPeriod` tests the period START, so a quarterly rule cut
- * over on 1 August does not govern the quarter that began on 1 July: its
- * first period is October's. The card said "From August 2026" in September
- * while July to September was still due under the old rule, and an annual
- * rule cut over on 1 January named January although January to March is
- * still the old financial year.
- *
- * Found in the generator's own terms: the periods from the cutover, and the
- * first whose start the row governs. A period starts at most a year after
- * any day, so a year and a day is always far enough to look. An event-driven
- * rule has no period; its "period" is the day, as in `chainOnDay`.
+ * Start of the first period a row governs, or null if its window holds none (T6.16 review,
+ * 2026-09-26). `effectiveFrom` is not when a row takes over: a quarterly rule cut over 1 August
+ * first governs October's quarter; an annual one cut over 1 January waits for April's FY.
+ * Periods start within a year of any day, so a year and a day is enough to search. An event
+ * rule's "period" is the day, as in `chainOnDay`.
  */
 export function firstPeriodGoverned(t: ObligationTemplate): IsoDate | null {
   if (t.effectiveFrom === null) return null;
@@ -396,37 +258,14 @@ export function firstPeriodGoverned(t: ObligationTemplate): IsoDate | null {
 }
 
 /**
- * Which row of a chain governs the period containing `day`, and which row
- * takes over after it (T6.16 follow-up, 2026-09-26).
- *
- * ── THE ROW "IN FORCE" IS NOT THE ROW TODAY'S RETURNS ARE DUE ON ──────────
- *
- * After a partner records "from April 2027 the law says the 22nd", the chain's
- * open-ended row is the SUCCESSOR, and a screen showing that row told the firm
- * September's return was due on the 22nd while the calendar (correctly) still
- * dated it the 20th. What a partner checks a filing against is the rule that
- * governs the period being filed NOW, and, separately, what changes and when.
- *
- * Asked in the generator's own terms, never with new date arithmetic: the
- * period containing `day` is `periodsBetween` over that one day, and a row
- * governs it by `governsPeriod`, tested against the period START (August's
- * return is August's law). A row's own recurrence is used, so a chain whose
- * rows disagree cannot borrow a period shape from its neighbour. An
- * event-driven rule has no period; its "period" is the day itself, which is
- * when an event happening today would be judged.
- *
- * `governing` is null when no row's window covers the day (a chain written to
- * start later), and `next` is then the row that starts it. `next` is the row
- * whose FIRST GOVERNED PERIOD (`firstPeriodGoverned`) comes soonest among the
- * rows opening after the day's period begins, and `nextFirstPeriod` is that
- * period's start: the day a screen means by "from April 2027". Picking by
- * the cutover alone named a row whose window holds no period at all, and
- * named the cutover's month for a change that waits for the next quarter.
- *
- * Windows only. A RETIRED row is read like any other, because the generator
- * dates nothing under it and hiding it would say the row before it goes on
- * for ever; what each row does is `coverageOf`, which the wire carries beside
- * both (review, 2026-09-26).
+ * Which row of a chain governs the period containing `day`, and which takes over next (T6.16
+ * follow-up, 2026-09-26). Not the open-ended row: after "from April 2027, the 22nd", showing the
+ * successor told the firm September was due the 22nd. Uses only `periodsBetween` +
+ * `governsPeriod` with each row's own recurrence; an event rule's period is the day.
+ * `governing` is null when no window covers the day. `next` is the row whose first governed
+ * period (`firstPeriodGoverned`) comes soonest after the day's period starts; picking by cutover
+ * named windows holding no period. Retired rows read like any other (hiding one makes its
+ * predecessor look endless); `coverageOf` says what each does.
  */
 export function chainOnDay<T extends ObligationTemplate>(
   chain: readonly T[],
@@ -434,9 +273,7 @@ export function chainOnDay<T extends ObligationTemplate>(
 ): ChainOnDay<T> {
   const periodStart = (t: T): IsoDate =>
     periodsBetween(t.recurrence, t.fiscalYearStartMonth, day, day)[0]?.start ?? day;
-  // Oldest window first, so two rows claiming one period (which 0057's
-  // half-open windows are there to prevent) resolve to the later one, as the
-  // chain's own order would.
+  // Oldest window first, so two rows claiming one period (0057 forbids it) resolve to the later.
   const ordered = [...chain].sort((a, b) =>
     (a.effectiveFrom ?? "").localeCompare(b.effectiveFrom ?? "") || a.id.localeCompare(b.id),
   );
@@ -458,15 +295,8 @@ export function chainOnDay<T extends ObligationTemplate>(
 
 // ── the state an obligation is in ──────────────────────────────────────────
 
-/**
- * One row of the firm's own vocabulary for where an obligation has got to.
- *
- * Rows, not an enum, for 0050's reason — and NOTHING in this codebase ever
- * compares `code`. The demo this was built from looked states up by the literal
- * strings 'pending' and 'in_progress', which hardcodes the very names the firm
- * was promised it could change; the first rename would have switched the rule
- * off silently.
- */
+/** The firm's vocabulary for where an obligation has got to. Rows (0050), and no rule compares
+ *  `code`: the demo matched 'pending'/'in_progress' literally, so a rename disabled it. */
 export interface ObligationState {
   readonly id: string;
   readonly tenantId: string;
@@ -479,35 +309,14 @@ export interface ObligationState {
   readonly isTerminal: boolean;
   /** A partner has to choose what happens next — T3.3's queue. */
   readonly needsDecision: boolean;
-  /**
-   * Where an obligation lands when the work that discharges it is FINISHED
-   * (0054). At most one per firm, enforced by a partial unique index.
-   *
-   * `isTerminal` alone cannot answer this, because a firm starts with two
-   * terminal states and the other one is T3.3's `resolved` — the end of a
-   * deadline already missed, which a partner chose. A filing nobody had to
-   * decide anything about does not belong there.
-   */
+  /** Where finished work's obligation lands (0054); at most one per firm (partial unique index).
+   *  Not `isTerminal`: the other terminal state is T3.3's `resolved`, a partner's choice. */
   readonly isFiled: boolean;
-  /**
-   * Where an obligation lands when its statutory date passes undischarged
-   * (0055). At most one per firm, enforced by a partial unique index.
-   *
-   * A DESTINATION, and that is why `needsDecision` could not do this job.
-   * `needsDecision` is a description — this state is waiting on a person — and
-   * a firm may well end up with two such states, `missed` and later `disputed`.
-   * With two, "where does the sweep put an overdue filing" is a coin toss. The
-   * same argument 0054 made about `isTerminal`, one flag later.
-   */
+  /** Where an obligation lands when its statutory date passes unfiled (0055); at most one per
+   *  firm. A destination, unlike `needsDecision` (a description several states may share). */
   readonly isMissed: boolean;
-  /**
-   * Where an obligation lands when a partner decides it will never be filed
-   * (0055). At most one per firm.
-   *
-   * The mirror of `isFiled`, and it exists for the reason `isFiled` does: a
-   * firm has two terminal states, and "terminal and not filed" is a definition
-   * by subtraction that stops being true the moment a firm adds a third.
-   */
+  /** Where it ends when a partner decides it will never be filed (0055); at most one per firm.
+   *  Mirror of `isFiled`: "terminal and not filed" breaks once a third terminal state exists. */
   readonly isResolution: boolean;
   readonly sortOrder: number;
   readonly isActive: boolean;
@@ -519,30 +328,14 @@ export function initialState(states: readonly ObligationState[]): ObligationStat
   return states.find((s) => s.isInitial && s.isActive) ?? null;
 }
 
-/**
- * Where a finished filing lands, or null if this firm has nowhere for one to go.
- *
- * The mirror of `initialState`, and it reads a FLAG for the same reason: a firm
- * that renames Filed to "Submitted" must not thereby switch the whole closing
- * mechanism off. Retired states are skipped — a firm that retires its filed
- * state has said it no longer moves work there, and the service says so by name
- * rather than filing into a state nobody uses.
- */
+/** Where a finished filing lands, or null. A FLAG so renaming Filed cannot switch closing off;
+ *  retired states are skipped and the service refuses by name. */
 export function filedState(states: readonly ObligationState[]): ObligationState | null {
   return states.find((s) => s.isFiled && s.isActive) ?? null;
 }
 
-/**
- * Where an overdue obligation goes, or null if this firm has nowhere to put one.
- *
- * A FLAG, for the reason the whole module reads flags: the demo this was built
- * from found this state with `stateByCode('missed')`, alongside `'pending'` and
- * `'in_progress'` — so a firm renaming Missed to "Late" would have switched the
- * entire sweep off in silence, on the rows that matter most. Retired states are
- * skipped: a firm that retires its missed state has said it no longer sends
- * work there, and the sweep says so by name rather than filing rows into a
- * state nobody looks at.
- */
+/** Where an overdue obligation goes, or null. A flag: the demo used `stateByCode('missed')`, so
+ *  renaming Missed to "Late" silently stopped the sweep. Retired states are skipped. */
 export function missedState(states: readonly ObligationState[]): ObligationState | null {
   return states.find((s) => s.isMissed && s.isActive) ?? null;
 }
@@ -553,14 +346,7 @@ export function resolutionState(states: readonly ObligationState[]): ObligationS
   return states.find((s) => s.isResolution && s.isActive) ?? null;
 }
 
-/**
- * Whether an obligation in this state can still be MISSED.
- *
- * Derived from the two flags rather than stored as a third, so a firm adding a
- * ninth state does not have to reason about a flag whose meaning is already
- * implied. T3.3 is what acts on it; it lives here because the definition
- * belongs beside the states.
- */
+/** Whether a state can still be MISSED (acted on by T3.3); derived from the two flags. */
 export function canStillBeMissed(state: ObligationState): boolean {
   return !state.isTerminal && !state.needsDecision;
 }
@@ -578,17 +364,10 @@ export interface StateDefinition {
 }
 
 /**
- * What a brand-new firm starts with.
- *
- * MUST stay identical to the `@default-obligation-states-seed` literal in the
- * NEWEST migration carrying it (0052, then 0054) —
- * `tests/obligation/seed-parity.test.ts` fails the build if they drift. SQL
- * cannot import TypeScript, so the duplication is unavoidable and the drift is
- * what the test prevents.
- *
- * Five names, carried across the rebuild from a previous vendor's list, and
- * STILL UNCONFIRMED including for 10x itself. `missed` is deliberately not
- * terminal: a missed deadline is a state a partner resolves, not an ending.
+ * What a new firm starts with. MUST match the `@default-obligation-states-seed` literal in the
+ * newest migration carrying it (0052, then 0054); `tests/obligation/seed-parity.test.ts` checks.
+ * Five names from a previous vendor, STILL UNCONFIRMED, 10x included. `missed` is not terminal:
+ * a partner resolves it.
  */
 export const DEFAULT_OBLIGATION_STATES: readonly StateDefinition[] = [
   { code: "pending", name: "Pending", isInitial: true, isTerminal: false, needsDecision: false, isFiled: false, isMissed: false, isResolution: false, sortOrder: 10 },
@@ -600,16 +379,8 @@ export const DEFAULT_OBLIGATION_STATES: readonly StateDefinition[] = [
 
 // ── what a partner may choose about a deadline already missed ──────────────
 
-/**
- * One entry in the firm's own list of answers to "the date passed — now what?"
- *
- * ROWS, and the reason is not the usual one. Renaming matters, but what matters
- * more is that a closed list can be COUNTED: "how many did we accept a late fee
- * on this quarter" is a `GROUP BY` over a column and free text cannot answer it,
- * which is the question a partner actually asks. The reason stays free text
- * beside the option, because no list will ever contain "the client's accountant
- * was on leave and the books arrived on the 19th".
- */
+/** One of the firm's answers to "the date passed, now what?". Rows so they can be COUNTED ("late
+ *  fees accepted this quarter" is a GROUP BY); the reason stays free text beside it. */
 export interface ResolutionOption {
   readonly id: string;
   readonly tenantId: string;
@@ -617,24 +388,13 @@ export interface ResolutionOption {
   readonly code: string;
   readonly name: string;
   /**
-   * WHAT HAPPENS TO THE OBLIGATION, and the only branch this whole feature has.
-   *
-   * False — "file it provisionally", "accept the late fee", "file a nil return"
-   * — the filing still has to happen. The obligation goes back to the firm's
-   * initial state and the task is raised again; when that work finishes, 0054's
-   * `reconcileFiling` records it filed, late, with `daysLate` on the event.
-   * Nothing in this module has to know how that ends.
-   *
-   * True — "it never applied to this entity" — the filing will never happen and
-   * the obligation ends in the firm's resolution state.
-   *
-   * A COLUMN rather than a branch on `code`, so a firm adding "client
-   * deregistered mid-year" says which of the two it means without a deploy.
+   * The only branch this feature has. False (file provisionally, late fee, nil return): back to
+   * the initial state and the task is raised again; 0054's `reconcileFiling` then records it
+   * filed late with `daysLate`. True (never applied): ends in the firm's resolution state.
+   * A column, not a branch on `code`, so a new option says which it means without a deploy.
    */
   readonly closesWithoutFiling: boolean;
-  /** Whether the FIRM has confirmed this option belongs on its list. See
-   *  `RuleStatus` — same word, same reason, and these four came from the same
-   *  previous vendor's document. */
+  /** Whether the firm confirmed this option; see `RuleStatus` (same previous-vendor source). */
   readonly status: RuleStatus;
   readonly sortOrder: number;
   readonly isActive: boolean;
@@ -648,22 +408,10 @@ export interface ResolutionOptionDefinition {
 }
 
 /**
- * What a brand-new firm starts with.
- *
- * MUST stay identical to the `@default-resolution-options-seed` literal in the
- * NEWEST migration carrying it (0055) — `tests/obligation/seed-parity.test.ts`
- * fails the build if they drift.
- *
- * Four options, carried across the rebuild from a previous vendor's app, where
- * they were a hardcoded TypeScript literal in a form component. They match what
- * the firm described its practice to be, and they are STILL UNCONFIRMED as a
- * LIST — described in a conversation is not the same as checked against these
- * four, and the firm's own open-questions file has carried that distinction
- * since before the rebuild.
- *
- * There is deliberately no option meaning "ignore". A passed statutory date is
- * a fork with consequences either way, and a list that let one be dismissed
- * would hide the thing this queue exists to surface.
+ * What a new firm starts with. MUST match `@default-resolution-options-seed` in the newest
+ * migration carrying it (0055); `tests/obligation/seed-parity.test.ts` checks. From a previous
+ * vendor's form literal; they match the firm's described practice but are STILL UNCONFIRMED as a
+ * list. No "ignore" option on purpose: a passed statutory date has consequences either way.
  */
 export const DEFAULT_RESOLUTION_OPTIONS: readonly ResolutionOptionDefinition[] = [
   { code: "provisional_filing", name: "File provisionally", closesWithoutFiling: false, sortOrder: 10 },
@@ -673,25 +421,11 @@ export const DEFAULT_RESOLUTION_OPTIONS: readonly ResolutionOptionDefinition[] =
 ];
 
 /**
- * Whether this obligation is one the sweep should be flagging.
- *
- * Every condition the decision queue depends on, in one place so the sweep, the
- * screen and the tests cannot disagree:
- *
- *   · the statutory date has passed — the LAW's date, never the firm's own
- *     internal target. Missing T–X means the firm is behind and the work board
- *     already shows it; missing this one costs the client money.
- *   · nothing was filed. 0054 owns `filedOn`, and un-filing a reopened item is
- *     what lets this sweep correct itself rather than needing a second rule.
- *   · nobody has decided about it yet. An obligation sent BACK to work after a
- *     partner chose "file it late" still has a statutory date in the past
- *     forever, so without this it would be re-flagged every single night.
- *   · the state it is in can still be missed.
- *   · it falls on or after the firm's go-live floor, when the firm has set one.
- *
- * `floor` is null when the firm has published no `compliance_policy`, and null
- * means NO floor rather than "today" — a firm that has not answered has not
- * asked us to hide anything.
+ * Whether the sweep should flag this missed; one place so sweep, screen and tests agree. All of:
+ * the STATUTORY date passed (never the T–X target); not filed (0054's `filedOn`; un-filing a
+ * reopened item lets the sweep self-correct); not yet decided (a row sent back after "file it
+ * late" would re-flag nightly); its state can still be missed; on or after the go-live `floor`.
+ * A null floor (no `compliance_policy`) means no floor, not "today".
  */
 export function shouldBeFlaggedMissed(
   o: {
@@ -710,13 +444,8 @@ export function shouldBeFlaggedMissed(
   return canStillBeMissed(state);
 }
 
-/**
- * A code is a lowercase handle, 2-40 chars.
- *
- * Duplicated from `domain/workitem/model.ts` rather than imported, and the arch
- * wall requires it: the two domains are siblings and neither may import the
- * other. The same duplication `isIsoDate` already carries, three times over.
- */
+/** A lowercase handle, 2-40 chars. Duplicated from `domain/workitem/model.ts`: sibling domains
+ *  may not import each other. */
 export function isValidVocabularyCode(code: string): boolean {
   return /^[a-z0-9](?:[a-z0-9_-]{0,38}[a-z0-9])$/.test(code);
 }
@@ -725,14 +454,8 @@ export function normalizeVocabularyCode(code: string): string {
   return code.trim().toLowerCase();
 }
 
-/**
- * Which single DESTINATION a state is, or null for an ordinary working state.
- *
- * The four destination flags are mutually exclusive — 0055 checks it — so this
- * collapses them to the one answer a screen and a refusal both want. Named here
- * rather than written out at each call site so "what are the destinations" has
- * one definition, and adding a fifth is one edit.
- */
+/** Which single destination a state is, or null for a working state. The four flags are mutually
+ *  exclusive (0055 checks), so this is the one definition of "the destinations". */
 export type StateDestination = "initial" | "filed" | "missed" | "resolution";
 
 export const STATE_DESTINATIONS: readonly StateDestination[] = [
@@ -773,34 +496,25 @@ function iso(year: number, month1: number, day: number): IsoDate {
   return `${String(year).padStart(4, "0")}-${String(month1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
 
-/** Days in a month, 1-indexed. `Date.UTC(y, m, 0)` is day zero of the NEXT
- *  month, which is the last day of this one — February without a library. */
+/** Days in a month, 1-indexed: `Date.UTC(y, m, 0)` is the last day of month m. */
 export function daysInMonth(year: number, month1: number): number {
   return new Date(Date.UTC(year, month1, 0)).getUTCDate();
 }
 
-/** Month arithmetic in absolute months, so December + 1 crosses the year
- *  without a special case. Returns `[year, month1]`. */
+/** Absolute-month arithmetic, so December + 1 crosses the year. Returns `[year, month1]`. */
 function addMonths(year: number, month1: number, months: number): [number, number] {
   const zero = year * 12 + (month1 - 1) + months;
   return [Math.floor(zero / 12), (zero % 12) + 1];
 }
 
-/** Day arithmetic on a date STRING. Goes through epoch milliseconds at UTC
- *  midnight and comes straight back out, so no local zone ever touches it. */
+/** Day arithmetic through UTC-midnight epoch ms, so no local zone touches it. */
 export function addDays(d: IsoDate, days: number): IsoDate {
   const t = Date.parse(`${d}T00:00:00Z`) + days * 86_400_000;
   return new Date(t).toISOString().slice(0, 10);
 }
 
-/**
- * Whole days from `from` to `to`, negative when `to` is earlier.
- *
- * The same UTC-midnight trick as `addDays`, and for the same reason: both ends
- * are DAYS, so no zone and no daylight saving may touch the subtraction. Used
- * to say how late a filing was, which is the one number a partner asks about
- * afterwards.
- */
+/** Whole days from `from` to `to` (negative if earlier), at UTC midnight like `addDays`. Used
+ *  for how late a filing was. */
 export function daysBetween(from: IsoDate, to: IsoDate): number {
   return Math.round(
     (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000,
@@ -808,19 +522,9 @@ export function daysBetween(from: IsoDate, to: IsoDate): number {
 }
 
 /**
- * Every period of a recurrence that overlaps a window.
- *
- * `fiscalYearStartMonth` matters more than it looks. India's financial year
- * starts in April, so an Indian QUARTER is Apr–Jun, not Jan–Mar. Computing
- * quarters on the calendar would put every Indian quarterly filing in the wrong
- * period, and the due date that follows would be wrong too — which is the first
- * half of T3.2's acceptance line.
- *
- * Monthly is exempt from the fiscal year: a month is a month in every country,
- * and aligning it to April would produce the same twelve periods with worse
- * arithmetic.
- *
- * Returns nothing for `event`: no period means nothing to enumerate.
+ * Every period of a recurrence overlapping a window; none for `event`. Quarters, halves and years
+ * align to `fiscalYearStartMonth` (an Indian quarter is Apr–Jun; calendar quarters would misdate
+ * every Indian quarterly filing, T3.2's acceptance line). Monthly ignores the fiscal year.
  */
 export function periodsBetween(
   recurrence: ObligationRecurrence,
@@ -848,9 +552,7 @@ export function periodsBetween(
     return out;
   }
 
-  // Quarters, half-years and years all hang off the fiscal year, so all three
-  // start by finding which fiscal period the window's first month falls into
-  // and stepping back to that period's own first month.
+  // Step back to the first month of the fiscal period holding the window's first month.
   const step = MONTHS_PER_PERIOD[recurrence];
   const offsetInYear = (fromMonth - fiscalYearStartMonth + 12) % 12;
   let [y, m] = addMonths(fromYear, fromMonth, -(offsetInYear % step));
@@ -858,8 +560,7 @@ export function periodsBetween(
   while (iso(y, m, 1) <= to) {
     const [endYear, endMonth] = addMonths(y, m, step - 1);
     const end = iso(endYear, endMonth, daysInMonth(endYear, endMonth));
-    // A period that ended before the window began is not in the window — it can
-    // only be produced by the step-back above.
+    // Only the step-back above can produce a period ending before the window.
     if (end >= from) {
       out.push({ start: iso(y, m, 1), end, label: periodLabel(recurrence, y, m, fiscalYearStartMonth) });
     }
@@ -868,14 +569,8 @@ export function periodsBetween(
   return out;
 }
 
-/**
- * What the period is called.
- *
- * A calendar year is written "2026". A fiscal year that straddles two of them is
- * written the way the country writes it — "FY2026-27" in India — because a
- * filing labelled "2026" while covering Apr 2026 to Mar 2027 is exactly the
- * ambiguity that gets the wrong period filed.
- */
+/** "2026" for a calendar year; "FY2026-27" for a straddling fiscal year, because "2026" for
+ *  Apr 2026–Mar 2027 is how the wrong period gets filed. */
 function periodLabel(
   recurrence: ObligationRecurrence,
   year: number,
@@ -897,16 +592,8 @@ function periodLabel(
 
 // ── the dates ──────────────────────────────────────────────────────────────
 
-/**
- * Which rule actually governs this period.
- *
- * Matched on the month the PERIOD ends in rather than the month it is due,
- * because the due month is exactly what the exception changes — keying on it
- * would mean asking the answer to find the question.
- *
- * Pure, and separate from `statutoryDueDate`, so that function stays a
- * transform over one rule and does not have to know exceptions exist.
- */
+/** Which rule governs this period: matched on the month the PERIOD ends, not the due month (the
+ *  thing an exception changes). Separate so `statutoryDueDate` knows only one rule. */
 export function effectiveDueRule(
   base: DueRule,
   exceptions: readonly DueRuleException[],
@@ -916,13 +603,7 @@ export function effectiveDueRule(
   return exceptions.find((e) => e.periodEndMonth === endsIn) ?? base;
 }
 
-/**
- * When the law wants it, given the period it covers.
- *
- * The day is CLAMPED to the length of the month: a rule reading "the 30th"
- * lands on 28 February rather than rolling silently into March, which is what
- * date arithmetic does if you let it.
- */
+/** When the law wants it. The day clamps to month length: "the 30th" is 28 February, not March. */
 export function statutoryDueDate(rule: DueRule, period: Period): IsoDate {
   if (rule.kind === "days_after") {
     return addDays(period.end, rule.dueDaysAfter ?? 0);
@@ -935,17 +616,9 @@ export function statutoryDueDate(rule: DueRule, period: Period): IsoDate {
 }
 
 /**
- * When the FIRM wants it — T–X.
- *
- * Never after the statutory date, which is the only clamp there is.
- *
- * A TARGET BEFORE THE PERIOD ENDS IS ALLOWED, and that is deliberate rather
- * than an oversight. The obvious-looking second clamp — "you cannot start
- * before the month you are reporting on is over" — is wrong on the firm's own
- * sheet: Advance Tax for Apr–Jun is due 15 JUNE, inside its own quarter,
- * because it is an estimate. Adding that clamp would have silently cancelled
- * the lead time on every such rule. A firm that sets 30 days on a monthly
- * filing has asked to start before month end, and that is its call to make.
+ * When the FIRM wants it (T–X): never after the statutory date, the only clamp. A target before
+ * the period ends is deliberate: Advance Tax for Apr–Jun is due 15 June, inside its quarter, so
+ * a "not before period end" clamp would cancel its lead time.
  */
 export function internalTargetDate(statutoryDue: IsoDate, leadTimeDays: number): IsoDate {
   if (leadTimeDays <= 0) return statutoryDue;
@@ -968,31 +641,17 @@ export interface ObligationInstance {
   readonly stateId: string;
   readonly workItemId: string | null;
   readonly filedOn: IsoDate | null;
-  /**
-   * The task whose completion filed this row (Q063, 0357): its own task, or
-   * the task of the period job that covered it. Null while unfiled. Reopening
-   * a task un-files only the rows naming it, so a job's task reopened never
-   * un-files a return somebody filed through its own task, and the other way
-   * round.
-   */
+  /** The task whose completion filed this row (Q063, 0357): its own or its period job's.
+   *  Reopening a task un-files only the rows naming it. Null while unfiled. */
   readonly filedByWorkItemId: string | null;
-  /** What the partner chose when the statutory date passed unfiled, and why.
-   *  All three together or all three null — 0055 checks it in the database
-   *  because a decision with no reason is what this feature exists to prevent. */
+  /** The partner's choice when the date passed unfiled, and why: all three or none (0055). */
   readonly resolutionOptionId: string | null;
   readonly resolutionReason: string | null;
-  /** An instant, not a day: unlike `filedOn` this is not a claim about a
-   *  statutory date, it is when a person clicked. */
+  /** An instant (when a person clicked), not a statutory day. */
   readonly resolvedAt: string | null;
-  /**
-   * Taken off the calendar because the service that owed it stopped including
-   * it and nothing else the client holds covers it (T6.16, 0309). KEPT and
-   * marked, never deleted: "we thought you owed this, then you stopped buying
-   * the service" is a fact somebody may have to explain. Null is the ordinary
-   * case. Every reader that shows, raises, misses, nudges or escalates a filing
-   * leaves a withdrawn one out; `findById` does not, because restoring one has
-   * to be able to see it.
-   */
+  /** Taken off the calendar because its service stopped including it and nothing else covers it
+   *  (T6.16, 0309). Marked, never deleted. Every reader that shows, raises, misses, nudges or
+   *  escalates skips withdrawn rows; `findById` does not, so a restore can see it. */
   readonly withdrawnAt: string | null;
   readonly withdrawnByUserId: string | null;
   readonly withdrawnReason: WithdrawnReason | null;
@@ -1001,29 +660,16 @@ export interface ObligationInstance {
   readonly periodBasis: InstancePeriodBasis;
 }
 
-/** Why a filing was taken off the calendar. A closed set, so "why" can be
- *  grouped: its service stopped carrying it (0309), or its engagement ended
- *  before the period began (0314). */
+/** Why a filing was withdrawn, a closed set: its service dropped it (0309) or its engagement
+ *  ended before the period began (0314). */
 export type WithdrawnReason = "service_unlinked" | "engagement_ended";
 
 /**
- * Whether removing a rule from a service may take this filing off the
- * calendar (T6.16, decision 2).
- *
- * UNTOUCHED — no task raised, not filed, not decided: the same three columns
- * the supersede handover tests (0303). A filing somebody started keeps the
- * date its owner is working to; a filed or decided one is history.
- * UPCOMING — its statutory date is on or after the FIRM's today (`dayInZone`,
- * never the server's). A date that has passed is a deadline the client may
- * have missed, and quietly removing it would hide exactly the row a partner
- * most needs to see.
- * NOT WAITING ON A DECISION and NOT SETTLED, by the state's FLAGS, never its
- * code: a missed filing is a partner's question and stays one.
- *
- * Whether ANOTHER linked service of the same client still covers it is the
- * other half, and only the adapter can answer that, in the same transaction
- * as the removal. Named here so the SQL, the fake and a reader agree on what
- * the first half means.
+ * Whether removing a rule from a service may withdraw this filing (T6.16, decision 2): no task,
+ * not filed, not decided (the 0303 handover columns); statutory date on or after the FIRM's today
+ * (`dayInZone`), since a passed date may be a miss a partner must see; and, by state FLAGS, not
+ * waiting on a decision or settled. Whether another linked service still covers it is the
+ * adapter's half, in the removal's transaction.
  */
 export function mayBeWithdrawn(
   row: Pick<ObligationInstance, "workItemId" | "filedOn" | "resolvedAt" | "statutoryDueOn" | "withdrawnAt">,
@@ -1041,13 +687,8 @@ export function mayBeWithdrawn(
   );
 }
 
-/**
- * Everything one rule says about one entity in one period, computed.
- *
- * The single place a template plus a period becomes dates, so the generator,
- * the "what would this rule do" preview on the rules screen, and every test
- * agree by construction rather than by two people writing the same arithmetic.
- */
+/** One rule, one entity, one period, to dates. The single place, so the generator, the rules
+ *  screen preview and the tests agree by construction. */
 export function scheduleFor(
   template: ObligationTemplate,
   exceptions: readonly DueRuleException[],

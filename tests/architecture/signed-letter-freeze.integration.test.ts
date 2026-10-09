@@ -1,40 +1,10 @@
-// THE SIGNED-LETTER FREEZE, as a property of the TABLE rather than a list of
-// columns somebody maintains.
-//
-// A signed engagement letter is the record of what a client agreed to, so it is
-// frozen in the DATABASE (migration 0017) and not in the service: "what did they
-// sign" is a question a court asks, and an application rule cannot answer it
-// against a migration, a backfill or a 2 a.m. psql session.
-//
-// The freeze used to compare an ENUMERATED list of columns, which meant a column
-// not on that list was SILENTLY editable after signature — no error, nothing to
-// notice, and six columns were already in that hole. Migration 0019 inverted it:
-// the trigger now refuses ANY change except to the short allow-list published by
-// `crm.signed_letter_mutable_columns()`.
-//
-// This test does not enumerate the columns either. It asks the CATALOGUE for
-// every column of `crm.engagement_letter` and, for each one that is not on the
-// allow-list, updates it on a signed letter AS THE OWNER ROLE and demands
-// `restrict_violation` — the same shape as tenant-keys.integration.test.ts, and
-// for the same reason: a column added next month is covered the day it exists
-// rather than the day somebody remembers. G1.1–G1.8 add roughly a dozen.
-//
-// It reads the allow-list from the database rather than keeping a second copy,
-// because a duplicated list drifts in exactly the direction that matters — the
-// test keeps passing while the freeze has been widened. The list's CONTENTS are
-// then pinned below, so widening it is a visible, argued edit to this file.
-//
-// AND THE SAME SWEEP OVER THE LINE TABLE, added by G1.6. The head's freeze was
-// a property of the TABLE and the line's was a property of nobody checking: a
-// column added to `crm.engagement_letter_line` was protected by
-// `crm.refuse_signed_child_change()` (0017, which refuses ANY write) and
-// nothing said so, so the ten columns G1.6 added — the four scope OVERRIDES
-// among them, which are the words the client actually agreed to — would have
-// gone in with no test claiming they cannot move after signature. The line
-// sweep asks the catalogue the same way, so the eleventh column is covered the
-// day it exists. It needs no allow-list: nothing on a signed letter's line may
-// change, and that is the whole rule.
-//
+// The signed-letter freeze as a property of the TABLE. A signed letter is what the client
+// agreed to, so it is frozen in the DATABASE (0017), where no migration, backfill or psql
+// session gets past it. Since 0019 the trigger refuses ANY change except the allow-list
+// `crm.signed_letter_mutable_columns()`, read from the DB here and its contents pinned below.
+// Every column comes from the catalogue (like tenant-keys.integration.test.ts), so a new one
+// is covered the day it exists. The line table (G1.6) is swept the same way with no
+// allow-list: `crm.refuse_signed_child_change()` (0017) refuses every write.
 // Run with:  npm run test:integration   (needs a migrated local database)
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import postgres from "postgres";
@@ -45,27 +15,22 @@ const owner = postgres(cfg.db.ownerUrl, { max: 2 });
 
 const stamp = Date.now().toString(36);
 
-/** The three columns that have a written reason to move after signature, per
- *  migration 0019. Pinned here so that adding a fourth means editing this line
- *  and saying why — the freeze cannot be widened quietly. */
+/** The columns with a written reason to move after signature (0019); pinned so the freeze
+ *  cannot be widened quietly. */
 const EXPECTED_MUTABLE = ["advance_recorded_at", "advance_recorded_by", "updated_at"];
 
-/** Untouched by every test in this file: the frozen-column sweep updates it two
- *  dozen times and every one of those updates must be refused. */
+/** Never changed: every one of the column sweep's updates must be refused. */
 let frozenLetter = "";
-/** A live line on the frozen letter, and one on the draft — the line sweep's
- *  subject and its control. */
+/** A line on the frozen letter and one on the draft: the line sweep's subject and control. */
 let frozenLine = "";
 let draftLine = "";
 /** The catalogue version both probe lines pin. */
 let serviceVersion = "";
-/** The signed letter `frozenLine` hangs off — its own, so the head sweep's row
- *  never gains a child. */
+/** The signed letter `frozenLine` hangs off; its own, so the head sweep's row has no child. */
 let frozenLineLetter = "";
 /** The one the allow-list is exercised against, so the sweep's row never moves. */
 let advanceLetter = "";
-/** Not signed — the control. A trigger that refused everything would pass every
- *  assertion above and break drafting. */
+/** Unsigned control: a trigger that refused everything would pass and break drafting. */
 let draftLetter = "";
 let recorder = "";
 
@@ -75,15 +40,12 @@ interface ColumnRow {
   readonly category: string;
 }
 
-/** Each probe letter needs its own reference: `UNIQUE (tenant_id, ref)` (0020)
- *  is real, and two probes sharing one would fail on the constraint rather than
- *  on the freeze this file is about. */
+/** One ref per probe letter, or `UNIQUE (tenant_id, ref)` (0020) fails before the freeze. */
 let refCounter = 0;
 
 async function insertSignedLetter(tenantId: string, partyId: string): Promise<string> {
   refCounter += 1;
-  // Raw SQL, no service: the freeze exists to hold when the application is
-  // bypassed, so the fixture bypasses it too. The trigger is BEFORE UPDATE OR
+  // Raw SQL: the freeze must hold when the app is bypassed. The trigger is BEFORE UPDATE OR
   // DELETE, so a row may be INSERTed already signed.
   const [row] = await owner<{ id: string }[]>`
     INSERT INTO crm.engagement_letter
@@ -124,8 +86,7 @@ beforeAll(async () => {
   frozenLetter = await insertSignedLetter(tenant.id, party.id);
   advanceLetter = await insertSignedLetter(tenant.id, party.id);
 
-  // A published service for the probe lines to pin. Raw SQL, like everything
-  // else here: this file bypasses the application on purpose.
+  // A published service for the probe lines to pin.
   const [entry] = await owner<{ id: string }[]>`
     INSERT INTO config.entry (tenant_id, kind, key)
     VALUES (${tenant.id}, 'service', 'freeze-probe') RETURNING id
@@ -140,10 +101,8 @@ beforeAll(async () => {
   if (!version) throw new Error("could not create the probe service version");
   serviceVersion = version.id;
 
-  // THE LINE HAS TO EXIST BEFORE THE SIGNATURE. `trg_el_line_freeze` refuses an
-  // INSERT onto a signed letter as firmly as an UPDATE — which is the rule, not
-  // an obstacle — so the sweep's letter is drafted, given its line, and only
-  // then signed.
+  // The line must exist before signing: `trg_el_line_freeze` refuses an INSERT onto a
+  // signed letter too. So draft, add the line, then sign.
   const lineLetter = await insertDraftLetter(tenant.id, party.id);
   frozenLine = await insertLine(tenant.id, lineLetter);
   await signLetter(lineLetter);
@@ -162,8 +121,7 @@ beforeAll(async () => {
   draftLine = await insertLine(tenant.id, draftLetter);
 });
 
-/** An UNSIGNED letter. The line sweep needs one, because a line cannot be
- *  inserted onto a signed letter at all. */
+/** An UNSIGNED letter: a line cannot be inserted onto a signed one. */
 async function insertDraftLetter(tenantId: string, partyId: string): Promise<string> {
   refCounter += 1;
   const [row] = await owner<{ id: string }[]>`
@@ -178,8 +136,7 @@ async function insertDraftLetter(tenantId: string, partyId: string): Promise<str
   return row.id;
 }
 
-/** Sign it, in the one statement the CHECKs allow: a letter that claims to be
- *  signed with no signature is refused by 0017. */
+/** Sign in one statement: 0017's CHECKs refuse a signed letter with no signature. */
 async function signLetter(letterId: string): Promise<void> {
   await owner`
     UPDATE crm.engagement_letter
@@ -190,14 +147,8 @@ async function signLetter(letterId: string): Promise<void> {
   `;
 }
 
-/**
- * A line on a letter, with EVERY nullable column filled in.
- *
- * Filled in because a freeze is only exercised by columns that hold something:
- * "set a null column to null" is not a change, and the sweep below would pass
- * vacuously on a line that stated nothing. The four overrides in particular have
- * to hold real wording — they are what a tamper would target.
- */
+/** A line with EVERY nullable column filled: null-to-null is no change, so an empty line
+ *  would pass the sweep vacuously. The four overrides hold real wording, a tamper's target. */
 async function insertLine(tenantId: string, letterId: string): Promise<string> {
   const [row] = await owner<{ id: string }[]>`
     INSERT INTO crm.engagement_letter_line
@@ -256,12 +207,9 @@ async function declaredMutableColumns(): Promise<readonly string[]> {
   return row.columns;
 }
 
-/** A value guaranteed to DIFFER from what the probe letter holds — otherwise the
- *  freeze is right not to fire and the test proves nothing. NULL does it for any
- *  column that holds a value (the NOT NULL check runs after BEFORE triggers, so
- *  the trigger still gets its say); a column that is already NULL needs a typed
- *  literal instead, and a type this has no literal for stops the build rather
- *  than skipping the column. */
+/** A value that DIFFERS from the probe's, or the freeze rightly stays silent. NULL works for
+ *  a filled column (NOT NULL is checked after BEFORE triggers); an empty column needs a typed
+ *  literal, and a type with none fails the build rather than skipping the column. */
 function probeValueFor(column: ColumnRow, currentlyNull: boolean): string {
   if (!currentlyNull) return "NULL";
   switch (column.category) {
@@ -299,8 +247,7 @@ describe("the freeze covers every column of crm.engagement_letter", () => {
     if (!current) throw new Error("the probe letter vanished");
 
     const frozen = columns.filter((c) => !mutable.includes(c.name));
-    // A sweep over an empty set passes vacuously, which is the one way this
-    // test could lie about the whole table.
+    // An empty sweep would pass vacuously.
     expect(frozen.length).toBeGreaterThan(0);
 
     const escaped: string[] = [];
@@ -316,9 +263,7 @@ describe("the freeze covers every column of crm.engagement_letter", () => {
         .then(() => "the UPDATE SUCCEEDED — this column is editable after signature")
         .catch((e: unknown) => {
           const code = (e as { code?: string }).code;
-          // restrict_violation, and nothing else: a check or not-null violation
-          // means the statement was stopped by an unrelated rule and the freeze
-          // itself never fired.
+          // Only restrict_violation: a check or not-null violation means the freeze never fired.
           return code === "23001"
             ? null
             : `refused with SQLSTATE ${code ?? "(none)"}, not restrict_violation`;
@@ -326,7 +271,6 @@ describe("the freeze covers every column of crm.engagement_letter", () => {
       if (outcome) escaped.push(`${column.name} (${column.type}): ${outcome}`);
     }
 
-    // The message is the fix, not just the failure.
     expect(
       escaped,
       "each of these columns of a SIGNED engagement letter can be changed after the client " +
@@ -338,7 +282,7 @@ describe("the freeze covers every column of crm.engagement_letter", () => {
   });
 
   it("refuses a DELETE of a signed letter", async () => {
-    // The trigger's other arm. A signed letter is superseded, never removed.
+    // A signed letter is superseded, never removed.
     const err = await owner`DELETE FROM crm.engagement_letter WHERE id = ${frozenLetter}`.catch(
       (e: unknown) => e,
     );
@@ -349,9 +293,7 @@ describe("the freeze covers every column of crm.engagement_letter", () => {
     const mutable = await declaredMutableColumns();
     expect([...mutable].sort()).toEqual([...EXPECTED_MUTABLE].sort());
 
-    // A rename would otherwise shrink the freeze's exemptions to nothing
-    // silently — or, worse, leave a stale name exempting a column that no
-    // longer exists while the real one goes unprotected.
+    // A rename would silently leave a stale exemption while the real column goes unprotected.
     const names = (await letterColumns()).map((c) => c.name);
     expect(mutable.filter((m) => !names.includes(m))).toEqual([]);
   });
@@ -359,17 +301,9 @@ describe("the freeze covers every column of crm.engagement_letter", () => {
 
 describe("the freeze covers every column of crm.engagement_letter_line", () => {
   it("refuses an UPDATE to each one, as the owner role", async () => {
-    // The LINE table has no allow-list, and that asymmetry is the design:
-    // `crm.refuse_signed_child_change()` (0017) refuses ANY write once the
-    // parent is signed, because nothing on a term of a signed agreement has a
-    // reason to move. So every column is swept, `updated_at` included — a
-    // trigger that tried to touch it on a signed line would itself be refused,
-    // which is correct.
-    //
-    // G1.6's ten columns are the reason this sweep exists. The four scope
-    // OVERRIDES are the words the client agreed to; a letter whose scope could
-    // be quietly narrowed after signature would make the whole G1.6 argument —
-    // "this is what makes an issued document reproducible" — false.
+    // No allow-list, by design: `crm.refuse_signed_child_change()` (0017) refuses ANY write
+    // once the parent is signed, `updated_at` included. G1.6's four scope OVERRIDES are the
+    // words the client agreed to; narrowing them later would make the issued document unreproducible.
     const columns = await lineColumns();
     const [current] = await owner<{ row: Record<string, unknown> }[]>`
       SELECT to_jsonb(l) AS row FROM crm.engagement_letter_line l WHERE id = ${frozenLine}
@@ -407,29 +341,19 @@ describe("the freeze covers every column of crm.engagement_letter_line", () => {
   });
 
   it("refuses MOVING a line off the signed letter onto a draft one", async () => {
-    // THE HOLE THIS SWEEP FOUND, and what migration 0024 closed.
-    // `crm.refuse_signed_child_change()` (0017) resolved the parent from
-    // NEW.engagement_letter_id on an UPDATE, so it asked about the letter the
-    // row was moving TO and never about the one it was moving FROM. Repointing
-    // a signed letter's line at any draft letter of the same firm in the same
-    // currency succeeded — a term removed from a signed agreement, the letter's
-    // totals changed, and nothing raised.
-    //
-    // It is the same SHAPE of bug as the one 0019 fixed on the head: a trigger
-    // asking a narrower question than the rule it enforces.
+    // The hole this sweep found, closed by 0024: 0017 resolved the parent from
+    // NEW.engagement_letter_id only, so a signed letter's line could be repointed at a draft
+    // (same firm, same currency) and silently leave the signed agreement.
     const err = await owner`
       UPDATE crm.engagement_letter_line
          SET engagement_letter_id = ${draftLetter}
        WHERE id = ${frozenLine}
     `.catch((e: unknown) => e);
     expect((err as { code?: string }).code).toBe("23001");
-    // The refusal names WHICH letter objected and says the row was being moved,
-    // because "the letter is signed" with two letters in the statement sends
-    // the reader to the trigger source.
+    // With two letters in the statement, the refusal must say the row was being moved.
     expect((err as Error).message).toContain("moves a engagement_letter_line");
 
-    // The line is still where it was. A refusal that left it moved would be the
-    // bug with an error message.
+    // And the line did not move.
     const [row] = await owner<{ engagement_letter_id: string }[]>`
       SELECT engagement_letter_id FROM crm.engagement_letter_line WHERE id = ${frozenLine}
     `;
@@ -437,9 +361,7 @@ describe("the freeze covers every column of crm.engagement_letter_line", () => {
   });
 
   it("refuses a DELETE, and an INSERT of a new line", async () => {
-    // The other two arms. A term cannot be removed from a signed agreement, and
-    // one cannot be added to it either — the second is the one an application
-    // rule forgets.
+    // A term can be neither removed nor added; the add is the one an app rule forgets.
     const deleted = await owner`
       DELETE FROM crm.engagement_letter_line WHERE id = ${frozenLine}
     `.catch((e: unknown) => e);
@@ -455,8 +377,7 @@ describe("the freeze covers every column of crm.engagement_letter_line", () => {
   });
 
   it("leaves a DRAFT letter's line freely editable", async () => {
-    // The control. A trigger that raised on everything would satisfy both
-    // assertions above and make drafting impossible.
+    // The control: a trigger that raised on everything would pass the tests above.
     await owner`
       UPDATE crm.engagement_letter_line
          SET scope_override = 'Rewritten while still a draft', billing_frequency = 'annually'
@@ -473,10 +394,8 @@ describe("the freeze covers every column of crm.engagement_letter_line", () => {
 
 describe("and it refuses only what it should", () => {
   it("still lets the advance be recorded on a signed letter", async () => {
-    // The reason the allow-list exists. The advance is attested AFTER signature
-    // — that is the whole sequence — and recording it is what releases the
-    // engagements from `pending_advance`. A freeze that refused this would look
-    // exactly like a freeze that worked, right up to the first client payment.
+    // Why the allow-list exists: the advance is recorded AFTER signature and releases the
+    // engagements from `pending_advance`.
     await owner`
       UPDATE crm.engagement_letter
          SET advance_recorded_at = now(), advance_recorded_by = ${recorder}
@@ -490,10 +409,8 @@ describe("and it refuses only what it should", () => {
   });
 
   it("lets updated_at be written explicitly on a signed letter", async () => {
-    // updated_at is on the allow-list even though tenancy.set_updated_at()
-    // currently writes it in a trigger that fires AFTER the freeze. Depending on
-    // that ordering would mean a trigger renamed in 2027 freezes the advance
-    // gate solid with nothing connecting the two.
+    // Allow-listed though tenancy.set_updated_at() fires AFTER the freeze today: relying on
+    // trigger order would let a rename freeze the advance gate.
     await owner`
       UPDATE crm.engagement_letter SET updated_at = now() WHERE id = ${advanceLetter}
     `;
@@ -505,8 +422,7 @@ describe("and it refuses only what it should", () => {
   });
 
   it("leaves an UNSIGNED letter freely editable", async () => {
-    // The control. A trigger that raised on everything would satisfy every
-    // assertion above and make drafting impossible.
+    // The control: a trigger that raised on everything would pass every test above.
     await owner`
       UPDATE crm.engagement_letter
          SET title = 'Rewritten while still a draft', jurisdiction = 'AE'
@@ -520,8 +436,7 @@ describe("and it refuses only what it should", () => {
   });
 
   it("names the columns the caller actually touched", async () => {
-    // A refusal that does not say WHICH field was in the way sends whoever hit
-    // it into the trigger source to find out.
+    // The refusal must say WHICH field was in the way.
     const err = await owner`
       UPDATE crm.engagement_letter
          SET title = 'quietly different', signature_reference = 'tampered'
@@ -534,75 +449,27 @@ describe("and it refuses only what it should", () => {
 });
 
 describe("and EVERY child of a signed letter is frozen, not just the ones we remember", () => {
-  // THE GAP THIS CLOSES. The sweep above enumerates the COLUMNS of
-  // `engagement_letter_line` from the catalogue, so a column added next month
-  // is covered the day it exists. Nothing did the same for the TABLES: `line`
-  // and `clause` got their triggers in 0017 because somebody wrote two CREATE
-  // TRIGGER statements, and a third child table would have arrived unprotected
-  // with every test in this file still green.
-  //
-  // That is not hypothetical — G1.7 added `crm.document_block`, and the prose a
-  // client agreed to is exactly as much a term of the agreement as a line is.
-  // So the rule is asked of the catalogue, the way the tenant-key guard is: any
-  // table with an `engagement_letter_id` column is a child of a letter, and a
-  // child of a letter carries the freeze.
+  // Every TABLE with an `engagement_letter_id` column is a child of a letter and carries the
+  // freeze, asked of the catalogue like the tenant-key guard. `line` and `clause` got hand-written
+  // triggers in 0017; G1.7's `crm.document_block` showed a third child arrives unprotected otherwise.
   /**
-   * `crm.engagement` is a child of a letter and is DELIBERATELY not frozen, and
-   * the exception is named here rather than left as a hole the query happens
-   * not to look at.
-   *
-   * It is not a TERM of the agreement; it is a CONSEQUENCE of one. Signing
-   * CREATES these rows — the fan-out is one engagement per line, in the same
-   * transaction as the signature — so a trigger refusing every write to a
-   * signed letter's children would refuse the act of signing itself. And they
-   * keep moving afterwards on purpose: an engagement starts `pending_advance`
-   * and becomes `active` when the advance is recorded, which is `recordAdvance`
-   * updating a row that hangs off a signed letter, by design.
-   *
-   * The line is: what the letter SAYS is frozen (its lines, its clauses, its
-   * prose); what the letter CAUSED has its own lifecycle. Adding a name to this
-   * list is the thing that needs an argument.
-   *
-   * `crm.letter_signature_request` (0080) is the second, and it is the other
-   * side of the same line: not what the letter SAYS but how its signature was
-   * OBTAINED — whom DocuSign was asked to email, which envelope, and how that
-   * envelope ended. It must move after the letter freezes, because the sweep
-   * records `outcome = completed` in the pass that signs, one statement after
-   * the freeze lands. Nothing in it is evidence of the agreement: the envelope
-   * id that IS evidence is copied onto the letter's own frozen
-   * `signature_reference` at signature.
-   *
-   * `crm.recorded_acceptance` (0317) is the third, for the same reason as the
-   * second: it is how the client's yes was OBTAINED when it came by email or on
-   * a call, not a term of what they agreed to. It is written inside the very
-   * transaction that signs the letter (`signAndFanOut`), so a freeze on it
-   * would refuse the act of signing the way it would for `crm.engagement`. And
-   * it needs no trigger to stay put: it is append-only by GRANT (`bib_app`
-   * holds SELECT and INSERT only), which binds every writer a trigger would.
-   *
-   * `crm.billing_due` (0320) is the fourth, and it is the first's kind: what
-   * the letter CAUSED. An advance bill names its letter because the letter's
-   * advance is what it bills, and it can only exist AFTER the signature (it is
-   * written when the letter is signed); a freeze would refuse it the moment it
-   * is due. Nothing in it is a term: the advance's amount is copied from the
-   * letter's own frozen columns, and the bill's settlement (raised, covered,
-   * released) is what must move. What a person may change on it is limited by
-   * a column GRANT, as 0318 set for every bill.
-   *
-   * `crm.letter_originator` (0355, Q049) is the fifth: WHO WON the work, the
-   * salesperson the firm's revenue report credits. The client agreed to no
-   * such thing, and a wrong default (the lead's owner) must stay correctable
-   * after signature, which is when revenue starts to be counted. Only its
-   * person moves (a column GRANT), every change is ledgered
-   * (`engagement_letter.originator_set`), and the route is a partner's.
-   *
-   * `crm.advance_allocation` (0363) is the sixth, and the same kind as `crm.billing_due`: an
-   * advance raised before the letter, mapped TO the letter when it is signed
-   * (Q048, scenario 1). It is written after the signature, and only because
-   * of it; what the letter AGREED (the advance it names and the amount) is
-   * `crm.engagement_letter_advance`, which IS frozen. The mapping may be ended
-   * later and the money moved, as any mapping may: that is the firm's
-   * bookkeeping, not a term.
+   * Children DELIBERATELY not frozen: what the letter CAUSED or how it was OBTAINED, not what it
+   * SAYS (lines, clauses, prose). Adding a name here needs an argument.
+   * - `crm.engagement`: signing creates one per line in the signing transaction, and it moves on
+   *   purpose (`pending_advance` -> `active` via `recordAdvance`).
+   * - `crm.letter_signature_request` (0080): the DocuSign envelope; the sweep records
+   *   `outcome = completed` one statement after the freeze lands. The envelope id that IS
+   *   evidence is copied onto the letter's frozen `signature_reference`.
+   * - `crm.recorded_acceptance` (0317): a yes by email or call, written in `signAndFanOut`'s
+   *   transaction; append-only by GRANT (`bib_app` SELECT and INSERT only).
+   * - `crm.billing_due` (0320): the advance bill, written at signing; its amount is copied from
+   *   frozen columns and its settlement (raised, covered, released) must move; column GRANT per 0318.
+   * - `crm.letter_originator` (0355, Q049): who won the work, for the revenue report; a wrong
+   *   default (the lead's owner) must stay correctable. Only the person moves (column GRANT),
+   *   ledgered as `engagement_letter.originator_set`, partner's route.
+   * - `crm.advance_allocation` (0363, Q048 scenario 1): maps an earlier advance TO the letter at
+   *   signing and may later be ended; what the letter agreed is the frozen
+   *   `crm.engagement_letter_advance`.
    */
   const NOT_TERMS = [
     "crm.engagement",

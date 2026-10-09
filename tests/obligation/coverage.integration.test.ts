@@ -1,38 +1,12 @@
-// "Is this engagement's work already on the compliance calendar?" — asked three
-// times in this codebase, by three statements, and they must give one answer.
-//
-// ── WHY THIS FILE EXISTS AT ALL ────────────────────────────────────────────
-//
-// `obligation-coverage.ts` opens by promising to be *"the GENERATOR'S OWN
-// PREDICATE rather than a convenient approximation of it"*, and says what
-// happens if the two drift: **"a recurring client gets either two tasks for one
-// filing or none at all."** It drifted once, and nothing caught it, because the
-// port was only ever exercised against a fake — a fake agrees with whatever it
-// was written to agree with.
-//
-// That bug was one operator: a rule's service was a nullable column where NULL
-// meant "every service", `subjectsFor` and `gaps` read it as `IS NULL OR =`,
-// and coverage used a bare `=`. So the test is not "coverage returns the row".
-// It is **all three predicates, on one database, against the same fixtures**,
-// because three comments claiming to agree is exactly what was already there.
-//
-// ── AND SINCE T6.16 THE PREDICATE IS A LINK (0309) ─────────────────────────
-//
-// "Every service" is gone (decision 1): a rule reaches an engagement only
-// through a LIVE link between the rule's chain and the service the engagement
-// bought, and a rule on no service reaches nothing at all. The file's first
-// test used to prove the NULL reading covered the engagement; it now proves
-// the opposite, from all three sides, because that reading is how 98 GST
-// filings reached a bookkeeping-only client on 2026-09-18.
-//
-// ── AND THE TWO QUESTIONS PART AGAIN ON A SERVICE'S PROCESS ────────────────
-//
-// The T6.16 follow-up (2026-09-26): a per-period service that names a process
-// of its own keeps its month's task even when the calendar dates its filings,
-// so `filingEngagements` reads the service's LIVE published body. The last
-// block runs that read, and the real work-item spawn over it, so "a task is
-// raised" is asserted of the statement the worker runs and not of a fake.
-//
+// "Is this engagement's work on the compliance calendar?" is asked by three statements (coverage,
+// the generator's `subjectsFor`, `gaps`); if they drift a recurring client gets two tasks for one
+// filing or none. A fake agrees with whatever it was written for (once coverage used a bare `=`
+// against the others' `IS NULL OR =`), so all three run here on one database, same fixtures.
+// T6.16 (0309, decision 1): a rule reaches an engagement only through a LIVE link to the service it
+// bought; a rule on no service reaches nothing (the old NULL = "every service" reading put 98 GST
+// filings on a bookkeeping-only client, 2026-09-18). T6.16 follow-up (2026-09-26): a per-period
+// service naming its own process keeps its month's task, so `filingEngagements` reads the LIVE
+// published body; the last block asserts that through the real work-item spawn.
 // Run with:  npm run test:integration
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import postgres from "postgres";
@@ -81,8 +55,7 @@ let otherVersionId = "";
 let engagementId = "";
 let stateId = "";
 
-/** A `service` entry plus one published version, and the entry id back.
- *  `process` names the workflow template the service's body points at. */
+/** A `service` entry with one published version; `process` is the body's workflow template. */
 async function service(
   key: string,
   process: string | null = null,
@@ -102,8 +75,7 @@ async function service(
   return { entryId: entry.id, versionId: version.id };
 }
 
-/** Publish a new version of a service, archiving the one in force, as the
- *  registry does: one published version per entry (0005). */
+/** Publish a new version, archiving the one in force: one published version per entry (0005). */
 async function republish(entryId: string, body: Record<string, string>): Promise<void> {
   await owner`
     UPDATE config.version SET status = 'archived', archived_at = now()
@@ -116,8 +88,7 @@ async function republish(entryId: string, body: Record<string, string>): Promise
   `;
 }
 
-/** A rule, and the id back. A rule written from scratch is its own chain, so
- *  its id is also the `lineage_id` a link names. */
+/** A rule's id; a fresh rule is its own chain, so the id is also the `lineage_id` a link names. */
 async function rule(input: {
   name: string;
   generating?: boolean;
@@ -169,11 +140,8 @@ async function drop(ruleId: string): Promise<void> {
   await owner`DELETE FROM delivery.obligation_template WHERE id = ${ruleId}`;
 }
 
-/**
- * A live engagement for the entity, pinning `versionId`, on a letter of its
- * own: drafted, given its one line, signed, and only then turned into an
- * engagement, which is the order the signed-letter freeze allows.
- */
+/** A live engagement pinning `versionId` on its own letter: drafted, one line, signed, then
+ *  engaged, the order the signed-letter freeze allows. */
 let letters = 0;
 async function engagementFor(versionId: string, effectiveFrom: string): Promise<string> {
   letters += 1;
@@ -240,11 +208,8 @@ beforeAll(async () => {
   clientId = client.id;
   entityId = entity.id;
 
-  // REGISTERED, because a rule matches an entity's jurisdiction exactly and an
-  // unregistered company matches nothing at all — which is its own coverage
-  // reason and not the one under test here.
-  // `legal_entity` hangs off the ORGANIZATION subtype, not the bare party —
-  // the composite key insists, which is the tenant wall doing its job.
+  // REGISTERED: rules match jurisdiction exactly, and an unregistered company is a different
+  // coverage reason. `legal_entity` hangs off the ORGANIZATION subtype (the composite key insists).
   await owner`
     INSERT INTO core.organization (party_id, tenant_id, legal_name)
     VALUES (${entityId}, ${tenantId}, 'Cobalt Foods Private Limited')
@@ -274,11 +239,8 @@ afterAll(async () => {
   await owner`DELETE FROM delivery.obligation_instance WHERE tenant_id = ${tenantId}`;
   await owner`DELETE FROM delivery.obligation_rule_service WHERE tenant_id = ${tenantId}`;
   await owner`DELETE FROM delivery.obligation_template WHERE tenant_id = ${tenantId}`;
-  // The one state this file seeds, and any an interrupted earlier run of THIS
-  // file left behind (its tenants are the `cov-` ones, and it seeds only
-  // 'pending'). A firm holding states with no filed one reads as a firm 0054's
-  // backfill missed, which is what calendar.integration.test.ts asserts never
-  // happens.
+  // Also any 'pending' an interrupted earlier run left on `cov-` tenants: states with no filed one
+  // read as a firm 0054's backfill missed, which calendar.integration.test.ts asserts never happens.
   await owner`
     DELETE FROM delivery.obligation_state s
      USING tenancy.tenant t
@@ -310,14 +272,12 @@ async function gapFor(id: string) {
 
 describe("a rule on NO service, the shipped pack's every row — decision 1", () => {
   it("reaches nothing: coverage, the filing question and the generator all say no", async () => {
-    // The old reading, inverted. NULL used to mean "every service", and that
-    // put 98 GST filings on a bookkeeping-only client.
     const id = await rule({ name: `GSTR-3B nowhere ${stamp}` });
 
     expect((await coverage.coveredEngagements(tenantId, [engagementId])).has(engagementId)).toBe(false);
     expect((await coverage.filingEngagements(tenantId, [engagementId])).has(engagementId)).toBe(false);
     expect(await reachedBy(id)).toEqual([]);
-    // And the gap says the one thing to do about it: link it in the catalogue.
+    // The gap names the fix: link it in the catalogue.
     expect((await gapFor(engagementId))?.reason).toBe("no_rule_names_this_service");
 
     await drop(id);
@@ -331,8 +291,7 @@ describe("a rule LINKED to a service", () => {
 
     expect((await coverage.coveredEngagements(tenantId, [engagementId])).has(engagementId)).toBe(true);
     expect((await coverage.filingEngagements(tenantId, [engagementId])).has(engagementId)).toBe(true);
-    // AND the same answer from the other side. Asserting only the first would
-    // pass on an implementation that covers everything unconditionally.
+    // The generator too: coverage alone would pass an implementation that covers everything.
     expect(await reachedBy(id)).toEqual([engagementId]);
     // Nothing produced yet, so the gap is the ordinary "nothing due yet".
     expect((await gapFor(engagementId))?.reason).toBe("nothing_due_yet");
@@ -341,7 +300,7 @@ describe("a rule LINKED to a service", () => {
   });
 
   it("is none of them when it is linked to a service the client did not buy", async () => {
-    // The negative half, and it is what stops the fix being "return everything".
+    // The negative half: stops the fix being "return everything".
     const id = await rule({ name: `Payroll only ${stamp}` });
     await link(id, otherEntryId);
 
@@ -372,9 +331,8 @@ describe("a rule LINKED to a service", () => {
 
 describe("a linked rule that cannot produce a date does not count as coverage", () => {
   it("is uncovered while its formula is missing — most of the shipped rules", async () => {
-    // Coverage means "the calendar will produce work for this". A rule the firm
-    // has not finished answering produces nothing, so the engagement still needs
-    // its own task — the opposite mistake to the one above, and just as silent.
+    // Coverage means "the calendar will produce work"; an unanswered rule produces nothing, so the
+    // engagement still needs its own task (the opposite silent mistake).
     const id = await rule({ name: `MSME-1 unanswered ${stamp}`, generating: false });
     await link(id, boughtEntryId);
 
@@ -396,8 +354,7 @@ describe("a linked rule that cannot produce a date does not count as coverage", 
   });
 
   it("is uncovered while nobody at the firm has confirmed it, and the gap names the rule", async () => {
-    // Adding one in the catalogue confirms it; this is the state a partner
-    // reaches by un-confirming it in the library afterwards.
+    // Adding in the catalogue confirms; this is a partner un-confirming it in the library later.
     const id = await rule({ name: `Unanswered pack row ${stamp}`, confirmed: false });
     await link(id, boughtEntryId);
 
@@ -410,23 +367,21 @@ describe("a linked rule that cannot produce a date does not count as coverage", 
   });
 });
 
-// ── T6.16: one rule on two services, and what "covered" means then ─────────
+// T6.16: one rule on two services.
 
 describe("one filing, two services of the same client", () => {
   it("reaches BOTH engagements, earliest first — the order the generator keeps the first of", async () => {
     const id = await rule({ name: `GSTR-3B shared ${stamp}` });
     await link(id, boughtEntryId);
     await link(id, otherEntryId);
-    // A second engagement of the SAME company, for the other service, that
-    // started EARLIER: it is the one the generator keeps.
+    // Same company, the other service, started EARLIER: the one the generator keeps.
     const earlier = await engagementFor(otherVersionId, "2025-10-01");
 
     expect(await reachedBy(id)).toEqual([earlier, engagementId]);
     expect((await coverage.filingEngagements(tenantId, [engagementId, earlier])).size).toBe(2);
 
-    // ONE live row per period, carrying the earlier engagement: the OTHER
-    // engagement is covered by it too, because the row is on a chain its own
-    // service carries. Asking only for its own id read it as a gap forever.
+    // ONE live row per period, on the earlier engagement, covers the OTHER too (its service carries
+    // the chain); asking only for its own id read it as a gap forever.
     const [row] = await owner<{ id: string }[]>`
       INSERT INTO delivery.obligation_instance
         (tenant_id, template_id, entity_party_id, engagement_id, period_start, period_end,
@@ -453,18 +408,13 @@ describe("one filing, two services of the same client", () => {
   });
 });
 
-// ── T6.16 follow-up: a service with its own process keeps its month's task ──
+// T6.16 follow-up: a service with its own process keeps its month's task.
 
 const SPAWNER = { type: "human" as const, id: "00000000-0000-4000-8000-00000000c0a1" };
 const SEPTEMBER_JOB = "00000000-0000-4000-8000-00000000c0b1";
 
-/**
- * September's umbrella task for each engagement, spawned by the REAL work-item
- * use case with THIS adapter as its coverage. The desk is faked (no SPOC, a
- * fresh vocabulary); the question that decides whether a task is raised at all
- * is asked of Postgres, which is the point. Returns the engagements that got
- * one.
- */
+/** Engagements that got September's umbrella task from the REAL work-item use case over THIS
+ *  Postgres coverage; the desk (no SPOC, fresh vocabulary) is faked. */
 async function monthTasks(engagementIds: readonly string[], versionId: string): Promise<string[]> {
   const vocabulary = new FakeWorkVocabularyRepo();
   const items = new FakeWorkItemRepo();
@@ -519,15 +469,13 @@ async function monthTasks(engagementIds: readonly string[], versionId: string): 
 
 describe("a per-period service with a PROCESS of its own keeps its month's task", () => {
   it("process + a linked filing: its filings are generated AND September's task is raised", async () => {
-    // The shape the firm hit: Monthly Accounting (a ten-step close) that also
-    // carries TDS lost "Monthly Accounting · Sep 2026".
+    // The firm's case: Monthly Accounting (a ten-step close) carrying TDS lost "Monthly Accounting · Sep 2026".
     const books = await service(`monthly-accounting-${stamp}`, "monthly-accounting-close");
     const eng = await engagementFor(books.versionId, "2026-01-01");
     const id = await rule({ name: `TDS on books ${stamp}` });
     await link(id, books.entryId);
 
-    // The calendar still dates the TDS returns, and the one-time activation
-    // task is still skipped: that question did not change.
+    // The calendar still dates TDS, and the one-time activation task is still skipped.
     expect(await reachedBy(id)).toContain(eng);
     expect((await coverage.coveredEngagements(tenantId, [eng])).has(eng)).toBe(true);
     // But the service is not merely its filings, so the month's task stays.
@@ -565,9 +513,8 @@ describe("a per-period service with a PROCESS of its own keeps its month's task"
   });
 
   it("reads the process LIVE, never from the version the client signed", async () => {
-    // Signed on a version that named no process: the book a firm brings with
-    // it. The period job pins the firm's CURRENT process when it opens, so
-    // the task it hangs under must follow what is published now.
+    // Signed on a version with no process (a brought-in book); the period job pins the CURRENT
+    // process when it opens, so the task must follow what is published now.
     const svc = await service(`bookkeeping-live-${stamp}`);
     const eng = await engagementFor(svc.versionId, "2026-01-01");
     const id = await rule({ name: `TDS live ${stamp}` });

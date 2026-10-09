@@ -1,42 +1,22 @@
-// The engagement domain — the letter that creates obligations, and the work it
-// sells. Nouns and pure rules; stdlib plus the money vocabulary it shares.
-//
-// A proposal is what the firm OFFERED. An engagement letter is what both sides
-// AGREED. That single difference is why almost everything here is stricter than
-// its proposal counterpart:
-//
-//   · signature FREEZES the document, enforced by a trigger (migration 0017),
-//     because "what exactly did they sign" is a question a court asks and an
-//     application-level rule cannot answer it against a psql session;
-//   · a change after signature is a NEW LETTER, never an edit;
-//   · the clauses are PINNED, so the wording resolves to what was agreed rather
-//     than to what the library says today.
-//
-// Like the proposal domain, this file does not add up money — Postgres does,
-// exactly once — and it does not know what the firm's clause library contains.
+// Engagement domain: the letter that creates obligations, and the work it sells. A proposal is
+// what the firm OFFERED; a letter is what both sides AGREED, so it is stricter: signature
+// FREEZES it by trigger (0017; "what exactly did they sign" must hold even against psql), a
+// change after signature is a NEW letter, and clauses are PINNED to the agreed wording.
+// Postgres adds up the money; this file does not know the clause library's contents.
 import type { Amount, CurrencyCode, CurrencyRate } from "../money/model";
 import type { BillingFrequency, OutOfPocketEstimate } from "../document/model";
 import { isCalendarDay } from "../day";
 
 /**
- * Where a letter has got to.
- *
- * Narrower than a proposal's, and the omissions are the design. There is no
- * `rejected`: a client who declines simply never signs, and the letter is
- * WITHDRAWN by the firm — recording a client's refusal as a state of our own
- * document is a fact we do not have. And there is no `expired`, because a
- * letter does not lapse; the offer that preceded it did.
+ * Where a letter has got to. No `rejected`: a client who declines never signs and the firm
+ * WITHDRAWS it (their refusal is not a fact we hold). No `expired`: the offer lapses, not the letter.
  */
 export type LetterStatus = "draft" | "sent" | "signed" | "withdrawn";
 
 export const LETTER_STATUSES: readonly LetterStatus[] = ["draft", "sent", "signed", "withdrawn"];
 
-/**
- * Whether a letter can be COPIED into a new draft (0316, decided 2026-09-30):
- * a WITHDRAWN one only, which includes one the client declined in DocuSign.
- * A draft is edited, a sent one is still with the client, and a signed one is
- * changed by a letter that supersedes it.
- */
+/** Only a WITHDRAWN letter (incl. one declined in DocuSign) is copied into a new draft (0316,
+ *  2026-09-30); a draft is edited, a sent one is with the client, a signed one is superseded. */
 export function isLetterCopyable(status: LetterStatus): boolean {
   return status === "withdrawn";
 }
@@ -45,14 +25,8 @@ export function isLetterStatus(v: string): v is LetterStatus {
   return (LETTER_STATUSES as readonly string[]).includes(v);
 }
 
-/**
- * Whether a letter may move from one status to another.
- *
- * `signed` is terminal in the strongest sense in this codebase: the database
- * refuses to change the row at all afterwards. `withdrawn` is terminal because
- * a letter the firm pulled and then un-pulled would leave no record of the
- * interval in which it was not on the table.
- */
+/** `signed` is terminal (the database refuses any change to the row); `withdrawn` is terminal
+ *  so a pulled-then-restored letter cannot hide the interval it was off the table. */
 export function canTransition(from: LetterStatus, to: LetterStatus): boolean {
   if (from === "signed" || from === "withdrawn") return false;
   if (from === "draft") return to === "sent" || to === "withdrawn";
@@ -64,14 +38,8 @@ export function isEditable(status: LetterStatus): boolean {
   return status === "draft";
 }
 
-/**
- * Why this letter may NOT be deleted, or null when it may (0086).
- *
- * Only a DRAFT, and nothing else is needed: nothing can depend on a draft
- * letter — an engagement needs a signature, a signature request needs a send,
- * and only a SIGNED letter is superseded. A letter the client has seen is
- * withdrawn; a signed one is the record of what they agreed.
- */
+/** Why a letter may NOT be deleted, or null (0086): only a DRAFT may be, as nothing depends on
+ *  one. A letter the client has seen is withdrawn; a signed one is the record. */
 export type LetterDeletionBlock =
   | { readonly kind: "deleted" }
   | { readonly kind: "not_draft"; readonly status: LetterStatus };
@@ -85,37 +53,25 @@ export function letterDeletionBlock(
 }
 
 /**
- * Which layout a letter PRINTS in (0083).
- *
- * `classic` is the one-page-flow document every letter issued before 0083 went
- * out in; `annexure` is the firm's own format — a cover letter, Annexure 1
- * (scope, deliverables and a summary of fees by section) and Annexure 2 (the
- * terms). RECORDED on the letter rather than decided at render time, because a
- * rendered letter's bytes are evidence: an issued letter must re-render as the
- * document the client holds, whatever the product prints today.
- *
- * Presentation, not a term — it is not in `canonicalContent`.
+ * Which layout a letter prints in (0083): `classic` (one-page flow, letters before 0083) or
+ * `annexure` (cover letter, Annexure 1 scope/deliverables/fee summary by section, Annexure 2
+ * terms). RECORDED, not decided at render, so an issued letter re-renders as the client holds it.
+ * Presentation, not a term: not in `canonicalContent`.
  */
 export type LetterLayout = "classic" | "annexure";
 
 export const LETTER_LAYOUTS: readonly LetterLayout[] = ["classic", "annexure"];
 
-/** What every letter drafted now is printed in — "switch everyone", 2026-09-26.
- *  The classic layout is kept for the letters issued in it, never offered. */
+/** What every new letter prints in ("switch everyone", 2026-09-26); classic is kept for the
+ *  letters issued in it, never offered. */
 export const CURRENT_LETTER_LAYOUT: LetterLayout = "annexure";
 
 export function isLetterLayout(v: string): v is LetterLayout {
   return (LETTER_LAYOUTS as readonly string[]).includes(v);
 }
 
-/**
- * Where an engagement has got to.
- *
- * `pending_advance` is the START state, not an exception — an engagement whose
- * letter needs no advance simply passes through it in the same transaction.
- * Making it the default means the fee gate is what has to be OPENED, rather
- * than a check somebody has to remember to apply.
- */
+/** `pending_advance` is the START state (a letter with no advance passes through it in the same
+ *  transaction), so the fee gate is something to OPEN, not a check to remember. */
 export type EngagementStatus =
   | "pending_advance"
   | "active"
@@ -138,40 +94,24 @@ export function isEngagementStatus(v: string): v is EngagementStatus {
 export interface EngagementLetter {
   readonly id: string;
   readonly tenantId: string;
-  /**
-   * What a client quotes back on the phone — `EL-2026-0007`.
-   *
-   * Unique per firm and never reused. On a letter it matters more than on a
-   * proposal: this is the string that appears in the client's own records, in
-   * an invoice's narration and in a court filing, and it is frozen with the
-   * rest of the document at signature.
-   */
+  /** `EL-2026-0007`: unique per firm, never reused, frozen at signature (it appears in client
+   *  records, invoice narration and court filings). */
   readonly ref: string;
   readonly partyId: string;
   /**
-   * Which of the FIRM's own entities is contracting — not the client.
-   *
-   * The letter's `jurisdiction` says WHERE the work is; this says WHO on our
-   * side is bound by it, and the two are not the same question. The letter that
-   * started this review was issued by the US entity and printed Indian law,
-   * and nothing in the schema could have caught it because nothing knew who had
-   * issued it.
-   *
-   * STORED, not derived: the firm's rule for picking an entity may change, and
-   * re-deriving this at read time would silently restate every document already
-   * issued. Same argument as `jurisdiction`, and as the pinned clause versions.
+   * Which of the FIRM's entities contracts (not the client). `jurisdiction` is WHERE the work is;
+   * this is WHO on our side is bound (a US-entity letter once printed Indian law). STORED, not
+   * derived, so a changed picking rule never restates issued documents.
    */
   readonly issuingEntityPartyId: string;
   /** The proposal it came from, or null — a renewal or a walk-in has none. */
   readonly proposalId: string | null;
-  /** The letter's OWN jurisdiction, chosen when it is drafted. Not derived from
-   *  the client's registrations at read time: a legal document records the
-   *  jurisdiction it was WRITTEN for, permanently. */
+  /** The letter's OWN jurisdiction, chosen at draft and recorded permanently; not derived from
+   *  the client's registrations. */
   readonly jurisdiction: string;
   readonly title: string;
   readonly status: LetterStatus;
-  /** Which layout it prints in — see `LetterLayout`. Frozen with the rest of a
-   *  signed letter, so a re-render reproduces what the client holds. */
+  /** See `LetterLayout`; frozen with a signed letter. */
   readonly layout: LetterLayout;
   /** The MAIN currency, and `fxRate` its rate to the firm's reporting
    *  currency. Since 0344 a line or a section may be priced in another one the
@@ -186,138 +126,72 @@ export interface EngagementLetter {
   readonly advanceRecordedBy: string | null;
   readonly sentAt: string | null;
   readonly signedAt: string | null;
-  /** Who signed, as attested. Personal data — it lives in this erasable row and
-   *  must never reach the ledger, whose payloads carry ids only. */
+  /** Personal data: lives on this erasable row, never in the ledger (ids only). */
   readonly signedByName: string | null;
   readonly signatureMethod: string | null;
   readonly signatureReference: string | null;
-  /** SHA-256 of the canonical rendering at the moment of signing. The pins make
-   *  the document reconstructible; this makes it verifiable. */
+  /** SHA-256 of the canonical rendering at signing: the pins make it reconstructible, this verifiable. */
   readonly signedContentHash: string | null;
-  /**
-   * The capacity the CLIENT signed in — "Director", "Authorised Signatory".
-   *
-   * Optional, unlike the rest of the signature: it is not always known when a
-   * wet signature is attested afterwards, and a letter recorded without it is
-   * still verifiable. That is why it is not part of 0017's whole-signature
-   * check.
-   */
+  /** The CLIENT signatory's capacity ("Director"). Optional, so outside 0017's whole-signature
+   *  check: often unknown when a wet signature is attested afterwards. */
   readonly signedByTitle: string | null;
   readonly withdrawnAt: string | null;
 
-  // ── The prose the client actually reads (G1.3) ────────────────────────────
+  // The prose the client reads (G1.3).
 
-  /**
-   * The BACKGROUND paragraph — why THIS client is buying THIS, in prose.
-   *
-   * Every real letter opens with one, and it is the first thing the client
-   * reads. It is a TERM in the sense that matters here: it frames what the firm
-   * is agreeing to do, so it is inside `canonicalContent` and frozen with the
-   * rest of the document at signature.
-   */
+  /** The opening BACKGROUND paragraph (why this client buys this). A TERM: in
+   *  `canonicalContent`, frozen at signature. */
   readonly background: string | null;
-  /**
-   * Who the letter is written TO — a named person, care-of the client
-   * organization.
-   *
-   * NOT `partyId`, which is who is BILLED and is unchanged. Until G1.3 the API
-   * exposed a computed `addressedTo` STRING (the party's display name), so the
-   * document could not address an individual at all: there was no individual to
-   * store.
-   */
+  /** The named person the letter is written TO, care of the client. Not `partyId` (who is BILLED). */
   readonly addressedToPartyId: string | null;
-  /** The document's OWN date — what is printed under the letterhead. Distinct
-   *  from `sentAt`, which is when this system transmitted it. */
+  /** The document's own printed date; `sentAt` is when this system transmitted it. */
   readonly issuedOn: string | null;
-  /**
-   * The signed letter this one REPLACES.
-   *
-   * The model has always refused to edit a signed letter and told the caller to
-   * "supersede it with a new letter instead"; this is where that instruction is
-   * finally recorded. Only a SIGNED letter may be superseded (a draft is
-   * edited, an unsigned sent letter is withdrawn), which is enforced by a
-   * trigger in migration 0022 and is also what makes a lineage cycle
-   * impossible — every edge points at a row that was already frozen.
-   */
+  /** The SIGNED letter this one replaces. Only a signed letter may be superseded (trigger, 0022),
+   *  which also rules out a lineage cycle: every edge points at a frozen row. */
   readonly supersedesId: string | null;
 
-  // ── When the work begins (G1.5) ───────────────────────────────────────────
+  // When the work begins (G1.5).
 
   /** When the engagements this letter opens actually begin. NULL means the
    *  signature date, which is the ordinary case. A line may override it. */
   readonly effectiveFrom: string | null;
 
-  // ── The firm's own signature block (G1.4) ─────────────────────────────────
+  // The firm's own signature block (G1.4).
 
   /**
-   * Who bound the FIRM, in what capacity, and when — the "Yours sincerely,
-   * <name>, Director" half that was never modelled.
-   *
-   * A SNAPSHOT taken when the letter goes out, copied from the firm's standing
-   * signatory on `tenancy.tenant`. Snapshot for the same reason
-   * `issuingEntityPartyId` is one: naming a successor next year must not
-   * restate who signed a letter in 2026.
-   *
-   * All three or none of them (`el_firm_signature_is_whole_chk`, 0022) — half a
-   * signature block is worse than none, because it looks complete.
-   *
-   * This is a different fact from WHO OPERATED THE SYSTEM. The ledger records
-   * the operator as the event's actor and keeps doing so; authority to bind is
-   * an audit question about the firm, not about the session.
+   * Who bound the FIRM, in what capacity, and when: a SNAPSHOT at send from the firm's standing
+   * signatory on `tenancy.tenant`, so a successor never restates a 2026 letter. All three or none
+   * (`el_firm_signature_is_whole_chk`, 0022): half a block looks complete. Not the system
+   * operator, who is the ledger event's actor.
    */
   readonly firmSignatoryUserId: string | null;
   readonly firmSignatoryTitle: string | null;
   readonly firmSignedAt: string | null;
-  /**
-   * The firm's signature IMAGE as it stood when this letter went out (0081).
-   *
-   * A `files.document_version` id, pinned by `markSent` beside the three columns
-   * above and for the same reason: replacing the firm's signature must not
-   * restate a letter already issued. Resolving it live would mean a successor's
-   * mark appearing over a predecessor's printed name the next time an old letter
-   * was re-rendered.
-   *
-   * Deliberately NOT part of `canonicalContent`, alongside `firmSignedAt`: it is
-   * presentation of an authority the letter records elsewhere, not a term. The
-   * same agreement drawn with a re-scanned signature is the same agreement.
-   */
+  /** The firm's signature IMAGE at send (0081): a `files.document_version` id pinned by
+   *  `markSent` so a replaced signature never restates an issued letter. Presentation, not in
+   *  `canonicalContent`. */
   readonly firmSignatureVersionId: string | null;
 
-  // ── Deleted as a mistake (0086) ───────────────────────────────────────────
+  // Deleted as a mistake (0086).
 
-  /**
-   * When this DRAFT was deleted as made by mistake, or null — before it went out
-   * for signature, so no client ever saw it. Not `withdrawn`, which is a letter
-   * the client HAS seen and the firm pulled. Off the list of letters, still
-   * readable by id, and FINAL. Never a term: absent from `canonicalContent`, and
-   * a signed letter can never carry one (the freeze, 0019, covers it).
-   */
+  /** When this DRAFT was deleted as a mistake (no client saw it; not `withdrawn`). Off the list,
+   *  readable by id, FINAL; never a term, and a signed letter cannot carry one (0019). */
   readonly deletedAt: string | null;
-  /** Who deleted it, for the page. The ledger's `engagement_letter.deleted`
-   *  names the actor either way. */
+  /** Who deleted it, for the page; the ledger's `engagement_letter.deleted` names the actor. */
   readonly deletedByUserId: string | null;
   /** The withdrawn letter this draft was COPIED from (0316), or null. Not
    *  `supersedesId`, which names a SIGNED letter this one replaces. */
   readonly copiedFromId: string | null;
-  /**
-   * Who the drafter chose to sign for the firm (0343, Q005): an entry on the
-   * firm's list of signatories, or null for the firm's default at send.
-   *
-   * A DRAFT's choice, so the preview prints the right name before anybody
-   * presses send. `send` snapshots the person, title and image into the three
-   * columns above, which stay the record. Not part of `canonicalContent`: the
-   * snapshot already is, and adding the choice would move the hash of every
-   * letter in flight.
-   */
+  /** The drafter's choice of firm signatory (0343, Q005), or null for the default at send, so the
+   *  preview prints the right name; `send` snapshots it into the columns above. Not in
+   *  `canonicalContent`: that would move every in-flight letter's hash. */
   readonly chosenSignatoryId: string | null;
 }
 
 /**
- * WHEN A RECURRING FEE IS INVOICED, as the letter agrees it (0319): at the end
- * of each period, on its last day (the firm's default; Q042), at its start, or
- * from a date the firm chose. Null on a letter written before 0319 or a line
- * nobody chose for; billing reads that as at the end of each period. The billing domain has the same three words
- * (`BillingTiming`); domains do not import each other, so it is stated twice.
+ * When a recurring fee is invoiced (0319): at period end on its last day (the default; Q042), at
+ * its start, or from a chosen date. Null (pre-0319 or not chosen) bills at period end. Billing's
+ * `BillingTiming` has the same words; domains do not import each other.
  */
 export const LETTER_BILLING_TIMINGS = ["arrears", "advance", "on_date"] as const;
 export type LetterBillingTiming = (typeof LETTER_BILLING_TIMINGS)[number];
@@ -333,16 +207,9 @@ export interface LetterLine {
   readonly id: string;
   readonly tenantId: string;
   readonly engagementLetterId: string;
-  /**
-   * WHOSE entity the work is delivered to — the other half of the line, and the
-   * one this model went four tasks without.
-   *
-   * An engagement is `service × ONE LEGAL ENTITY` (the firm's own "Per Company"
-   * rule), so vCFO for a group of four companies is four lines, not one. It is
-   * NOT the client: `EngagementLetter.partyId` is who is billed, this is who the
-   * work is done for, and the compliance calendar keys on the second because an
-   * entity owes GSTR-3B and a client does not.
-   */
+  /** WHOSE entity the work is for. An engagement is service x ONE legal entity ("Per Company"),
+   *  so four companies are four lines. Not the client (`partyId` is billed); the compliance
+   *  calendar keys on this, as an entity owes GSTR-3B and a client does not. */
   readonly entityPartyId: string;
   /** The frozen catalogue version. The agreed price may differ from the quoted
    *  one — which is why the money is here — but the SERVICE is the same row. */
@@ -350,52 +217,28 @@ export interface LetterLine {
   readonly description: string;
   readonly position: number;
   readonly quantity: Amount;
-  /**
-   * The price agreed, per unit of the service's billing basis — or NULL.
-   *
-   * NULLABLE since G1.6, and on a LETTER that is the sharper case: "as mutually
-   * agreed" is a term two parties signed, and the column being `NOT NULL CHECK
-   * (>= 0)` meant it had to be recorded as ZERO, which is a different agreement.
-   *
-   * NULL IS NOT ZERO ANYWHERE DOWNSTREAM: an unpriced line contributes nothing
-   * to the letter's totals and is COUNTED instead — see the totals on
-   * `LetterRecord`. `pricingNote` is required when this is null (0023).
-   */
+  /** The agreed price per billing-basis unit, or NULL for "as mutually agreed" (G1.6; zero is a
+   *  different agreement). NULL is not zero downstream: unpriced lines are COUNTED, not summed
+   *  (see `LetterRecord` totals); `pricingNote` is required when null (0023). */
   readonly unitAmount: Amount | null;
   readonly currency: CurrencyCode;
-  /** Zero when there is no price — a discount off "as mutually agreed" is not a
-   *  number, and the database refuses one (0023). */
+  /** Zero when unpriced: a discount off "as mutually agreed" is not a number (0023). */
   readonly discountPercent: Amount;
-  /**
-   * WHERE THE WORK IS. On a letter this is the entity's own jurisdiction,
-   * carried so a letter and the proposal it came from print and group the same
-   * way. Stated rather than derived — see the note on `ProposalLine`.
-   */
+  /** WHERE THE WORK IS: the entity's own jurisdiction, stated not derived (see `ProposalLine`). */
   readonly jurisdiction: string | null;
-  /** How often THIS DEAL is billed. Defaulted from the pinned service's
-   *  `recurrence` and freely different from it: a monthly service billed
-   *  quarterly is an arrangement the firm has today. */
+  /** How often this deal is billed; defaults from the service's `recurrence` but may differ
+   *  (a monthly service billed quarterly). */
   readonly billingFrequency: BillingFrequency | null;
-  /** When it is invoiced (0319); null = not chosen (at each period's end). Only
-   *  for a monthly, quarterly or yearly fee. A grouped line is billed with its
-   *  group, whose timing is the one that counts. */
+  /** When it is invoiced (0319); null = at each period's end. Monthly, quarterly or yearly fees
+   *  only; a grouped line follows its group's timing. */
   readonly billingTiming: LetterBillingTiming | null;
   /** The first invoice date, with `on_date` and only with it. */
   readonly billingOn: string | null;
-  /** This service's OWN advance, before tax (0320), or null. Never on a grouped
-   *  line, and never on a letter that asks for one advance for the whole of it:
-   *  the engagement it becomes waits for this advance alone. */
+  /** This service's own advance before tax (0320), or null. Never on a grouped line or on a
+   *  letter with one advance for the whole; its engagement waits for this advance alone. */
   readonly advanceAmount: Amount | null;
-  /**
-   * THE FOUR OVERRIDES — this letter's own wording for the four scope blocks,
-   * or null to print the pinned catalogue version's words.
-   *
-   * WHAT MAKES A SIGNED LETTER REPRODUCIBLE, and the reason this matters more
-   * here than on a proposal: the letter carries the words, so a catalogue
-   * revision next year cannot change what the client agreed to. The signature
-   * commits to them — they are in `canonicalContent` — and the freeze then makes
-   * them unwritable.
-   */
+  /** This letter's own wording for the four scope blocks, or null for the pinned catalogue
+   *  version's. Hashed and frozen, so a catalogue revision cannot change what the client signed. */
   readonly scopeOverride: string | null;
   readonly clientObligationsOverride: string | null;
   readonly volumeLimitsOverride: string | null;
@@ -403,47 +246,22 @@ export interface LetterLine {
   /** The out-of-pocket range, in its own currency: reimbursed at ACTUALS,
    *  separate from the fee, never summed into a total. */
   readonly oopEstimate: OutOfPocketEstimate | null;
-  /** WHY there is no amount. Required when `unitAmount` is null (0023) — a
-   *  signed line that says neither a price nor why is a term nobody can read —
-   *  unless the line is in a fee group, whose fee is the reason. */
+  /** WHY there is no amount; required when `unitAmount` is null (0023) unless the line is in a
+   *  fee group, whose fee is the reason. */
   readonly pricingNote: string | null;
-  /**
-   * When THIS line's work begins, when it differs from the rest of the letter.
-   *
-   * Null means "whatever the letter says". Per line as well as per document
-   * because per line can express a single shared date and the reverse cannot:
-   * an Incorporation line starts the day it is signed while the GST line beside
-   * it starts next period.
-   */
+  /** When THIS line's work begins, or null for the letter's: an Incorporation line starts at
+   *  signature while the GST line beside it starts next period. */
   readonly effectiveFrom: string | null;
-  /**
-   * The FEE GROUP that prices this line, or null for a line priced on its own
-   * (0083).
-   *
-   * A grouped line carries no price and no discount of its own — the group's
-   * fee covers it and every other service in the group, stated once. The
-   * database refuses anything else (`el_line_grouped_is_unpriced_chk`), because
-   * a price on both would be counted twice.
-   */
+  /** The FEE GROUP pricing this line (0083), or null. A grouped line has no price or discount of
+   *  its own (`el_line_grouped_is_unpriced_chk`), or it would be counted twice. */
   readonly feeGroupId: string | null;
 }
 
 /**
- * ONE FEE FOR SEVERAL SERVICES — a section of the letter's Annexure 1 (0083).
- *
- * "USD 5,000 per month" for accounting, tax and payroll across four companies is
- * one fee on twelve lines: an engagement is one service for one legal entity
- * (G0.1), and before this the only way to write the retainer down was twelve
- * prices nobody agreed to. The group states the fee; its lines state the work.
- *
- * It is also the SECTION the letter prints: its title is the heading ("B.
- * Ongoing recurring services"), its prose is what the section says about
- * itself, and its fee is the section's row in the Summary of Fees. Its letter —
- * A, B, … — is its rank among the letter's live groups, derived when it is read
- * (`sectionCode`) so that striking one out never leaves a gap.
- *
- * A TERM. The signature commits to all of it (`canonicalContent`) and the
- * freeze makes it unwritable once the letter is signed.
+ * One fee for several services: a section of Annexure 1 (0083). "USD 5,000 per month" for
+ * accounting, tax and payroll across four companies is one fee on twelve lines (an engagement is
+ * one service x one entity, G0.1). Its title heads the section, its fee is the Summary of Fees
+ * row, its letter (A, B, ...) is derived on read (`sectionCode`). A TERM: hashed and frozen.
  */
 export interface FeeGroup {
   readonly id: string;
@@ -451,8 +269,7 @@ export interface FeeGroup {
   readonly engagementLetterId: string;
   readonly position: number;
   readonly title: string;
-  /** How often the fee is billed. Required — a fee with no period is not one
-   *  anybody can invoice. */
+  /** Required: a fee with no period cannot be invoiced. */
   readonly billingFrequency: BillingFrequency;
   /** When the group's fee is invoiced (0319), as on a line. */
   readonly billingTiming: LetterBillingTiming | null;
@@ -460,11 +277,9 @@ export interface FeeGroup {
   /** PER BILLING PERIOD: 5,000 on a monthly group is 5,000 a month. */
   readonly amount: Amount;
   readonly currency: CurrencyCode;
-  /** "40% advance, 60% on completion" — how the fee is paid, as the firm
-   *  writes it. */
+  /** How the fee is paid, in the firm's words ("40% advance, 60% on completion"). */
   readonly paymentTerms: string | null;
-  /** What the Summary of Fees says this row is for. Null prints the title and
-   *  the services the group covers. */
+  /** The Summary of Fees row text; null prints the title and the services covered. */
   readonly feeDescription: string | null;
   /** The paragraph under the section's heading. */
   readonly intro: string | null;
@@ -475,11 +290,8 @@ export interface FeeGroup {
   readonly clientObligations: string | null;
 }
 
-/**
- * A section's letter from its rank among the letter's live groups: 0 → "A",
- * 25 → "Z", 26 → "AA". Derived, never stored, so a section struck out of a
- * draft does not leave the letter starting at B.
- */
+/** A section's letter from its rank among live groups: 0 -> "A", 25 -> "Z", 26 -> "AA". Never
+ *  stored, so striking a section out leaves no gap. */
 export function sectionCode(index: number): string {
   if (!Number.isInteger(index) || index < 0) {
     throw new RangeError(`a section index is a non-negative integer, got ${String(index)}`);
@@ -497,8 +309,7 @@ export interface LetterClause {
   readonly id: string;
   readonly tenantId: string;
   readonly engagementLetterId: string;
-  /** The PINNED clause version — what was agreed, not what the library says
-   *  today. */
+  /** The PINNED clause version: what was agreed, not what the library says today. */
   readonly clauseVersionId: string;
   readonly position: number;
 }
@@ -510,31 +321,16 @@ export interface Engagement {
   readonly engagementLetterLineId: string;
   /** Who is BILLED — the client the letter was written to. */
   readonly partyId: string;
-  /**
-   * Who the work is DELIVERED TO, carried across from the line it fanned out
-   * from. Both, deliberately: invoicing (T3.4) reads the first, the compliance
-   * calendar (T3.2) reads the second, and collapsing them is what left
-   * `core.legal_entity` reachable from nothing downstream.
-   */
+  /** Who the work is DELIVERED TO, from the line. Invoicing (T3.4) reads `partyId`; the
+   *  compliance calendar (T3.2) reads this. */
   readonly entityPartyId: string;
-  /**
-   * The COMMERCIAL gates: `pending_advance` until the letter's advance is
-   * recorded, then `active`. It does NOT say whether work has begun — see
-   * `effectiveFrom` and `engagementState`.
-   */
+  /** The COMMERCIAL gate: `pending_advance` until the advance is recorded, then `active`. Not
+   *  whether work began (see `effectiveFrom`, `engagementState`). */
   readonly status: EngagementStatus;
-  /** When the commercial gates opened — signature, or the moment the advance
-   *  was recorded. Not when work starts. */
+  /** When the commercial gates opened (signature or advance recorded); not when work starts. */
   readonly activatedAt: string | null;
-  /**
-   * When work on this engagement BEGINS, resolved once at signature from
-   * line → letter → signature date and then stored.
-   *
-   * Stored rather than re-derived through two joins because it is a term of a
-   * FROZEN contract: the letter can never change, so neither can the answer,
-   * and the delivery lane should not have to reconstruct it. It travels on
-   * `contract.activated` for exactly that reason.
-   */
+  /** When work BEGINS: resolved once at signature (line -> letter -> signature date) and stored,
+   *  as the frozen contract cannot change it. Travels on `contract.activated`. */
   readonly effectiveFrom: string;
   /** The LAST day the firm serves it (inclusive), once it has been ended
    *  (V2.3, 0314). Periods starting after it get no job and no filing. */
@@ -551,8 +347,7 @@ export interface Engagement {
   /** The firm's day the LAST pause began (0318). Kept after the resume, unlike
    *  `pausedAt`, so a period half served before a pause is billed pro-rata. */
   readonly pausedOn: string | null;
-  /** The first day of the FIRST period billed (0318). Nothing before it is
-   *  billed, which makes it this client's billing go-live. Null with
+  /** First day of the FIRST billed period (0318): this client's billing go-live. Null with
    *  `firstInvoiceOn`: billing not set up. */
   readonly billingFrom: string | null;
   /** The date the invoice for the period starting `billingFrom` falls due;
@@ -563,12 +358,8 @@ export interface Engagement {
 /** The longest reason an end may carry, as the database's CHECK says (0314). */
 export const END_REASON_MAX = 1000;
 
-/**
- * The status an ended engagement takes (V2.3). `completed` when the firm
- * served it for at least a day; `cancelled` when the end falls BEFORE the day
- * its work was to begin, so nothing was ever delivered. Days are ISO, so the
- * comparison is chronological.
- */
+/** `completed` if served at least a day; `cancelled` if the end falls BEFORE work was to begin
+ *  (V2.3). ISO days compare chronologically. */
 export function endStatusFor(
   engagement: Pick<Engagement, "effectiveFrom">,
   endsOn: string,
@@ -581,42 +372,18 @@ export function isLive(status: EngagementStatus): boolean {
   return status === "pending_advance" || status === "active" || status === "paused";
 }
 
-// ── Pure rules ───────────────────────────────────────────────────────────────
-//
-// (The fee gate `mayActivate` lived here until 0322: a letter that required an
-// advance released its engagements only once it was recorded. Since 0322 the
-// signature starts the work and the advance is chased, not waited for.)
+// Pure rules. Since 0322 the signature starts the work; an advance is chased, not waited for.
 
 /**
- * What an engagement is doing TODAY.
- *
- * `EngagementStatus` is what is STORED, and it answers the commercial
- * question — has the client signed, and has the advance been paid. Whether work
- * has BEGUN is a different question, answered by the calendar: an engagement
- * whose letter says the work starts in October is agreed, paid for and not
- * started.
- *
- * `pending_start` is therefore a state and never a status: it is computed, it
- * is never written to a row, and nothing has to transition out of it. That is
- * deliberate. A stored `pending_start` would need something to move it to
- * `active` on the day, and nothing in this service runs on a timer — the same
- * constraint that makes `proposal.expired` lazy. A stored state nothing can
- * leave would silently strand every future-dated engagement, which is worse
- * than the problem it was added to fix.
+ * What an engagement is doing TODAY. The stored status answers the commercial question; whether
+ * work has BEGUN is the calendar's. `pending_start` is computed, never stored: nothing runs on a
+ * timer to move it to `active` (like lazy `proposal.expired`), so a stored one would strand every
+ * future-dated engagement.
  */
 export type EngagementState = EngagementStatus | "pending_start";
 
-/**
- * The stored status, narrowed by the effective date.
- *
- * Only `active` narrows: an engagement still waiting on its advance is
- * `pending_advance` whatever the calendar says (the money gate comes first, and
- * saying "starting soon" about work nobody has paid for would be the wrong
- * reassurance), and paused / completed / cancelled are decisions that outrank a
- * date.
- *
- * Dates are ISO days, so a lexicographic comparison IS a chronological one.
- */
+/** Only `active` narrows to `pending_start`: `pending_advance` stays (money comes first), and
+ *  paused/completed/cancelled outrank a date. ISO days compare lexicographically. */
 export function engagementState(
   engagement: Pick<Engagement, "status" | "effectiveFrom">,
   today: string,
@@ -625,14 +392,8 @@ export function engagementState(
   return engagement.status;
 }
 
-/**
- * When one line's work begins: the line, or the letter, or the signature.
- *
- * Stated here rather than inline at the fan-out because it is the rule G1.5 is
- * about, and because "null on the line means the letter, null on the letter
- * means the signature date" is the kind of two-level default that gets written
- * differently the second time somebody needs it.
- */
+/** When a line's work begins: line, else letter, else signature day (G1.5). The one statement of
+ *  this two-level default. */
 export function resolveEffectiveFrom(
   lineEffectiveFrom: string | null,
   letterEffectiveFrom: string | null,
@@ -641,14 +402,8 @@ export function resolveEffectiveFrom(
   return lineEffectiveFrom ?? letterEffectiveFrom ?? signatureDay;
 }
 
-/**
- * An ISO calendar day that EXISTS, as this product stores and compares one.
- *
- * It took 2026-02-31 until 2026-10-03 (B43): V8 parses it and rolls it into
- * March, Postgres then refused the cast (22008) and the caller got a 500. Both
- * names are the shared rule in `domain/day.ts` now; `isCalendarDay` was the
- * strict one V2.3 added beside it.
- */
+/** An ISO calendar day that EXISTS. 2026-02-31 passed until B43 (2026-10-03): V8 rolled it into
+ *  March, Postgres refused the cast (22008), a 500. Both names are `domain/day.ts`'s rule. */
 export function isDay(v: string): boolean {
   return isCalendarDay(v);
 }
@@ -666,59 +421,16 @@ function timingField(x: {
 }
 
 /**
- * The canonical rendering of a letter, for hashing.
- *
- * Deterministic and boring on purpose: this is what `signedContentHash`
- * commits to, so it has to produce identical bytes for identical terms on any
- * machine, today and in five years. Sorted by position, tab-separated, no JSON
- * — a serialiser that might one day reorder keys would silently invalidate
- * every signature ever taken.
- *
- * It commits to the TERMS, not to presentation: the money, the pinned service
- * and clause versions, the entity each line is for, the jurisdiction, the
- * currency. A firm restyling its letter template does not and must not change
- * what the client agreed to.
- *
- * The REFERENCE and the ISSUING ENTITY are in here for the same reason the
- * line's entity is. The reference is how the client identifies the document
- * they signed, so a hash that did not cover it would verify a document nobody
- * could name. The issuing entity is WHO they contracted with — the most basic
- * term there is, and the one the original letter got wrong.
- *
- * The ENTITY is in here because it is a term, and one of the most material: the
- * same service for a different company of the same group is a different
- * agreement at a different price. A signature that did not commit to it would
- * leave the one dimension the delivery lane schedules against outside the thing
- * the hash proves.
- *
- * G1.6's LINE DETAIL joined the line's fields for the same reason, and the four
- * scope OVERRIDES are the ones that had to: they are the wording this client
- * agreed to, and a hash that did not cover them would verify a document whose
- * scope was whatever the catalogue happened to say. The cost is stated rather
- * than hidden: this rendering now produces different bytes than it did before
- * G1.6, so a hash taken earlier cannot be re-derived from it. Nothing in the
- * product re-derives one — the fingerprint is stored and the freeze (0017) is
- * what actually holds a signed letter still — and a signature that did not cover
- * the client's own scope wording was the worse of the two.
- *
- * FEE GROUPS (0083) are terms of the same weight as a line's price — the fee,
- * how often it is billed, how it is paid, and every word the section prints —
- * and WHICH lines a group covers is part of the fee's meaning. So each group is
- * a row of its own, naming its member lines by position.
- *
- * They are appended ONLY WHEN THERE ARE ANY, and a line's membership lives on
- * the group's row rather than as a new field on every line's. That is not
- * tidiness: DocuSign verifies a completed envelope against the hash this
- * function produces at signature, so a letter sent before 0083 and signed after
- * it must render to the same string at both moments. A letter with no groups
- * renders exactly as it did.
- *
- * CURRENCIES (0344) follow the same rule. A line or a section in the letter's
- * own currency adds nothing (the head already says it), and only one priced in
- * ANOTHER currency carries a `currency:` field; the other currencies' rates are
- * one `rate` row each, after the sections, only when there are any. A letter in
- * one currency hashes byte for byte as it did before 0344, which is what lets a
- * letter in DocuSign today still verify.
+ * The canonical rendering `signedContentHash` commits to: identical bytes for identical terms on
+ * any machine, for years. Sorted by position, tab-separated, no JSON (a serialiser that reorders
+ * keys would void every signature). TERMS, not presentation: money, pinned service and clause
+ * versions, each line's entity (same service, other company = other agreement), jurisdiction,
+ * currency, the ref (how the client names it) and the issuing entity (who they contracted with).
+ * G1.6 added line detail incl. the four scope overrides, so pre-G1.6 hashes cannot be re-derived;
+ * nothing re-derives one (it is stored; 0017 freezes the letter). Everything added since (fee
+ * groups 0083, timing 0319, line advance 0320, other currencies 0344, advances received 0363) is
+ * appended ONLY WHEN PRESENT: DocuSign verifies a completed envelope against this hash, so a
+ * letter sent before a change and signed after must hash the same.
  */
 export function canonicalContent(input: {
   readonly letter: Pick<
@@ -780,8 +492,7 @@ export function canonicalContent(input: {
   > &
     Partial<Pick<FeeGroup, "currency">>)[];
   readonly clauses: readonly Pick<LetterClause, "position" | "clauseVersionId">[];
-  /** The advances it names as already received (0363, Q048): a term, the
-   *  money the client is told will be adjusted against these fees. */
+  /** Advances named as already received (0363, Q048): a term, adjusted against these fees. */
   readonly advancesReceived?: readonly { readonly adhocAdvanceId: string; readonly amount: string }[];
 }): string {
   const head = [
@@ -794,19 +505,7 @@ export function canonicalContent(input: {
     input.letter.fxRate,
     String(input.letter.advanceRequired),
     input.letter.advanceAmount ?? "",
-    // G1.3–G1.5, and every one of them is a TERM rather than presentation.
-    // The background frames what the firm agreed to do; the addressee is who
-    // the promise was made to; the issue date is the document's own date; the
-    // superseded letter says which agreement this one replaces, which is as
-    // material as anything on the page; the effective date is when the
-    // obligations start. A signature that did not commit to them would verify
-    // a document that could still have any of them changed underneath it.
-    //
-    // The firm's SIGNATORY and their CAPACITY are here for the same reason the
-    // issuing entity is: who bound the firm, and on what authority. The
-    // TIMESTAMP of that signature is deliberately absent — it is metadata about
-    // the act, not a term, and the same letter signed a minute later is the
-    // same agreement.
+    // G1.3-G1.5 fields and the firm's signatory and capacity are TERMS; the signing timestamp is not.
     input.letter.background ?? "",
     input.letter.addressedToPartyId ?? "",
     input.letter.issuedOn ?? "",
@@ -826,25 +525,11 @@ export function canonicalContent(input: {
         l.serviceVersionId,
         l.description,
         l.quantity,
-        // Empty for an unpriced line. "As mutually agreed" and "agreed at zero"
-        // are different terms, and `pricingNote` two fields down is what carries
-        // the difference into the hash.
+        // Empty when unpriced; `pricingNote` carries "as agreed" vs zero into the hash.
         l.unitAmount ?? "",
         l.discountPercent,
-        // A line that starts three months after the rest of the letter is a
-        // different agreement from one that starts with it.
         l.effectiveFrom ?? "",
-        // G1.6's line detail, and every one of these is a TERM. THE FOUR
-        // OVERRIDES ABOVE ALL: they are the wording this client agreed to, and
-        // a signature that did not commit to them would verify a document whose
-        // scope was whatever the catalogue happened to say. That is the exact
-        // failure the overrides exist to prevent, so leaving them outside the
-        // hash would have been the freeze protecting the wrong thing.
-        //
-        // The jurisdiction and the billing frequency are terms for the same
-        // reason the currency is; the out-of-pocket range is what the client was
-        // told to expect to reimburse; the pricing note is the sentence that
-        // stands where a price would.
+        // G1.6 line detail. Without the overrides the hash would verify whatever scope the catalogue said.
         l.jurisdiction ?? "",
         l.billingFrequency ?? "",
         l.scopeOverride ?? "",
@@ -855,11 +540,9 @@ export function canonicalContent(input: {
           ? ""
           : `${l.oopEstimate.currency} ${l.oopEstimate.min} ${l.oopEstimate.max}`,
         l.pricingNote ?? "",
-        // WHEN it is invoiced (0319) is a term too, and added ONLY WHEN SET, as
-        // the fee-group rows were in 0083: a letter signed before 0319 hashes
-        // exactly as it did.
+        // Timing (0319) only when set, so a pre-0319 letter hashes unchanged.
         ...timingField(l),
-        // The service's own advance (0320), the same way: only when set.
+        // The line's own advance (0320), only when set.
         ...(l.advanceAmount === undefined || l.advanceAmount === null ? [] : [`advance:${l.advanceAmount}`]),
         // Its own currency (0344), only when it is not the letter's.
         ...otherCurrency(l.currency, input.letter.currency),
@@ -880,9 +563,7 @@ export function canonicalContent(input: {
         g.intro ?? "",
         g.deliverables ?? "",
         g.clientObligations ?? "",
-        // The lines this fee pays for, by POSITION — the same identity the
-        // line rows above use. Moving a service from one group to another
-        // changes what each fee covers, and that is a different agreement.
+        // Covered lines by POSITION: moving a service between groups changes the agreement.
         input.lines
           .filter((l) => l.feeGroupId === g.id)
           .map((l) => l.position)
@@ -901,8 +582,7 @@ export function canonicalContent(input: {
     .sort((a, b) => (a.currency < b.currency ? -1 : a.currency > b.currency ? 1 : 0))
     .map((r) => ["rate", r.currency, r.fxRate].join("\t"));
 
-  // ADVANCES ALREADY RECEIVED (0363), one row each and ONLY WHEN THERE ARE
-  // ANY, so every letter that names none hashes exactly as it did.
+  // Advances received (0363), only when any, so other letters hash unchanged.
   const received = [...(input.advancesReceived ?? [])]
     .sort((a, b) => (a.adhocAdvanceId < b.adhocAdvanceId ? -1 : a.adhocAdvanceId > b.adhocAdvanceId ? 1 : 0))
     .map((r) => ["received", r.adhocAdvanceId, r.amount].join("\t"));
@@ -914,23 +594,11 @@ function otherCurrency(currency: CurrencyCode | undefined, main: CurrencyCode): 
   return currency === undefined || currency === main ? [] : [`currency:${currency}`];
 }
 
-/** A jurisdiction code, as this product stores it: ISO 3166-1 alpha-2.
- *
- *  ONE implementation, in `domain/document/model.ts`, since G1.6 put a
- *  jurisdiction on both documents' LINES as well as on this letter's head. Two
- *  copies of the rule is two places for it to drift. Re-exported rather than
- *  moved so every existing caller keeps importing it from the domain it belongs
- *  to. */
+/** ISO 3166-1 alpha-2 jurisdiction code. One implementation in `domain/document/model.ts`
+ *  (G1.6), re-exported for existing callers. */
 export { isJurisdiction, normalizeJurisdiction } from "../document/model";
 
-/**
- * Whether a clause applies in a jurisdiction.
- *
- * An empty list means everywhere, matching the service catalogue's reading of
- * the same field. Deliberately permissive: a clause the firm wrote and did not
- * scope is one it means to use, and refusing to offer it would look like the
- * library was empty.
- */
+/** An empty list means everywhere, as in the catalogue: an unscoped clause is meant to be used. */
 export function clauseApplies(clauseJurisdictions: readonly string[], letter: string): boolean {
   return clauseJurisdictions.length === 0 || clauseJurisdictions.includes(letter);
 }

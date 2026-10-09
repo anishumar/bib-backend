@@ -2,9 +2,8 @@ import type { LetterDeletionBlock } from "./model";
 import { countryCodeProblem } from "../country";
 import { amountProblem } from "../money/model";
 
-// Sentinel errors — the closed vocabulary of ways engagement letters fail.
-// Owned here in the domain; the api layer maps them to HTTP status codes.
-// Match with `instanceof`, never by string.
+// Sentinel errors for engagement letters; `api/domainerr.ts` maps them to HTTP. Match with
+// `instanceof`, never by string.
 
 export class EngagementError extends Error {
   constructor(
@@ -95,13 +94,9 @@ export type EngagementErrorCode =
   | "TERMS_ON_LETTER"
   | "NOT_CALLERS_TODAY";
 
-// ── Revising a DRAFT letter (T6.18, S6) ────────────────────────────────────
-//
-// The letter builder reopens step 1 on a draft and edits the document in place,
-// so a draft's head and its lines can change after drafting. Every one of these
-// is a draft-only change; a sent letter is refused as LETTER_NOT_EDITABLE.
+// Revising a DRAFT letter (T6.18, S6): the builder edits a draft's head and lines in place; a
+// sent letter is refused as LETTER_NOT_EDITABLE.
 
-/** A revision that names nothing to change. */
 export class NothingToRevise extends EngagementError {
   constructor() {
     super(
@@ -112,7 +107,6 @@ export class NothingToRevise extends EngagementError {
   }
 }
 
-/** A line change that names nothing to change. */
 export class NothingToChangeOnLetterLine extends EngagementError {
   constructor() {
     super(
@@ -123,7 +117,6 @@ export class NothingToChangeOnLetterLine extends EngagementError {
   }
 }
 
-/** What a line is called is what the client reads for it. */
 export class InvalidLetterLineDescription extends EngagementError {
   constructor() {
     super(
@@ -134,7 +127,6 @@ export class InvalidLetterLineDescription extends EngagementError {
   }
 }
 
-/** The currency, its rate and the rate's day travel together. */
 export class LetterInvalidCurrencyChange extends EngagementError {
   constructor() {
     super(
@@ -145,11 +137,8 @@ export class LetterInvalidCurrencyChange extends EngagementError {
   }
 }
 
-/**
- * A new currency while the letter has lines or sections. Every line and every
- * section fee is priced in the letter's currency by a composite key (0017,
- * 0083), and a line pulled off a draft still holds its row.
- */
+/** Every line and section fee is priced in the letter's currency by a composite key (0017,
+ *  0083), and a line pulled off a draft still holds its row. */
 export class LetterCurrencyLocked extends EngagementError {
   constructor(currency: string) {
     super(
@@ -176,12 +165,8 @@ export class LetterProseEdited extends EngagementError {
   }
 }
 
-/**
- * A new issuer or country while terms are on the letter. Each term was checked
- * against the issuer's law and the letter's country when it went on (G1.8), and
- * a term cannot be taken off a letter, so moving either would leave terms on it
- * that name the wrong law.
- */
+/** Each term was checked against the issuer's law and the letter's country when added (G1.8)
+ *  and cannot come off, so moving either would leave terms naming the wrong law. */
 export class TermsOnLetter extends EngagementError {
   constructor(termCount: number, issuerName: string) {
     super(
@@ -194,8 +179,7 @@ export class TermsOnLetter extends EngagementError {
   }
 }
 
-/** The client, or the company a line is for, was archived (0305). A letter
- *  may not name a party the firm put away; restore it first. */
+/** An archived client or line company (0305): restore it first. */
 export class LetterPartyArchived extends EngagementError {
   constructor(displayName: string, as: "client" | "entity") {
     super(
@@ -208,8 +192,7 @@ export class LetterPartyArchived extends EngagementError {
   }
 }
 
-/** A client company with no country (Q076): no new letter names it, and no
- *  line is for it, until its registration is recorded. */
+/** A client company with no country (Q076): no new letter or line may name it. */
 export class LetterCompanyNotRegistered extends EngagementError {
   constructor(displayName: string, as: "client" | "entity") {
     const what = as === "client" ? "an engagement letter cannot be drafted for it" : "a letter line cannot be for it";
@@ -217,8 +200,7 @@ export class LetterCompanyNotRegistered extends EngagementError {
   }
 }
 
-/** The client is one of the firm's own companies: the firm does not sign an
- *  engagement letter with itself, as an invoice cannot bill it. */
+/** The firm does not sign a letter with itself, as an invoice cannot bill it. */
 export class LetterClientIsOwnCompany extends EngagementError {
   constructor(displayName: string) {
     super(
@@ -229,13 +211,9 @@ export class LetterClientIsOwnCompany extends EngagementError {
   }
 }
 
-// ── Who a letter names, beside the client (F-10-1) ─────────────────────────
-//
-// Every reference below was checked for the FIRM only: any party of the firm
-// could be named, including another client's company. Each refusal says what
-// to do instead, because the fix is usually a fact to record, not a retry.
+// Who a letter names beside the client (F-10-1): each reference must belong to this client or
+// the firm, not merely the firm. Refusals say which fact to record, not "retry".
 
-/** The company named as issuing the letter is not one of the firm's own. */
 export class IssuerNotAFirmEntity extends EngagementError {
   constructor(displayName: string) {
     super(
@@ -247,7 +225,6 @@ export class IssuerNotAFirmEntity extends EngagementError {
   }
 }
 
-/** The quote named as the letter's origin was made to a different client. */
 export class QuoteOfAnotherClient extends EngagementError {
   constructor(ref: string, quotedTo: string, letterFor: string) {
     super(
@@ -258,7 +235,6 @@ export class QuoteOfAnotherClient extends EngagementError {
   }
 }
 
-/** A letter is addressed to a PERSON, care of the client. */
 export class AddresseeNotAPerson extends EngagementError {
   constructor(displayName: string) {
     super(
@@ -269,7 +245,6 @@ export class AddresseeNotAPerson extends EngagementError {
   }
 }
 
-/** The person holds no recorded role at the client or any company under it. */
 export class AddresseeNotLinked extends EngagementError {
   constructor(person: string, client: string) {
     super(
@@ -281,7 +256,6 @@ export class AddresseeNotLinked extends EngagementError {
   }
 }
 
-/** A line's company is not the client, and not recorded as one of its companies. */
 export class EntityOutsideClient extends EngagementError {
   constructor(entity: string, client: string) {
     super(
@@ -332,9 +306,6 @@ export class EmptyLetter extends EngagementError {
 
 export class NoClauses extends EngagementError {
   constructor() {
-    // Refused rather than allowed, because the failure is silent and expensive:
-    // a signed contract with no terms is enforceable as whatever a court reads
-    // into it.
     super(
       "NO_CLAUSES",
       `An engagement letter with no clauses has no terms: no scope, no liability limit, no ` +
@@ -344,13 +315,8 @@ export class NoClauses extends EngagementError {
   }
 }
 
-/**
- * CA#2 (audit 2026-10-03): a letter whose cover page says nothing. A new firm
- * has no standard opening, so its first letter went out as "Dear Anil
- * Deshpande, / Yours sincerely," with nothing between. The product writes no
- * letter prose (0083), so it refuses to send one with none and says where the
- * words go.
- */
+/** CA#2 (audit 2026-10-03): a new firm has no standard opening, so its first letter went out
+ *  with nothing between greeting and sign-off. The product writes no letter prose (0083). */
 export class LetterHasNoBody extends EngagementError {
   constructor() {
     super(
@@ -403,9 +369,7 @@ export class NotAClause extends EngagementError {
 
 export class ClauseNotPublished extends EngagementError {
   constructor(versionId: string) {
-    // Archived is fine and deliberately so: that is what a pin resolves to once
-    // the library moves on. A DRAFT was never in force, so putting it in a
-    // contract binds the client to wording the firm never adopted.
+    // A superseded (archived) version is fine: that is what a pin resolves to.
     super(
       "CLAUSE_NOT_PUBLISHED",
       `Clause version ${JSON.stringify(versionId)} is still a draft and was never in force, so ` +
@@ -427,21 +391,10 @@ export class ClauseWrongJurisdiction extends EngagementError {
 }
 
 /**
- * G1.8's acceptance, as a refusal: a letter issued by the US entity cannot
- * print Indian governing law.
- *
- * The sharpest finding of the project this product was designed against. The
- * real engagement letter was issued by the firm's US entity to a US client and
- * its standard terms named Indian law and Delhi courts. The firm's verdict was
- * flat — "No. This is wrong. For US it's US. For UAE it's DIFC in Dubai."
- *
- * `ClauseWrongJurisdiction` above could not have caught it and is a different
- * question: it asks where a clause may be USED, and the clause that went out
- * was applicable everywhere, which was true. This asks what the clause SAYS,
- * against who is actually contracting.
- *
- * The term names WHICH of the two failed — a letter can carry the right law and
- * the wrong forum, and half the bug the firm caught was the courts.
+ * G1.8: a letter issued by the US entity cannot print Indian governing law. The real letter did
+ * (US entity, US client, Indian law, Delhi courts); the firm: "For US it's US. For UAE it's DIFC
+ * in Dubai." Unlike `ClauseWrongJurisdiction` (where a clause may be USED), this checks what it
+ * SAYS against who contracts. `term` names which failed, law or forum.
  */
 export class ClauseLawNotIssuers extends EngagementError {
   constructor(title: string, term: "governing law" | "courts", named: string, issuer: string) {
@@ -456,20 +409,10 @@ export class ClauseLawNotIssuers extends EngagementError {
 }
 
 /**
- * The check above, when there is nothing to check AGAINST.
- *
- * `seedFirmEntity` writes an organization and no `core.legal_entity` row, because
- * nothing knows the firm's country at `createTenant` — so every firm's default
- * issuing entity is unregistered until somebody registers it. That is ordinary,
- * and it is also exactly the position from which the original letter went out.
- *
- * REFUSED rather than allowed, and the choice is worth stating because it is
- * fail-closed on purpose. An unverifiable law is the state the bug lived in; if
- * this passed silently the check would be absent precisely where it is needed,
- * and present only for firms that had already done the work that makes them
- * safe. It costs nothing to any existing flow — a clause naming a law is
- * refused, a clause naming none is untouched, and `governingLaw` was added
- * yesterday, so no letter anywhere pins a clause this can refuse.
+ * The check above with nothing to check against: `seedFirmEntity` writes no `core.legal_entity`
+ * row (no country is known at `createTenant`), so a firm's default issuer is unregistered until
+ * somebody registers it. Fail-closed on purpose, as that is where the bug lived; a clause naming
+ * no law is untouched.
  */
 export class IssuerJurisdictionUnknown extends EngagementError {
   constructor(title: string, entityName: string) {
@@ -532,13 +475,9 @@ export class InvalidAmount extends EngagementError {
   }
 }
 
-/**
- * A line with neither a fee nor a reason, for a service the catalogue has no
- * list price for in this letter's currency (B09, audit 2026-10-03). Such a
- * line is quoted at the list price when there is one, which is how a login
- * that cannot see fees adds a priced service without being shown the price;
- * with none, it has to be told what to send.
- */
+/** No fee, no reason, and no catalogue list price in the letter's currency (B09, audit
+ *  2026-10-03). With a list price the line takes it, which is how a login that cannot see fees
+ *  adds a priced service. */
 export class ServiceHasNoListPrice extends EngagementError {
   constructor(serviceName: string, currency: string) {
     super(
@@ -580,8 +519,7 @@ export class InvalidLineBillingFrequency extends EngagementError {
   }
 }
 
-/** When a recurring fee is invoiced (0319): one of three words, a date with
- *  "on_date" and only with it, and only for a fee billed per period. */
+/** Billing timing (0319): one of three words, a date only with "on_date", per-period fees only. */
 export class InvalidLetterBillingTiming extends EngagementError {
   constructor(reason: string) {
     super(
@@ -592,8 +530,7 @@ export class InvalidLetterBillingTiming extends EngagementError {
   }
 }
 
-/** A service's own advance (0320): an amount above zero, before tax, on a line
- *  priced on its own. */
+/** A service's own advance (0320): above zero, before tax, on a line priced on its own. */
 export class InvalidLineAdvance extends EngagementError {
   constructor(reason: string) {
     super(
@@ -605,9 +542,8 @@ export class InvalidLineAdvance extends EngagementError {
   }
 }
 
-/** A letter asks for ONE advance for the whole of it, or one per service, never
- *  both (the user, 2026-10-01): two advances on one service would hold its work
- *  for two payments. */
+/** One advance for the whole letter or one per service, never both (the user, 2026-10-01): two
+ *  would hold a service's work for two payments. */
 export class OneKindOfAdvance extends EngagementError {
   constructor(has: "letter" | "services") {
     super(
@@ -643,8 +579,7 @@ export class InvalidDate extends EngagementError {
   }
 }
 
-/** `asOf` is the caller's TODAY, not a date to choose (see `isCallersToday`).
- *  A letter that belongs to another day says so in its own `issuedOn` or
+/** `asOf` is the caller's TODAY (see `isCallersToday`); another day goes in `issuedOn` or
  *  `effectiveFrom`. */
 export class LetterNotCallersToday extends EngagementError {
   constructor(given: string, firmDay: string) {
@@ -659,9 +594,6 @@ export class LetterNotCallersToday extends EngagementError {
 
 export class LetterNotSupersedable extends EngagementError {
   constructor(status: string) {
-    // The rule the freeze's own message has been giving for three tasks, now
-    // with somewhere to record it — and with the two cases it does NOT cover
-    // named, because those are the ones somebody reaches for it by mistake.
     super(
       "LETTER_NOT_SUPERSEDABLE",
       `Only a SIGNED letter can be superseded, and this one is ${status}. A draft is edited in ` +
@@ -688,8 +620,7 @@ export class EngagementNotFound extends EngagementError {
   }
 }
 
-/** Ended already, so it cannot end, pause or resume (V2.3). A client who
- *  comes back signs a new letter. */
+/** Already ended (V2.3): a returning client signs a new letter. */
 export class EngagementEnded extends EngagementError {
   constructor(endsOn: string | null) {
     super(
@@ -748,26 +679,16 @@ export class SignatureIncomplete extends EngagementError {
   }
 }
 
-/**
- * The e-signature provider could not be asked. Not a SignatureIncomplete: the
- * person may have typed a perfectly good envelope id, and nothing about this
- * letter is wrong. The system BEHIND this one (a token refused, an account
- * that would not discover, a non-JSON answer) is what failed, and the caller
- * is told that in the provider's own words rather than "internal error".
- * The message is the detail verbatim; this class only names its kind.
- */
+/** The e-signature provider failed (token refused, account not discovered, non-JSON answer), not
+ *  the letter: the caller gets the provider's detail verbatim, not "internal error". */
 export class SignerUnavailable extends EngagementError {
   constructor(detail: string) {
     super("SIGNER_UNAVAILABLE", detail);
   }
 }
 
-/**
- * A retry of a signature request that has nothing left to retry: the letter
- * was never sent through a provider, or its envelope is already out.
- * A CONFLICT rather than a validation failure — the request is well formed and
- * what refuses it is the state the letter is in.
- */
+/** Nothing left to retry (never sent via a provider, or the envelope is out). A CONFLICT: the
+ *  letter's state refuses it, not the request's form. */
 export class SignatureRequestNotPending extends EngagementError {
   constructor(letterId: string, why: string) {
     super(
@@ -777,12 +698,8 @@ export class SignatureRequestNotPending extends EngagementError {
   }
 }
 
-/**
- * The firm pressed withdraw on a letter the client has, in fact, already
- * signed through the provider — the sweep has not caught up yet. Withdrawing
- * would throw away a real signature, and a signed letter is superseded, never
- * withdrawn.
- */
+/** Withdraw pressed on a letter the client already signed via the provider, before the sweep
+ *  caught up: withdrawing would discard a real signature. */
 export class EnvelopeAlreadySigned extends EngagementError {
   constructor(envelopeId: string) {
     super(
@@ -794,12 +711,8 @@ export class EnvelopeAlreadySigned extends EngagementError {
   }
 }
 
-// ── DRAFTING A LETTER FROM AN ACCEPTED QUOTE (T3.5b) ───────────────────────
-//
-// Five refusals, and every one of them is a question only a person can answer.
-// The alternative to each is this product GUESSING a term of a contract — which
-// company the work is for, which country's law governs it — and a guessed term
-// is indistinguishable, on the signed page, from one somebody agreed.
+// Drafting a letter from an accepted quote (T3.5b). Each refusal is a question only a person can
+// answer: a guessed contract term (whose company, whose law) would look agreed on the signed page.
 
 export class QuoteNotFound extends EngagementError {
   constructor(id: string) {
@@ -857,7 +770,7 @@ export class QuoteNamesNoEntity extends EngagementError {
   }
 }
 
-// ── Fee groups — one fee for several services (0083) ───────────────────────
+// Fee groups: one fee for several services (0083).
 
 export class FeeGroupNotFound extends EngagementError {
   constructor(id: string) {
@@ -875,8 +788,7 @@ export class FeeGroupTitleRequired extends EngagementError {
   }
 }
 
-/** Striking out a group that still prices services would leave them with no
- *  price and no reason — the trigger in 0083 refuses it too. */
+/** The 0083 trigger refuses it too: its services would have no price and no reason. */
 export class FeeGroupNotEmpty extends EngagementError {
   constructor(title: string, serviceCount: number) {
     super(
@@ -914,8 +826,7 @@ export class GroupedLinePriced extends EngagementError {
   }
 }
 
-/** A line priced on its own needs a price or a reason — 0023's rule for any
- *  line with no amount, met again when a service leaves its fee group. */
+/** 0023's rule (a price or a reason), met again when a service leaves its fee group. */
 export class LineNotPriced extends EngagementError {
   constructor(description: string) {
     super(
@@ -927,10 +838,9 @@ export class LineNotPriced extends EngagementError {
   }
 }
 
-// ── Deleting a draft made by mistake (0086) ──────────────────────────────────
+// Deleting a draft made by mistake (0086).
 
-/** A deleted draft is final. Every change to one lands here, and so does a
- *  second delete or a withdrawal. */
+/** A deleted draft is final: every change, a second delete or a withdrawal lands here. */
 export class LetterDeleted extends EngagementError {
   constructor(ref: string) {
     super(
@@ -971,8 +881,7 @@ export class LetterNotDeletable extends EngagementError {
   }
 }
 
-/** A letter may not cite a proposal that was deleted (0086) — it was never
- *  offered to anybody. */
+/** A deleted proposal (0086) was never offered, so no letter may cite it. */
 export class QuoteDeleted extends EngagementError {
   constructor(ref: string) {
     super(
@@ -983,10 +892,7 @@ export class QuoteDeleted extends EngagementError {
   }
 }
 
-/**
- * The refusal a block means — ONE sentence for the DELETE that is refused and
- * for the letter's page, which shows it where the button would be.
- */
+/** One sentence for both the refused DELETE and the letter page, where the button would be. */
 export function letterDeletionRefusal(ref: string, block: LetterDeletionBlock): EngagementError {
   switch (block.kind) {
     case "deleted":
@@ -996,8 +902,7 @@ export function letterDeletionRefusal(ref: string, block: LetterDeletionBlock): 
   }
 }
 
-/** A fee in a currency the document has no rate for (0344). Every currency
- *  other than the main one needs its rate first, or the fee would drop out of
+/** A fee in a currency with no rate on the document (0344): without one it would drop out of
  *  every figure converted to the firm's reporting currency. */
 export class CurrencyNeedsARate extends EngagementError {
   constructor(currency: string) {
@@ -1020,8 +925,7 @@ export class RateInUse extends EngagementError {
   }
 }
 
-/** A service in a section is priced by the section, in the section's currency
- *  (0344): the key onto the section carries it. */
+/** A sectioned service is priced in the section's currency (0344): the key onto it carries it. */
 export class LineCurrencyFollowsSection extends EngagementError {
   constructor(section: string, currency: string) {
     super(
@@ -1042,9 +946,8 @@ export class RateIsMainCurrency extends EngagementError {
   }
 }
 
-/** The originator named is not active staff of this firm (0355, Q049): the
- *  column's key reaches the global user account, so a person from another
- *  firm could otherwise be credited with this firm's revenue. */
+/** The originator must be active staff of this firm (0355, Q049): the key reaches the global
+ *  user account, so another firm's person could otherwise be credited with this revenue. */
 export class OriginatorNotStaff extends EngagementError {
   constructor() {
     super(

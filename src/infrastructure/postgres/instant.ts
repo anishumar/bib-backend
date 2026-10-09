@@ -1,119 +1,44 @@
-// Reading a `timestamptz` column back as an INSTANT the whole web can parse.
-//
-// The sibling of `day.ts`, and its OPPOSITE. That module is about a `date`
-// column — a day, which must never be parsed. This one is about a `timestamptz`
-// — a moment, which must be, because the day a moment falls on is the READER's
-// question and only their browser can answer it.
-//
-// ── WHAT `::text` ACTUALLY PRODUCES, AND WHY IT IS NOT ISO 8601 ────────────
-//
-// `SELECT now()::text` renders
-//
-//     2026-09-01 19:54:05.712839+00
-//                ^                 ^^^^^^^^
-//                a SPACE           SIX fractional digits, and a bare `+00`
-//
-// ECMAScript pins the string `Date` must accept — the Date Time String Format —
-// to `YYYY-MM-DDTHH:mm:ss.sssZ`: a literal `T`, and EXACTLY three fractional
-// digits. What Postgres renders is none of those things. Anything else is
-// "implementation-specific", which is the specification saying *each browser
-// decides*. V8 and SpiderMonkey are lenient and take it; JavaScriptCore
-// historically does not, and `new Date("2026-09-01 19:54:05.712839+00")` there
-// is `Invalid Date`. Every portal screen guards with
-// `Number.isNaN(at.getTime()) ? iso : …`, so the failure is not a crash — it is
-// a client on an iPhone reading `2026-09-01 19:54:05.712839+00` where the firm
-// meant to say "1 Sep 2026". Nothing on this machine can see it.
-//
-// ── AND THE SECOND BUG IN THE SAME CAST, WHICH IS THE WORSE ONE ────────────
-//
-// `timestamptz::text` renders in the SESSION's `TimeZone`, not in UTC.
-// `src/db/pool.ts` sets none, so the value is whatever the SERVER was
-// configured with — UTC in the compose container, and therefore UTC in every
-// string anyone here has ever looked at. Point the same code at a Postgres
-// running `Asia/Kolkata` and the identical row renders `+05:30`.
-//
-// That is invisible until something SLICES the string. `render-source.ts` did:
-// an invoice with no `issued_on` took its printed date from
-// `created_at.slice(0, 10)`. Raised at 02:00 IST, the UTC render says the day
-// before and the Kolkata render says the day itself — so the date printed on a
-// numbered tax document, the one an auditor reads, depended on a setting in
-// `postgresql.conf`. It is the `day.ts` bug wearing different clothes: a day
-// derived from an instant, by a zone nobody chose.
-//
-// ── SO: `AT TIME ZONE 'UTC'` FIRST, AND FORMAT EXPLICITLY ──────────────────
-//
-// `to_char(col AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')` gives
-// `2026-09-01T19:54:05.712Z` — byte for byte what JS `toISOString()` produces,
-// which is the one string every engine is REQUIRED to accept.
-//
-//   · `AT TIME ZONE 'UTC'` makes the output independent of the server. The
-//     literal `Z` is then true rather than hopeful.
-//   · `.MS` is three digits, deliberately. `.US` would be six and is more
-//     faithful to what Postgres stores — and is back outside the spec, so
-//     it is back to each engine deciding. Ordering is done in SQL; nothing
-//     here needs microseconds to display a date.
-//   · NULL in, NULL out. `to_char(NULL, …)` is NULL, so an unanswered ask keeps
-//     its honest `null` and nothing fabricates a moment.
-//   · No JS `Date` is constructed at any point, for the same reason `day.ts`
-//     prefers a cast: a value that is never parsed cannot be parsed wrong.
-//
-// ── WHEN YOU WANT A DAY OUT OF ONE OF THESE, DO NOT SLICE ──────────────────
-//
-// Ask SQL for the day: `(col AT TIME ZONE 'UTC')::date::text`. That is what
-// `portal-home-repository.ts` and `escalation-repository.ts` already do, it
-// says which zone decided the day, and it cannot drift when the format above
-// changes. `tests/architecture/instant-format.test.ts` holds both halves of
-// this rule.
+// A `timestamptz` read back as an ISO 8601 INSTANT every browser must parse (T6.10). The opposite
+// of `day.ts`: a `date` is a DAY and never parsed; an instant always is, in the reader's zone.
+// Two traps in `col::text`, both in docs/claude/dates-and-timezones.md:
+//  - `2026-09-01 19:54:05.712839+00` (space, six digits, bare `+00`) is outside the ECMAScript
+//    Date format; V8 takes it, JavaScriptCore historically does not, so an iPhone portal client
+//    saw the raw string.
+//  - it renders in the SESSION's TimeZone (`src/db/pool.ts` sets none), so a day sliced off it
+//    depends on `postgresql.conf`; an invoice's printed date in `render-source.ts` once did.
+// So: `AT TIME ZONE 'UTC'` then an explicit `to_char` = JS `toISOString()`. `.MS` (3 digits) on
+// purpose, `.US` is outside the spec. NULL in, NULL out. No JS `Date` is ever built. A day from
+// an instant is asked of SQL with its zone named, never sliced (`instant-format.test.ts`).
 
-/** The one format string. Named once so the integration test can MEASURE the
- *  expression this module actually emits, rather than a copy of it. */
+/** The one format string, named so the integration test measures what this module emits. */
 const ISO_8601 = `'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'`;
 
 /**
- * A `timestamptz` as an ISO 8601 instant — `2026-09-01T19:54:05.712Z`.
- *
- * @param expr  the column or expression, SQL as written — `a.raised_at`,
- *              `max(c.chased_at)`. It is spliced into the query verbatim, so it
- *              is for STATIC SQL only; never build one from request input.
- * @param alias appended as `AS <alias>` when given. Omit inside a scalar
- *              subquery, which is aliased from outside.
- *
- * Reaches a query through `db.unsafe(...)`, which is what "spliced verbatim"
- * means here:
- *
- *     SELECT ${db.unsafe(isoInstant("a.raised_at", "raised_at"))}
+ * A `timestamptz` as an ISO 8601 instant, `2026-09-01T19:54:05.712Z`.
+ * `expr` is spliced verbatim via `db.unsafe(...)`: STATIC SQL only, never request input.
+ * Omit `alias` inside a scalar subquery, which is aliased from outside.
  */
 export function isoInstant(expr: string, alias?: string): string {
   const rendered = `to_char(${expr} AT TIME ZONE 'UTC', ${ISO_8601})`;
   return alias === undefined ? rendered : `${rendered} AS ${alias}`;
 }
 
-/**
- * The DAY a `timestamptz` falls on in UTC — `2026-09-01`.
- *
- * For the cases that want a calendar day out of a moment. Spelled out rather
- * than sliced off `isoInstant`, because a slice hides which zone answered.
- */
+/** The UTC DAY a `timestamptz` falls on, `2026-09-01`; never slice `isoInstant`, it hides the zone. */
 export function utcDayOf(expr: string, alias: string): string {
   return `(${expr} AT TIME ZONE 'UTC')::date::text AS ${alias}`;
 }
 
 /**
- * The DAY a `timestamptz` falls on in the FIRM's zone (`tenancy.tenant.time_zone`,
- * 0071) — what a document it dates should print. A proposal sent at 02:15 in
- * Delhi is dated that day, not the UTC day before (T6.18). `zoneExpr` is a SQL
- * expression naming the zone, typically `firm.time_zone` off a join.
+ * The DAY a `timestamptz` falls on in a zone (`zoneExpr`, typically `firm.time_zone`, 0071):
+ * what a document should print. A proposal sent 02:15 in Delhi is that day, not UTC's (T6.18).
  */
 export function zoneDayOf(expr: string, zoneExpr: string, alias: string): string {
   return `(${expr} AT TIME ZONE ${zoneExpr})::date::text AS ${alias}`;
 }
 
 /**
- * The same instant at FULL precision (microseconds), for a value that never
- * reaches a browser and is compared back against the column it came from: the
- * notification outbox's cursor (0323). Milliseconds would round the cursor
- * BELOW events it has already passed. Not for the wire: six fractional digits
- * are outside the format every engine must accept, which is `isoInstant`'s job.
+ * Microsecond precision for a value compared back against its column, never sent to a browser:
+ * the notification outbox cursor (0323). Milliseconds would round it BELOW events already passed.
  */
 export function fullInstant(expr: string, alias: string): string {
   return `to_char(${expr} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS ${alias}`;

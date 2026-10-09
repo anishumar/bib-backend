@@ -1,77 +1,22 @@
-// The firm's own India compliance calendar, as rules (T3.2).
-//
-// ── WHAT THIS IS READING ───────────────────────────────────────────────────
-//
-// `docs/India_Compliance_Calendar_Applicability_Business_in_a_Box.xlsx`, sent by
-// the firm's founder on 2026-08-30: FIFTY-FIVE obligations across twelve
-// modules — Income Tax, TDS, GST, Payroll, MCA, Transfer Pricing, FEMA/RBI,
-// Payments, POSH, Labour, Data Privacy and industry licences.
-//
-// Every one of them is a row here. That is the decision this file exists to
-// carry, and it is the opposite of what the demo did.
-//
-// ── WHY MOST OF IT CANNOT BECOME A DUE-DATE FORMULA ────────────────────────
-//
-// The sheet's `Typical Timing` column is precise for some items and deliberately
-// vague for others, and the vagueness is CORRECT rather than sloppy:
-//
-//   "11th of following month"              a formula.
-//   "Within statutory period after AGM"    not one. The period depends on the
-//                                          AGM date, which depends on the year
-//                                          end and on extensions.
-//   "State-specific"                       not one. PT is due on different days
-//                                          in Maharashtra and Karnataka.
-//   "Within 7 working days from month-end" not one. Working days are not days,
-//                                          and there is no holiday calendar here.
-//   "Within 30 days of allotment"          not one, however well it parses. An
-//                                          event-driven filing has no period, so
-//                                          there is nothing to count from until
-//                                          the event happens — and nothing here
-//                                          knows that it has.
-//
-// ── THE RULE THIS FILE FOLLOWS, WITHOUT EXCEPTION ──────────────────────────
-//
-// A DUE DATE IS ENCODED ONLY WHERE THE FIRM'S OWN SHEET STATES ONE. Not where
-// it is publicly known, not where the author remembers it, not where it is
-// "obvious". MSME-1 is genuinely due 31 October and 30 April and this file does
-// not say so, because the sheet says "Applicable half-yearly deadlines" and the
-// firm has not confirmed the rest.
-//
-// The standing rule on this project is that a fake VALUE is survivable and a
-// fake RULE is not. A plausible-looking wrong due date costs the client a
-// penalty rather than costing us an afternoon, and nobody re-reads a date that
-// looks right. So this converts what the sheet computes and HANDS THE REST BACK
-// BY NAME — on the rules screen, with the reason, rather than in a log.
-//
-// TEN rules produce dates. FORTY-SEVEN say what they still need. That ratio is
-// the honest state of the firm's own specification, and showing it is worth far
-// more than a calendar that looks complete: "we read your sheet, here is the one
-// fact we still need for AOC-4" is a much better question to put to a partner
-// than "what is your compliance calendar".
-//
-// ── AND EVERY ONE OF THEM IS `unconfirmed` ─────────────────────────────────
-//
-// Including the ten that compute. Those dates came from a previous vendor's
-// document and from this sheet, not from a partner ticking them against the
-// statute — and the firm's own practice may be earlier than the law. Confirming
-// one is an UPDATE somebody makes on a screen. See migration 0052.
-//
-// ── LEAD TIME IS NOT IN HERE ───────────────────────────────────────────────
-//
-// T-X — how many days early the firm starts — is the firm's own working
-// practice and appears nowhere in the sheet. Every rule seeds at 0, which means
-// the task appears on the statutory date itself. That is visibly useless and
-// deliberately so: a guessed lead time is a commitment the firm never made, and
-// a zero is a blank a partner fills in on the rules screen.
+// The firm's own India compliance calendar as rules (T3.2), from
+// `docs/India_Compliance_Calendar_Applicability_Business_in_a_Box.xlsx` (the founder, 2026-08-30):
+// 55 obligations across twelve modules (Income Tax, TDS, GST, Payroll, MCA, Transfer Pricing,
+// FEMA/RBI, Payments, POSH, Labour, Data Privacy, industry licences). Every one is a row here,
+// unlike the demo.
+// A DUE DATE IS ENCODED ONLY WHERE THE FIRM'S SHEET STATES ONE, never from memory or public
+// knowledge (MSME-1 is due 31 Oct / 30 Apr, the sheet does not say so, so neither do we). A fake
+// value is survivable, a fake rule is not: a plausible wrong date costs the client a penalty.
+// The sheet's vague timings are correct ("after AGM", "State-specific", "7 working days" with no
+// holiday calendar, "30 days of allotment" with no event seen), so each is handed back BY NAME
+// with its reason on the rules screen. Ten rules compute; forty-seven say what they still need.
+// Every rule seeds `unconfirmed`, the ten included (previous vendor + this sheet, not a partner;
+// confirming is an UPDATE on a screen, see 0052). Lead time (T-X) seeds 0, so the task appears
+// on the statutory date: a guessed lead time is a commitment the firm never made.
 
 import type { DueRuleKind, ObligationRecurrence } from "./model.js";
 
-/**
- * The pack this file ships. Named for its SOURCE and its date, because that is
- * what a pack identifies — a revision of these rules is a NEW pack alongside
- * this one, never an edit to it, which is how a filing made under the old rules
- * can still explain its own due date.
- */
+/** Named for its source and date. A revision is a NEW pack beside this one, never an edit, so a
+ *  filing made under the old rules can still explain its due date. */
 export const INDIA_RULE_PACK = "in-firm-sheet@2026.08";
 
 export interface SeedException {
@@ -94,19 +39,15 @@ export interface SeedRule {
   readonly dueMonthOffset: number | null;
   readonly dueDayOfMonth: number | null;
   readonly dueDaysAfter: number | null;
-  /** Present exactly when `dueRule` is null. The sheet's own words wherever it
-   *  gave them, so a partner recognises their own specification. */
+  /** Present exactly when `dueRule` is null; the sheet's own words wherever it gave them. */
   readonly unresolvedReason: string | null;
-  /** What the sheet's `Applicability Threshold / Trigger` column said. Carried
-   *  verbatim because nothing in this schema can yet TEST it — see the note on
-   *  thresholds in `docs/MERGE_BUILD-PLAN.md` — and dropping it would lose the
-   *  firm's own statement of who each rule reaches. */
+  /** The sheet's `Applicability Threshold / Trigger`, verbatim: nothing can TEST it yet (see
+   *  thresholds in `docs/MERGE_BUILD-PLAN.md`), and it says who each rule reaches. */
   readonly applicabilityNote: string;
   readonly exceptions?: readonly SeedException[];
 }
 
-/** Shorthand for the "we cannot compute this yet" shape, so the forty-five
- *  unresolved rows read as data rather than as five nulls each. */
+/** Shorthand for a rule we cannot compute yet. */
 function unresolved(
   module: string,
   name: string,
@@ -156,27 +97,15 @@ function dayOfMonth(
 }
 
 /**
- * The sheet, in its own order.
- *
- * FIFTY-SEVEN rows for fifty-five sheet lines, and the two extra are not a
- * miscount. GSTR-1 and GSTR-3B each occupy one line described as
- * "Monthly / Quarterly", which is two different regimes with two different due
- * dates — the monthly one computes, and the QRMP one cannot because this system
- * does not record which clients elected it. Folding them into one row would
- * have meant either inventing the QRMP date or losing the monthly one.
- *
- * Read the `unresolvedReason` on the forty-six that do not compute: each one is
- * a question for the firm, and each one is worded so a partner can answer it
- * without knowing anything about this system. The forty-seventh, FC-GPR, is the
- * odd one — it HAS a formula and still generates nothing, because it is
- * event-driven and nothing here sees a share issue yet.
+ * The sheet, in its own order: 57 rows for 55 lines. GSTR-1 and GSTR-3B are each "Monthly /
+ * Quarterly" on the sheet, two regimes: the monthly one computes, the QRMP one cannot (no record
+ * of who elected it). Each `unresolvedReason` is a question a partner can answer without knowing
+ * this system. FC-GPR HAS a formula and generates nothing: it is event-driven.
  */
 export const INDIA_SEED_RULES: readonly SeedRule[] = [
   // ── Income Tax ───────────────────────────────────────────────────────────
-  // Due 15 Jun / 15 Sep / 15 Dec / 15 Mar for an Apr-start year, which is
-  // offset 0 from each quarter's END month — the instalment falls INSIDE its
-  // own quarter, because it is an estimate. The two due-rule shapes covered it
-  // without a third; see `domain/obligation/model.ts`.
+  // 15 Jun / 15 Sep / 15 Dec / 15 Mar: offset 0 from each quarter's END month, so the
+  // instalment falls inside its own quarter (an estimate).
   dayOfMonth("Income Tax", "Advance Tax", "Income Tax", "quarterly", 0, 15,
     "Tax payable for year >= Rs 10,000"),
   unresolved("Income Tax", "Corporate Income Tax Return", "Income Tax", "annual",
@@ -196,8 +125,7 @@ export const INDIA_SEED_RULES: readonly SeedRule[] = [
     "Deducted at credit or payment, whichever is earlier. A transaction, not a period. " +
       "Nothing here yet sees a payment, so there is nothing to count from.",
     "Depends on payment nature, threshold, payee and PAN"),
-  // THE MARCH EXCEPTION, and the reason `obligation_template_exception` exists.
-  // Eleven months on the 7th, and March on 30 April.
+  // THE MARCH EXCEPTION, why `obligation_template_exception` exists: the 7th, but March on 30 April.
   dayOfMonth("TDS", "TDS deposit", "Income Tax", "monthly", 1, 7,
     "TDS deducted in the month",
     [{
@@ -210,8 +138,7 @@ export const INDIA_SEED_RULES: readonly SeedRule[] = [
         "date, not a practice of one firm.",
     }],
   ),
-  // Q1 -> 31 Jul, Q2 -> 31 Oct, Q3 -> 31 Jan, and Q4 -> 31 MAY: two months
-  // after its quarter rather than one. The same shape as March's deposit.
+  // Q1-Q3 -> 31 Jul / 31 Oct / 31 Jan; Q4 -> 31 MAY, two months after its quarter.
   dayOfMonth("TDS", "Quarterly TDS statements", "Income Tax", "quarterly", 1, 31,
     "Applicable deductors (TAN / TDS activity)",
     [{
@@ -365,8 +292,7 @@ export const INDIA_SEED_RULES: readonly SeedRule[] = [
     name: "FC-GPR",
     authority: "RBI",
     recurrence: "event",
-    // A formula WITH no trigger — recorded so it is ready the day a share issue
-    // becomes visible to this system, and generating nothing until then.
+    // A formula with no trigger: generates nothing until a share issue is visible here.
     dueRule: "days_after",
     dueMonthOffset: null,
     dueDayOfMonth: null,
@@ -428,9 +354,8 @@ export const INDIA_SEED_RULES: readonly SeedRule[] = [
     "Manufacturing/industrial/local-law applicability"),
 ];
 
-/** How many of the shipped rules can actually produce dates. Asserted by
- *  `tests/obligation/rulepack.test.ts` so that a careless edit which turns a
- *  question into an invented date fails the build rather than shipping. */
+/** Shipped rules that produce dates. `tests/obligation/rulepack.test.ts` asserts it, so a
+ *  question turned into an invented date fails the build. */
 export const INDIA_SEED_GENERATING_COUNT = INDIA_SEED_RULES.filter(
   (r) => r.dueRule !== null && r.recurrence !== "event",
 ).length;

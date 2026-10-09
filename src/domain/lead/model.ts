@@ -1,15 +1,9 @@
-// The lead domain — the commercial pipeline's nouns and pure rules. Stdlib
-// only, plus the party vocabulary it shares (domain may import domain).
-//
-// A lead is an OPPORTUNITY about a party, not a second copy of one. That single
-// decision is what makes dedup meaningful: two captures of the same company
-// resolve to the same party, and the second appends to the first's timeline
-// instead of starting a rival record.
+// Lead domain: the pipeline's nouns and pure rules. A lead is an OPPORTUNITY
+// about a party, not a copy of one, so dedup resolves two captures of the same
+// company to one party and the second appends to the first's timeline.
 import type { IdentifierType } from "../party/model";
 
-/** Where the opportunity came from. A closed set: reporting on source is the
- *  point of recording it, and free text turns "referral" into four spellings
- *  within a month. */
+/** Where the opportunity came from. A closed set: free text breeds four spellings of "referral". */
 export type LeadSource = "referral" | "inbound" | "outbound" | "event" | "partner" | "other";
 
 export const LEAD_SOURCES: readonly LeadSource[] = [
@@ -26,20 +20,13 @@ export function isLeadSource(v: string): v is LeadSource {
 }
 
 /**
- * Where the opportunity has got to.
+ * Pipeline stage. Closed in code (agreed 2026-08-28), so a firm cannot rename
+ * one yet (`UnknownStage`); it becomes a config kind once the pipeline screen
+ * (T6.2) exists and a firm asks, as T2.5 deferred workflow templates.
  *
- * A closed set in code for this pass, agreed rather than assumed (2026-08-28).
- * The code branches on these names, so a firm cannot rename them yet and
- * `UnknownStage` says exactly that. They become a config kind when the pipeline
- * screen (T6.2) exists and a firm asks — designing a firm-editable stage
- * vocabulary before either exists is the same trap T2.5 avoided by deferring
- * workflow templates.
- *
- * `abandoned` is NOT a synonym for `lost` (G3.1, build2 §4.4). A prospect who
- * went quiet is a FOLLOW-UP problem; a prospect who chose a competitor is a
- * PRICING problem. They are the firm's two fixable failures and they have
- * opposite remedies, so collapsing them into one stage means the pipeline can
- * report a conversion rate and never say which of the two to go and fix.
+ * `abandoned` is not `lost` (G3.1, build2 §4.4): went quiet is a FOLLOW-UP
+ * problem, chose a competitor is a PRICING problem. One stage for both would
+ * hide which of the two to fix.
  */
 export type LeadStage =
   | "new"
@@ -62,8 +49,7 @@ export function isLeadStage(v: string): v is LeadStage {
   return (LEAD_STAGES as readonly string[]).includes(v);
 }
 
-/** The stages a lead never leaves. Reaching one closes the opportunity and
- *  stamps closed_at; the database CHECK keeps the two in step. */
+/** Stages a lead never leaves; reaching one stamps closed_at (a DB CHECK keeps them in step). */
 export const TERMINAL_STAGES: readonly LeadStage[] = ["converted", "lost", "abandoned"];
 
 export function isTerminalStage(stage: LeadStage): boolean {
@@ -74,15 +60,8 @@ export function isOpen(stage: LeadStage): boolean {
   return !isTerminalStage(stage);
 }
 
-/**
- * The terminal stages that did NOT win, and therefore owe an explanation.
- *
- * `converted` is deliberately absent: a won deal has no lost reason, and a field
- * that accepted one on it would collect notes nothing ever reads. The database
- * says the same thing (`lead_lost_reason_scope_chk`, migration 0030), because a
- * rule only in TypeScript is one an import or a psql session walks straight
- * past.
- */
+/** Unwon terminal stages, which owe a lost reason. `converted` never takes one;
+ *  the DB says so too (`lead_lost_reason_scope_chk`, 0030) for imports and psql. */
 export const CLOSED_UNWON_STAGES: readonly LeadStage[] = ["lost", "abandoned"];
 
 export function recordsLostReason(stage: LeadStage): boolean {
@@ -92,134 +71,74 @@ export function recordsLostReason(stage: LeadStage): boolean {
 export interface Lead {
   readonly id: string;
   readonly tenantId: string;
-  /**
-   * What this opportunity is called.
-   *
-   * The opportunity's OWN name, not the client's. Before it existed every list
-   * rendered `party.displayName`, so a firm quoting one client for two things
-   * saw the same row twice with nothing distinguishing them — and the read
-   * model already carries the party name beside this, so a title that merely
-   * repeated it would add nothing.
-   *
-   * Never empty and never whitespace: `lead_title_present_chk` in migration
-   * 0030 says so at the table, because "  " satisfies NOT NULL and renders as
-   * the same blank row the column was added to prevent.
-   */
+  /** The opportunity's own name, not the client's, so two quotes for one client
+   *  are told apart. Never blank: `lead_title_present_chk` (0030), since "  "
+   *  satisfies NOT NULL. */
   readonly title: string;
-  /** The party this opportunity is about. Never null — a lead with no party is
-   *  the duplicate-prospect problem this model exists to avoid. */
+  /** Never null: a lead with no party is the duplicate-prospect problem. */
   readonly partyId: string;
   readonly source: LeadSource;
   readonly stage: LeadStage;
   /** Whose desk it is on, or null for the unassigned queue. */
   readonly ownerUserId: string | null;
   /**
-   * Where the PROSPECT is — ISO 3166-1 alpha-2, or null when nobody has said.
-   *
-   * Null is ordinary and must stay cheap: a prospect's country often is not
-   * known when they phone in, and a capture must never be refused for it. The
-   * rotation is what answers for an unknown country, which is why there is no
-   * wildcard territory rule.
-   *
-   * It is the axis territory assignment matches on, and it is also the answer
-   * `ProposalService.draft` needs for `clientJurisdiction` — which decides
-   * which of the firm's own entities contracts. The pipeline was the only stage
-   * of this product that did not record a jurisdiction.
+   * Where the PROSPECT is: ISO 3166-1 alpha-2, or null when unknown (a capture
+   * is never refused for it). Territory assignment matches on it, with no
+   * wildcard rule: the rotation answers for null. Also the
+   * `clientJurisdiction` `ProposalService.draft` needs to pick the contracting entity.
    */
   readonly jurisdiction: string | null;
-  /**
-   * What the opportunity could be worth — an ESTIMATE, not a quote (0310).
-   *
-   * Null is ordinary: nobody knows the value when a prospect first phones in,
-   * and a capture must never be refused for it. The currency travels with the
-   * amount, and the service writes the firm's reporting currency, so every lead
-   * in a firm compares with every other and a value filter means something.
-   */
+  /** An ESTIMATE, not a quote (0310); null is ordinary. Always in the firm's
+   *  reporting currency, so values compare and filter across the firm. */
   readonly estimatedValue: LeadValue | null;
   readonly notes: string | null;
   /**
-   * Why it did not close won, in the closer's own words.
-   *
-   * FREE TEXT, and that is the decision rather than the easy option: a dropdown
-   * of five reasons produces five reasons and the useful one is always the
-   * sixth. Null on an open lead and on a converted one (the database refuses
-   * anything else); null on a lead closed before 0030, which honestly means
-   * nobody was asked.
-   *
-   * Distinct from `notes`, which is about the opportunity while it is live.
-   * This is the one sentence somebody writes at the moment they know the answer
-   * and will not be able to reconstruct a month later.
+   * Why it did not close won, as FREE TEXT (a dropdown never holds the useful
+   * sixth reason). Null when open or converted (the DB refuses otherwise), and
+   * on leads closed before 0030, meaning nobody was asked. Unlike `notes`, it
+   * is written once, at the close.
    */
   readonly lostReason: string | null;
   readonly capturedAt: string;
   readonly closedAt: string | null;
-  /**
-   * When this lead was DELETED as entered by mistake (0086), or null.
-   *
-   * Not an outcome, and not a fourth unwon stage: `lost` and `abandoned` are
-   * what happened to a real prospect, and this says there was none — which is
-   * why a deleted lead leaves the pipeline and every count rather than landing
-   * in the lost column. The row stays and resolves by id, and it is FINAL:
-   * nothing about a deleted lead changes again.
-   */
+  /** Set when DELETED as entered by mistake (0086). Not an unwon stage: there
+   *  was no real prospect, so it leaves the pipeline and every count. The row
+   *  stays, resolves by id, and is FINAL. */
   readonly deletedAt: string | null;
-  /** Who deleted it, for the page. The ledger's `lead.deleted` names the actor
-   *  either way; null only when nobody human did. */
+  /** Who deleted it, for the page; null only when nobody human did. The
+   *  ledger's `lead.deleted` names the actor either way. */
   readonly deletedByUserId: string | null;
 }
 
-/** An amount and its currency. The amount is a DECIMAL STRING, never a JS
- *  number — the product-wide money rule. */
+/** Amount is a DECIMAL STRING, never a JS number (the money rule). */
 export interface LeadValue {
   readonly amount: string;
   readonly currency: string;
 }
 
-/**
- * The shape an estimate is accepted in: up to sixteen whole digits and two
- * decimal places, no sign, no separators — what `numeric(18,2)` holds exactly.
- * "5,00,000" and "5e5" are refused rather than guessed at, because a value a
- * person typed wrong and the system reinterpreted is worse than a refusal.
- */
+/** Up to 16 digits and 2 decimals, no sign or separators: what `numeric(18,2)`
+ *  holds. "5,00,000" and "5e5" are refused, never reinterpreted. */
 const ESTIMATED_VALUE_PATTERN = /^\d{1,16}(?:\.\d{1,2})?$/;
 
 export function isEstimatedValue(v: string): boolean {
   return ESTIMATED_VALUE_PATTERN.test(v);
 }
 
-/**
- * The one spelling of an estimate: no leading zeros, exactly two places —
- * what Postgres hands back from `numeric(18,2)`. Canonical BEFORE it is
- * written, so "500000" and "500000.00" are one value to every comparison,
- * including "did this edit change anything". Pure string work: the amount
- * never passes through a JS number.
- */
+/** Canonical spelling (no leading zeros, two places, as Postgres returns
+ *  `numeric(18,2)`), applied before writing so "500000" and "500000.00" compare
+ *  equal. String work only: never a JS number. */
 export function normalizeEstimatedValue(v: string): string {
   const [whole = "0", fraction = ""] = v.split(".");
   const digits = whole.replace(/^0+(?=\d)/, "");
   return `${digits}.${fraction.padEnd(2, "0")}`;
 }
 
-// ── Dedup ────────────────────────────────────────────────────────────────────
-
 /**
- * The identifiers a capture is deduplicated on: **phone, PAN, email**.
- *
- * These three because they are what a lead actually ARRIVES with — a web form,
- * a business card, a referral email — and a dedup key nobody supplies never
- * fires. PAN is the strong one: a legal identity, one per entity. Email and
- * phone are weaker but are what a prospect hands over.
- *
- * A registration number like GSTIN or CIN would be safe to match on too, and is
- * left out only because a lead seldom carries one at capture. That direction is
- * the safe one to be wrong in: ADDING a type here later can only find more
- * duplicates, while removing one cannot un-merge the records already joined by
- * it. So the set starts narrow and grows when a firm's actual intake shows what
- * it receives.
- *
- * Matching is on the NORMALISED value (domain/party/model.ts
- * `normalizeIdentifier`), so "Priya@Example.COM " and "priya@example.com" are
- * the same prospect, and " +91 98765 43210" and "+919876543210" are one phone.
+ * Capture dedups on **phone, PAN, email**: what a lead actually arrives with
+ * (PAN is the strong one, one per entity). GSTIN/CIN would be safe but seldom
+ * arrive at capture. Adding a type later only finds more duplicates; removing
+ * one cannot un-merge, so the set starts narrow. Matching is on the normalised
+ * value (`normalizeIdentifier`, domain/party/model.ts).
  */
 export const DEDUP_IDENTIFIER_TYPES: readonly IdentifierType[] = ["email", "phone", "pan"];
 
@@ -227,18 +146,13 @@ export function isDedupIdentifier(type: IdentifierType): boolean {
   return DEDUP_IDENTIFIER_TYPES.includes(type);
 }
 
-/**
- * What a capture matched, before anything is written.
- *
- * `parties` is the DISTINCT set of parties the supplied identifiers resolved
- * to. More than one is not a merge — it means the firm's data already holds
- * the same counterparty twice, and picking one would silently attach the
- * opportunity to whichever the query happened to return first.
- */
+/** What a capture matched, before any write. More than one party is not a
+ *  merge: the firm already holds the counterparty twice, and picking one would
+ *  be arbitrary. */
 export interface DedupMatch {
   readonly parties: readonly string[];
-  /** Which supplied identifiers already exist, by their position in the input,
-   *  so the caller attaches only the genuinely new ones. */
+  /** Supplied identifiers that already exist, by input position, so only the
+   *  new ones are attached. */
   readonly existingByIndex: ReadonlyMap<number, string>;
 }
 
@@ -250,20 +164,10 @@ export function isAmbiguous(match: DedupMatch): boolean {
   return match.parties.length > 1;
 }
 
-// ── Pure rules ───────────────────────────────────────────────────────────────
-
 /**
- * Whether a lead may move from one stage to another.
- *
- * Deliberately permissive in one direction and absolute in the other: any open
- * stage may move to any other, because real pipelines go backwards — a
- * "qualified" prospect who stops answering is "contacted" again, and a workflow
- * that forbids it just teaches people to lie to it. What is refused is leaving
- * a TERMINAL stage, because a converted, lost or abandoned lead is finished; a
- * prospect who returns is a new opportunity, which is exactly what the
- * one-open-lead-per-party index leaves room for — and since 0030 that index
- * treats `abandoned` as closed too, so going quiet does not lock a prospect out
- * of the pipeline for good.
+ * Any open stage may move to any other (real pipelines go backwards); a
+ * TERMINAL stage never moves. A returning prospect is a new lead, which the
+ * one-open-lead-per-party index allows; since 0030 it treats `abandoned` as closed too.
  */
 export function canMoveStage(from: LeadStage, to: LeadStage): boolean {
   if (isTerminalStage(from)) return false;
@@ -271,24 +175,15 @@ export function canMoveStage(from: LeadStage, to: LeadStage): boolean {
 }
 
 /**
- * Why this lead may NOT be deleted, or null when it may (0086).
- *
- * A lead is deleted when it was ENTERED BY MISTAKE — a duplicate, a test, the
- * wrong company — and the four answers below are the cases where that cannot be
- * true, or cannot be decided by this caller:
- *
- *   deleted    — it already was, and a deletion is final.
- *   converted  — a won deal is the record of a win, not a mistake.
- *   closed     — already `lost` or `abandoned`, so it is IN the pipeline's
- *                numbers; taking it out changes them, and that is an
- *                administrator's call. Often exactly how a mistake was put away
- *                while there was nothing else to do, which is why it is allowed
- *                at all.
- *   proposals  — a live proposal was drafted from it. Delete that first if it
- *                was a mistake too; deleting in order always works.
- *
- * WHO before WHAT: a caller who may not delete a closed lead at all is told so
- * before being sent to delete its proposals, which would not help them.
+ * Why a lead may NOT be deleted, or null when it may (0086). Deletion is for a
+ * lead ENTERED BY MISTAKE:
+ *   deleted   — it already was; final.
+ *   converted — a win is not a mistake.
+ *   closed    — lost/abandoned is in the pipeline's numbers, so only an
+ *               administrator may (often how a mistake was put away).
+ *   proposals — a live proposal came from it; delete that first.
+ * WHO before WHAT: a caller who may not delete a closed lead is told so before
+ * being sent to delete its proposals.
  */
 export type LeadDeletionBlock =
   | { readonly kind: "deleted" }
@@ -310,35 +205,14 @@ export function leadDeletionBlock(
   return null;
 }
 
-// ── Assignment ───────────────────────────────────────────────────────────────
-
-/**
- * How a firm decides whose desk an unclaimed lead lands on.
- *
- * ONE member, and that is the honest state of it rather than a stub. Round
- * robin is buildable against what the schema already holds — the roster and the
- * pipeline. **Territory is not**, because nothing here has a territory concept
- * and its axis (geography, industry, service line) has never been chosen with
- * the client. Inventing one means a mapping table with a firm's data in it
- * before anybody finds out it is the wrong axis, and a mapping table with rows
- * in it is far harder to withdraw than an empty seam.
- *
- * It is a CLOSED TYPE with one member rather than a bare string so that the day
- * an axis is agreed, `"territory"` is a one-line change here, the new strategy
- * names itself on the timeline, and every report that groups leads by how they
- * were assigned keeps working across the change.
- */
+/** Which rule picks the desk for an unclaimed lead. A closed type, so each
+ *  strategy names itself on the timeline and reports grouped by it survive a
+ *  new one. Territory's axis is the prospect's country (T2.1b, 0026). */
 export type AssignmentPolicy = "round_robin" | "territory";
 
-/**
- * Whose desk covers leads from a country (T2.1b).
- *
- * One row per country per firm — the twin of `crm.firm_entity_preference`, and
- * the same question asked of a different table: that one answers "which of our
- * entities serves a client in X", this one answers "whose desk covers a lead
- * from X". There is deliberately NO wildcard: assignment already has a better
- * fallback than a catch-all row, which is the rotation.
- */
+/** Whose desk covers leads from a country (T2.1b): one row per country per
+ *  firm, the twin of `crm.firm_entity_preference`. No wildcard row: the
+ *  rotation is the fallback. */
 export interface TerritoryRule {
   readonly id: string;
   readonly tenantId: string;
@@ -349,12 +223,7 @@ export interface TerritoryRule {
   readonly note: string | null;
 }
 
-/**
- * Where a lead's owner came from — recorded on `lead.captured`, so a firm can
- * ask "did a person put this here, or did the rotation?" a year later.
- *
- * `requested` is not a policy; it is the absence of one. Somebody named the
- * owner at capture and no strategy was consulted, which is a materially
- * different fact from the rotation happening to pick the same person.
- */
+/** How a lead's owner was chosen, recorded on `lead.captured`. `requested`
+ *  means a person named the owner and no strategy ran: a different fact from
+ *  the rotation picking the same person. */
 export type OwnerSource = "requested" | AssignmentPolicy;

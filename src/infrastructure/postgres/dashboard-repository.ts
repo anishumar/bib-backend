@@ -1,16 +1,7 @@
-// Postgres adapter for the leadership figures (T3.7), over the views migration
-// 0038 creates.
-//
-// Every query goes through `withTenant`, so the views' `security_invoker = true`
-// does its job: the row policies apply to the underlying tables and one firm's
-// dashboard cannot see another's engagements. A view without that setting would
-// run as its owner and be a hole straight through the tenant wall — which is
-// why the migration says so twice.
-//
-// SUMS COME BACK AS STRINGS AND STAY STRINGS. `numeric` is returned as text by
-// postgres.js precisely because it does not fit a JS number, and these are the
-// figures a partner takes to a client. Coercing one to a number here would undo
-// the whole arrangement at the last possible moment.
+// Postgres adapter for the leadership figures (T3.7), over 0038's views. Every query runs under
+// `withTenant` so the views' `security_invoker = true` applies the row policies (a view without
+// it runs as its owner, straight through the tenant wall). Sums come back from postgres.js as
+// `numeric` strings and STAY strings: never coerce one to a JS number.
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
 import type { AgeingBucket, MrrByCurrency, MrrExclusion, Slice } from "../../domain/dashboard/model";
@@ -38,8 +29,7 @@ export class PostgresDashboardRepository implements DashboardRepository {
         SELECT reporting_currency FROM tenancy.tenant WHERE id = ${tenantId}
       `;
       if (!row) {
-        // Required at creation with no default anywhere in the stack (0009), so
-        // a tenant without one is not a state this product can produce.
+        // Required at creation, no default anywhere (0009): a tenant without one cannot exist.
         throw new Error(
           `tenant ${tenantId} has no reporting currency, which migration 0009 makes NOT NULL — ` +
             `this row cannot be read under the policy that should match it`,
@@ -51,9 +41,7 @@ export class PostgresDashboardRepository implements DashboardRepository {
 
   async mrr(tenantId: string): Promise<MrrTotals> {
     return withTenant(this.app, tenantId, async (db) => {
-      // One pass over the view, splitting counted from excluded. Two queries
-      // would be two scans and could disagree if an engagement activated
-      // between them.
+      // One pass, splitting counted from excluded; two queries could disagree mid-activation.
       const rows = await db<
         { excluded_because: string | null; n: string; total: string | null }[]
       >`
@@ -67,8 +55,7 @@ export class PostgresDashboardRepository implements DashboardRepository {
 
       const counted = rows.find((r) => r.excluded_because === null);
       return {
-        // "0" and not null: a firm with no recurring revenue has an MRR of zero,
-        // which is a fact. Null would mean "we could not work it out".
+        // "0", not null: no recurring revenue is an MRR of zero; null would mean "unknown".
         monthly: counted?.total ?? "0",
         countedEngagements: Number(counted?.n ?? "0"),
         gaps: rows
@@ -83,10 +70,8 @@ export class PostgresDashboardRepository implements DashboardRepository {
 
   async mrrBy(tenantId: string, axis: "client" | "service"): Promise<readonly Slice[]> {
     return withTenant(this.app, tenantId, async (db) => {
-      // Two shapes rather than one query with a CASE, because the JOIN differs.
-      // A `${}` in a table or column position would not be parameterised anyway
-      // — postgres.js would send it as a value — so branching in TypeScript is
-      // both the safe way and the readable one.
+      // Two queries, not a CASE, because the JOIN differs; postgres.js sends a `${}` in a
+      // table/column position as a value, so branch in TypeScript.
       if (axis === "client") {
         const rows = await db<{ key: string; label: string; total: string; n: string }[]>`
           SELECT m.party_id            AS key,
@@ -102,9 +87,7 @@ export class PostgresDashboardRepository implements DashboardRepository {
         return rows.map((r) => this.toSlice(r));
       }
 
-      // Grouped by the config ENTRY, not the version: a firm that republished a
-      // service would otherwise see it split into one slice per version, which
-      // is an artefact of our versioning and not a fact about its revenue.
+      // Grouped by config ENTRY, not version, so a republished service is not split per version.
       const rows = await db<{ key: string; label: string; total: string; n: string }[]>`
         SELECT e.id                    AS key,
                e.key                   AS label,
@@ -137,11 +120,10 @@ export class PostgresDashboardRepository implements DashboardRepository {
         SELECT reporting_currency AS code FROM tenancy.tenant WHERE id = ${tenantId}
       `;
       const reporting = firm?.code ?? "INR";
-      // ONE pass, three groupings: per currency, per client x currency, and
-      // the firm. The same rows MRR counts (active, priced, recurring), so
-      // the signed-rate total IS the MRR card's figure. Today's value is each
-      // engagement's monthly amount at the latest rate held on or before the
-      // firm's day (`fx.rate_on`, 0345), rounded like the view rounds.
+      // ONE pass, three groupings: per currency, per client x currency, the firm. Same rows as
+      // MRR (active, priced, recurring), so the signed-rate total IS the MRR card's figure.
+      // Today's value: monthly amount at the latest rate on or before the firm's day
+      // (`fx.rate_on`, 0345), rounded like the view.
       const rows = await db<
         {
           g_party: number;
@@ -225,11 +207,8 @@ export class PostgresDashboardRepository implements DashboardRepository {
 
   async receivables(tenantId: string, day: string): Promise<ReceivableTotals> {
     return withTenant(this.app, tenantId, async (db) => {
-      // GROUPING SETS, so the per-bucket rows AND the grand total come from ONE
-      // pass over the view. Two queries could disagree if a payment landed
-      // between them, and summing the buckets in TypeScript would break the
-      // rule this product keeps everywhere else: only the database adds money
-      // up. `bucket IS NULL` is the total row.
+      // GROUPING SETS: buckets AND grand total in ONE pass (only the database adds money up).
+      // `bucket IS NULL` is the total row.
       const rows = await db<{ bucket: string | null; total: string; n: string }[]>`
         SELECT bucket,
                COALESCE(sum(outstanding_reporting), 0)::text AS total,
@@ -244,10 +223,7 @@ export class PostgresDashboardRepository implements DashboardRepository {
 
       return {
         outstanding: grand?.total ?? "0",
-        // EVERY bucket, in order, including the empty ones. A screen showing
-        // only non-empty bands would silently change shape as debt moves, and
-        // "nothing is 90+ days overdue" is the single most reassuring row on
-        // this table — it has to be visible, not absent.
+        // EVERY bucket in order, empty ones too: "nothing is 90+ days overdue" must show.
         bands: AGEING_BUCKETS.map((bucket: AgeingBucket) => {
           const row = byBucket.get(bucket);
           return {
@@ -278,19 +254,9 @@ export class PostgresDashboardRepository implements DashboardRepository {
 
   async creditSales(tenantId: string, sinceDays: number, day: string): Promise<string> {
     return withTenant(this.app, tenantId, async (db) => {
-      // ONE query, and the subtraction happens in SQL. Fetching gross and
-      // credits separately and subtracting in TypeScript would be the same
-      // mistake the ageing total nearly shipped with: only the database adds
-      // money up, because a float cannot hold what these values are.
-      //
-      // `issued_on` and not `created_at` — a draft raised in March and issued in
-      // April is April's sale. Credit notes are netted off rather than ignored:
-      // a sale that was reversed was not a sale, and leaving it in the
-      // denominator would flatter DSO.
-      //
-      // The credit-note total is a scalar subquery rather than a JOIN, because
-      // joining an invoice to its many credit notes would multiply the invoice
-      // total by the number of them.
+      // ONE query, subtraction in SQL. By `issued_on`, not `created_at` (raised in March, issued
+      // in April is April's sale). Credit notes are netted off, or a reversed sale flatters DSO;
+      // a scalar subquery, since a JOIN would multiply the invoice total per credit note.
       const [row] = await db<{ total: string }[]>`
         SELECT COALESCE(sum(
                  (t.total - COALESCE(
@@ -315,10 +281,8 @@ export class PostgresDashboardRepository implements DashboardRepository {
     window: BillingWindowDays,
   ): Promise<readonly BillingCompany[]> {
     return withTenant(this.app, tenantId, async (db) => {
-      // The firm's companies as `crm.is_firm_entity` defines them (the firm
-      // itself, or a live member of 0313's list), not archived; and whoever
-      // else issued an invoice in the window, so no billed money is dropped
-      // because its company was put away since.
+      // The firm's companies per `crm.is_firm_entity` (the firm, or a live member of 0313's list),
+      // not archived, plus any other issuer in the window, so no billed money is dropped.
       const rows = await db<{ party_id: string; name: string; jurisdiction: string | null }[]>`
         SELECT p.id AS party_id, p.display_name AS name, le.jurisdiction
         FROM core.party p
@@ -343,23 +307,14 @@ export class PostgresDashboardRepository implements DashboardRepository {
   ): Promise<readonly CompanyMonthRow[]> {
     if (owns.length === 0) return [];
     return withTenant(this.app, tenantId, async (db) => {
-      // BILLED, as the domain defines it (`MonthBilling`): issued invoices by
-      // the month of `issued_on`, before tax (`invoice_totals.net`, after
-      // discount), less the credit notes issued in the window by THEIR month,
-      // each at its pre-tax share of the invoice it credits. A credit note on
-      // an invoice cancelled since is left out with the invoice: the whole
-      // sale is already gone. `issued_on` is a `date`, so its month is the
-      // same for everybody and needs no zone; the WINDOW is the firm's.
-      //
-      // Every document is rounded to four places after its conversion, as
-      // `crm.receivable_ageing` does, then summed: the month is the sum of
-      // the documents a person could list, not a rounding of a longer sum.
-      //
-      // ONE pass, two grouping sets: (company, month) and (month) for the
-      // whole firm. A company's `billed` takes its own-currency documents,
-      // or all of them at their stored rates when its currency is the
-      // reporting currency (the rate IS the conversion); the rest are counted
-      // and left out of `billed`, never converted at a rate nothing stores.
+      // BILLED (`MonthBilling`): issued invoices by `issued_on` month, pre-tax
+      // (`invoice_totals.net`, after discount), less credit notes issued in the window by THEIR
+      // month at their pre-tax share; a credit note on a since-cancelled invoice leaves with it.
+      // `issued_on` is a `date` (no zone); the WINDOW is the firm's. Each document is rounded to
+      // four places after conversion, as `crm.receivable_ageing` does, then summed.
+      // Grouping sets (company, month) and (month). A company's `billed` takes its own-currency
+      // documents, or all at stored rates when its currency is the reporting one; the rest are
+      // counted and left out, never converted at a rate nothing stores.
       const rows = await db<
         {
           party_id: string | null;
@@ -431,17 +386,11 @@ export class PostgresDashboardRepository implements DashboardRepository {
     window: BillingWindowDays,
   ): Promise<readonly ManagerMonthRow[]> {
     return withTenant(this.app, tenantId, async (db) => {
-      // BILLED is `billingByMonth`'s, document for document, and rounded the
-      // same way (the credit note's pre-tax share to four places, then each
-      // document converted and rounded again), so the managers of a month add
-      // up to the "All companies" figure to the paisa. COLLECTED is cash by
-      // `received_on`, with tax, at the invoice's stored rate (a payment is in
-      // the invoice's currency, 0028). Only ISSUED invoices: a draft was
-      // never sent, and a cancelled one leaves every figure, its payments too.
-      //
-      // ONE pass, two grouping sets: (manager, month) and (month) for the whole
-      // firm. `GROUPING(manager)` tells the firm row from the row of invoices
-      // that name nobody, whose manager is also null.
+      // BILLED is `billingByMonth`'s, rounded the same way, so a month's managers add up to
+      // "All companies" to the paisa. COLLECTED is cash by `received_on`, with tax, at the
+      // invoice's stored rate (payments are in its currency, 0028). ISSUED only: a cancelled one
+      // leaves every figure, payments too. Grouping sets (manager, month) and (month);
+      // `GROUPING(manager)` tells the firm row from invoices naming no manager.
       const rows = await db<
         {
           manager: string | null;
@@ -516,10 +465,8 @@ export class PostgresDashboardRepository implements DashboardRepository {
 
   async owedByManager(tenantId: string, day: string): Promise<readonly ManagerOwedRow[]> {
     return withTenant(this.app, tenantId, async (db) => {
-      // The rows "Owed to the firm" sums (`receivables`), split by manager:
-      // issued invoices still owed, overpayments left out, each at its stored
-      // rate. The empty grouping set always answers, so a firm owed nothing
-      // gets a total of "0" rather than no row.
+      // "Owed to the firm" (`receivables`) by manager: issued and owed, overpayments left out, at
+      // stored rates. The empty grouping set always answers, so owed nothing is "0", not no row.
       const rows = await db<{ manager: string | null; whole: number; total: string; n: number }[]>`
         -- An advance's balance is nobody's (0376, Q085), as its revenue is.
         SELECT o.manager,
@@ -547,10 +494,8 @@ export class PostgresDashboardRepository implements DashboardRepository {
   async managerNames(tenantId: string, userIds: readonly string[]): Promise<readonly ManagerName[]> {
     if (userIds.length === 0) return [];
     return withTenant(this.app, tenantId, async (db) => {
-      // FROM the membership, which is behind the tenant wall: `user_account` is
-      // global (ADR-02), so a name is only given for somebody on THIS firm's
-      // roster. No display name falls back to the email, as the invoice page
-      // already shows a manager's email to the same readers.
+      // FROM membership (tenant-walled): `user_account` is global (ADR-02), so only THIS firm's
+      // roster is named. No display name falls back to the email, as the invoice page shows.
       const rows = await db<{ user_id: string; name: string; active: boolean }[]>`
         SELECT m.user_id,
                coalesce(nullif(btrim(u.display_name), ''), u.email::text) AS name,
@@ -567,8 +512,7 @@ export class PostgresDashboardRepository implements DashboardRepository {
 
   async revenueByPerson(tenantId: string, q: RevenueQuery): Promise<readonly PersonCurrencyRow[]> {
     return withTenant(this.app, tenantId, async (db) => {
-      // Issued invoices only, in their OWN currency: nothing is converted and
-      // two currencies never meet in one sum (the GROUP BY carries currency).
+      // Issued only, in their OWN currency: the GROUP BY carries currency, nothing is converted.
       const issuer = q.issuerPartyId === undefined ? db`` : db`AND i.entity_party_id = ${q.issuerPartyId}`;
       const currency = q.currency === undefined ? db`` : db`AND i.currency = ${q.currency}`;
       if (q.by === "manager") {
@@ -619,17 +563,12 @@ export class PostgresDashboardRepository implements DashboardRepository {
         `;
         return rows.map(toPersonRow);
       }
-      // ORIGINATOR: line by line. The letter a line bills is its engagement's;
-      // a line with no engagement (a fee group's, a letter-wide advance's) is
-      // found through the bill it was raised from. Each line takes its share
-      // of the invoice's credit notes (of its net), money and balance (of its
-      // total), to four places.
-      //
-      // AN ADVANCE TAKEN BEFORE THE LETTER (0363) has one line, on no
-      // engagement and no bill. Its parts are followed instead: each mapping
-      // to a service or a signed letter is that letter's originator's, at its
-      // effective amount (what a re-map kept), its tax in the invoice's own
-      // proportion; what is mapped to nothing yet stays with nobody.
+      // ORIGINATOR, line by line: a line's letter is its engagement's, else (fee group, letter-wide
+      // advance) found via the bill it was raised from. Each line takes its share of credit notes
+      // (of net), money and balance (of total), to four places. An advance before the letter
+      // (0363) has one line on no engagement or bill: each mapping to a service or signed letter
+      // is that letter's originator's at its effective amount, tax in the invoice's proportion;
+      // unmapped stays with nobody.
       const rows = await db<RevenueRow[]>`
         WITH inv AS (
           SELECT i.id, i.currency, i.issued_on

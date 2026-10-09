@@ -1,36 +1,18 @@
-// A service lists its compliance filings; a filing is written once (T6.16,
-// migration 0309) — against a REAL database, because every claim below is
-// about SQL a fake cannot reproduce.
-//
-// ── WHAT IS PROVED HERE AND NOWHERE ELSE ───────────────────────────────────
-//
-//   1. The generation SQL with links: a filing written for a service fills the
-//      calendar of that service's live clients at once; a second service the
-//      same client holds writes nothing twice; a client holding both gets ONE
-//      filing per period, on the EARLIEST engagement, by rule.
-//   2. Removing a filing withdraws exactly the untouched upcoming rows no
-//      other linked service covers, in ONE transaction with the removal, and
-//      re-points the covered ones to the engagement that owes them now.
-//   3. EVERY SQL reader leaves a withdrawn row out: the calendar, the T-X
-//      raise and its attach, the missed sweep and its write, the restater,
-//      the escalation watch and its queue, the nudge candidates and their
-//      write, and the portal (a policy, proved by dropping it). A staff read
-//      by id still sees it: the guarded shape, not the bare narrowing.
-//   4. A supersession leaves a withdrawn row where it is and does not count
-//      it as kept; the successor is on the chain's services with nothing
-//      copied.
-//   5. Adding the filing back restores the SAME rows in place, re-dated by
-//      the rule that governs each period: one live row per period.
-//   6. 0309's walls, each by the constraint that refuses it; and the
-//      migration's data move and its down, round-tripped inside a transaction
-//      that is rolled back.
-//   7. (review) Another service covers a filing only from the day its
-//      engagement starts, which is the generator's own floor: the periods
-//      before a signed-but-not-started engagement are withdrawn, not moved.
-//   8. (review) A removal and the generator's write take turns on the
-//      chain's root rule: two removals at once, and a removal during a write,
-//      each forced by holding a transaction open, and the second WAITS.
-//
+// T6.16 (0309): a service lists its filings, a filing is written once. A REAL database, since each
+// claim is about SQL a fake cannot reproduce:
+// 1. Linking fills that service's live clients at once, ONE row per period on the EARLIEST
+//    engagement; a second service the client holds writes nothing twice.
+// 2. Unlinking withdraws only untouched upcoming rows no other linked service covers, in the same
+//    transaction, and re-points covered rows to the engagement that owes them now.
+// 3. EVERY SQL reader skips a withdrawn row (calendar, T-X raise + attach, missed sweep + write,
+//    restater, escalation watch + queue, nudge candidates + write, portal policy); a staff read by
+//    id still sees it (the guarded shape, not the bare narrowing).
+// 4. Supersession leaves withdrawn rows in place, not counted as kept; the successor shares the
+//    chain's services, nothing copied. 5. Relinking restores the SAME rows, re-dated per period.
+// 6. 0309's walls, and its data move + down round-tripped in a rolled-back transaction.
+// 7. (review) Another service covers only from its engagement's start (the generator's floor):
+//    periods before a signed-but-not-started engagement are withdrawn, not moved.
+// 8. (review) Removal and generation take turns on the chain's root rule: the second WAITS.
 // Run with:  npm run test:integration
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import postgres from "postgres";
@@ -85,8 +67,7 @@ const service = new ObligationService({
   compliancePolicy: { missedFromOn: () => Promise.resolve(null) },
   calendarSource: new PostgresCalendarSource(app),
   services: new PostgresConfigRepository(app),
-  // Nothing here raises through the service: the raise feed is read directly,
-  // so a fake that invented a task id would only hide a wiring fault.
+  // The raise feed is read directly; a fake inventing a task id would only hide a wiring fault.
   workItems: { raiseForObligation: () => Promise.reject(new Error("not used in this test")) },
   tenants: { activeTenantIds: () => Promise.resolve([]) },
   ids: systemIds,
@@ -141,8 +122,7 @@ async function company(name: string): Promise<string> {
   return p.id;
 }
 
-/** A live engagement on a letter of its own: draft, one line, signed, then the
- *  engagement, which is the order the signed-letter freeze allows. */
+/** A live engagement on its own signed letter, in the order the signed-letter freeze allows. */
 let letters = 0;
 async function engagementFor(entity: string, versionId: string, effectiveFrom: string): Promise<string> {
   letters += 1;
@@ -198,8 +178,7 @@ interface Row {
   withdrawn_reason: string | null;
 }
 
-/** What the calendar holds for one chain, read as the OWNER (no RLS, no
- *  filter): the truth the readers are measured against. */
+/** One chain's calendar read as the OWNER (no RLS, no filter): the truth readers are measured by. */
 async function rowsOf(lineageId: string): Promise<Row[]> {
   return owner<Row[]>`
     SELECT id, template_id, lineage_id, entity_party_id, engagement_id, period_label,
@@ -280,7 +259,7 @@ afterAll(async () => {
   await Promise.all([app.end({ timeout: 5 }), owner.end({ timeout: 5 })]);
 });
 
-// ── the chain the whole file walks ──────────────────────────────────────────
+// The chain the whole file walks.
 
 let gstr3b = "";
 /** One of Cobalt Logistics' filings that came off, and one somebody started. */
@@ -331,8 +310,7 @@ describe("linking a filing to a service puts it on the calendar, once per period
     expect(record?.usedIn.map((u) => u.serviceEntryId)).toEqual([gst, full]);
     expect(record?.usedIn.every((u) => u.serviceName !== null && u.linkedAt.endsWith("Z"))).toBe(true);
 
-    // And the link's event NAMES the service, from the real catalogue row and
-    // by the name the library shows (T6.16 follow-up: /audit prints it).
+    // The link's event NAMES the service as the library shows it (T6.16 follow-up: /audit prints it).
     const linked = events.recorded.filter((e) => e.verb === "obligation_rule.linked").at(-1);
     expect(linked?.payload).toMatchObject({
       serviceEntryId: full,
@@ -343,8 +321,7 @@ describe("linking a filing to a service puts it on the calendar, once per period
   });
 
   it("a filing on BOTH services from the start lands on the EARLIEST engagement, by rule", async () => {
-    // Listed with the later service first: the order it was asked in must not
-    // decide which engagement the row carries.
+    // Later service listed first: the asked order must not decide the row's engagement.
     const { rule } = await service.createRule(
       {
         tenantId,
@@ -391,8 +368,7 @@ describe("removing a filing from a service withdraws what it no longer owes, and
 
     expect(effect).toEqual({
       unlinked: true,
-      // Cobalt Logistics held only GST: its upcoming rows come off, except the
-      // one on a desk.
+      // Cobalt Logistics held only GST: its upcoming rows come off, except the one on a desk.
       withdrawn: ahead(e2).length - 1,
       kept: before.length - (ahead(e2).length - 1),
       keptStarted: 1,
@@ -523,8 +499,7 @@ describe("a withdrawn filing is in NO reader", () => {
     const home = await new PostgresPortalHomeRepository(app).read(tenantId, [e2], TODAY);
     expect(home.filings.some((f) => f.obligationId === withdrawnRow)).toBe(false);
 
-    // THE GUARDED SHAPE: a staff session still reads it, which is what lets a
-    // relink find the row it restores. The bare narrowing would hide it here.
+    // THE GUARDED SHAPE: staff still read it, so a relink finds the row it restores.
     const staff = await withTenant(app, tenantId, (db) =>
       db<{ id: string }[]>`SELECT id FROM delivery.obligation_instance WHERE id = ${withdrawnRow}`,
     );
@@ -533,9 +508,8 @@ describe("a withdrawn filing is in NO reader", () => {
   });
 
   it("NEGATIVE CONTROL: drop the policy and the portal sees it (rolled back)", async () => {
-    // A test that passes with the wall removed proves only that the rows
-    // exist. The portal read runs as bib_app on the owner's connection so it
-    // sees the policy dropped inside the same transaction.
+    // Passing with the wall removed would prove only that rows exist. Runs as bib_app on the
+    // owner's connection to see the policy dropped in the same transaction.
     const ROLLBACK = new Error("roll back the negative control");
     let leaked = -1;
     await owner
@@ -591,16 +565,14 @@ describe("the law changes, and the filing comes back", () => {
     const record = (await service.listRules(tenantId)).find((r) => r.template.id === successor);
     expect(record?.usedIn.map((u) => u.serviceEntryId)).toEqual([full]);
     expect((await service.filingsForService(tenantId, full)).map((r) => r.template.id)).toContain(successor);
-    // And what the card says is DUE today is the predecessor, off the real
-    // list: the firm's today (30 August) is before the November cutover, so
-    // the successor is the change ahead, not the rule in force (T6.16
-    // follow-up).
+    // In force today is the predecessor: 30 August is before the November cutover, so the
+    // successor is the change ahead (T6.16 follow-up).
     const card = (await service.filingsForService(tenantId, full)).find((r) => r.template.id === successor);
     expect(card?.inForceToday?.template.id).toBe(gstr3b);
     expect(card?.nextChange?.template).toMatchObject({ id: successor, effectiveFrom: CUTOVER });
     expect(card?.nextChange?.template.dueRule?.dueDayOfMonth).toBe(11);
-    // A monthly cutover on the 1st is a period start, so it is when the new
-    // row takes over (review: a cutover inside a period waits for the next).
+    // A cutover on the 1st is a period start, so the new rule takes over then (review: a
+    // mid-period cutover waits for the next period).
     expect(card?.nextChange?.firstPeriodStart).toBe(CUTOVER);
   });
 
@@ -617,8 +589,7 @@ describe("the law changes, and the filing comes back", () => {
       const row = after.find((r) => r.id === id);
       expect(row?.withdrawn_at).toBeNull();
       expect(row?.engagement_id).toBe(e2Gst);
-      // From the cutover on it is the successor's, on the 11th; before it, the
-      // predecessor's, on the 20th. `scheduleFor`, never SQL arithmetic.
+      // From the cutover the successor's (11th), before it the predecessor's (20th): `scheduleFor`, not SQL.
       if ((row?.period_start ?? "") >= "2026-11-01") {
         expect(row?.template_id).toBe(successor);
         expect(row?.statutory.endsWith("-11")).toBe(true);
@@ -768,8 +739,7 @@ describe("0309 runs both ways, and moves the data", () => {
 
     await owner
       .begin(async (tx) => {
-        // A withdrawn filing exists: the down must refuse BEFORE touching
-        // anything, because the schema before 0309 cannot keep it off.
+        // With a withdrawn filing the down must refuse BEFORE touching anything: pre-0309 cannot keep it off.
         await tx`
           UPDATE delivery.obligation_instance
              SET withdrawn_at = now(), withdrawn_by_user_id = ${userId}, withdrawn_reason = 'service_unlinked'
@@ -829,8 +799,7 @@ describe("0309 runs both ways, and moves the data", () => {
     expect(seen.refused).toMatch(/taken off the calendar when a service stopped including them/);
     expect(seen.afterDown).toEqual({ table: false, column: true });
     expect(seen.afterUp).toEqual({ table: true, column: false });
-    // EXACTLY one system link for the rule that named a service; none for the
-    // one that named none, which under decision 1 stops generating.
+    // EXACTLY one system link for the rule naming a service; none for the other (decision 1: it stops generating).
     expect(seen.named).toBe(1);
     expect(seen.unnamed).toBe(0);
     // And the rollback left the real schema where it was.
@@ -841,10 +810,9 @@ describe("0309 runs both ways, and moves the data", () => {
   });
 });
 
-// ── the review's findings: the cover test and the two writers of a chain ────
+// Review findings: the cover test and the two writers of a chain.
 
-/** A filing written in the library (on no service, so nothing generates yet)
- *  under its own pack, for the tests below that link it by hand. */
+/** A library filing under its own pack; with no service, nothing generates until linked. */
 async function libraryRule(name: string, dueDayOfMonth: number, serviceEntryIds?: string[]) {
   const { rule } = await service.createRule(
     {
@@ -865,12 +833,8 @@ async function libraryRule(name: string, dueDayOfMonth: number, serviceEntryIds?
 
 const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-/**
- * Wait until some other session is BLOCKED on the transaction `xid`: the only
- * honest way to know a concurrent write has reached the point a test holds it
- * at. `pg_locks` is readable by every role, and a row or key wait shows as an
- * ungranted lock on the holder's transaction id.
- */
+/** Wait until another session is BLOCKED on transaction `xid`: the only honest sign a concurrent
+ *  write reached the held point. A row/key wait is an ungranted `pg_locks` row (any role reads it). */
 async function blockedOn(xid: string): Promise<void> {
   for (let i = 0; i < 100; i += 1) {
     const [r] = await owner<{ n: number }[]>`
@@ -883,11 +847,8 @@ async function blockedOn(xid: string): Promise<void> {
   throw new Error(`nothing ever waited on transaction ${xid}`);
 }
 
-/**
- * Hold a transaction open on the owner's connection: `work` runs inside it,
- * and it ends (committed, or rolled back when `rollback` is set) only when the
- * returned `release` is called. `ready` resolves with its transaction id.
- */
+/** Run `work` in an owner transaction held open until `release()` (then committed, or rolled back
+ *  with `rollback`); `ready` resolves with its transaction id. */
 function holdOpen(
   work: (tx: postgres.TransactionSql) => Promise<unknown>,
   rollback = false,
@@ -918,9 +879,8 @@ function holdOpen(
 
 describe("another service covers a filing only from the day its engagement starts (review)", () => {
   it("withdraws the periods before a later-starting engagement, and moves only the ones it owes", async () => {
-    // Cobalt Futures holds service A from January and has SIGNED service B,
-    // active but starting on 1 December (`pending_start` on the screen). Both
-    // carry the filing, so every row sits on A, the earlier engagement.
+    // A from January; B SIGNED, active, starting 1 December (`pending_start` on screen). Both carry
+    // the filing, so every row sits on A, the earlier engagement.
     const a = await serviceEntry(`floor-a-${stamp}`);
     const b = await serviceEntry(`floor-b-${stamp}`);
     const x = await company(`Cobalt Futures ${stamp}`);
@@ -939,8 +899,7 @@ describe("another service covers a filing only from the day its engagement start
 
     const { effect } = await service.unlinkRule({ tenantId, serviceEntryId: a.entryId, ruleId: rule.id }, actor);
 
-    // B owes nothing that falls due before it starts, which is the
-    // generator's own floor, so September to November come off.
+    // B owes nothing due before it starts (the generator's floor): September to November come off.
     expect(effect).toMatchObject({
       withdrawn: beforeB.length,
       keptCoveredElsewhere: owedByB.length,
@@ -954,8 +913,7 @@ describe("another service covers a filing only from the day its engagement start
       expect(byId.get(r.id)?.withdrawn_at).toBeNull();
       expect(byId.get(r.id)?.engagement_id).toBe(onB);
     }
-    // A row already past its date stays where it was: it fell due before B
-    // existed, so B is not the engagement that owed it.
+    // A past-due row stays: it fell due before B existed.
     for (const r of past) expect(byId.get(r.id)?.engagement_id).toBe(onA);
 
     // And the generator agrees: a sweep of the same window brings none back.
@@ -978,13 +936,10 @@ describe("two writers of one filing's calendar take turns (review)", () => {
     expect(ahead.length).toBeGreaterThan(0);
     expect(ahead.every((r) => r.engagement_id === onA)).toBe(true);
 
-    // THE INTERLEAVING, forced rather than hoped for. The calendar rows are
-    // held, so the first removal reads them (seeing B's link still live, so
-    // "covered elsewhere") and then waits to move them onto B. The second
-    // removal is started while it waits. Without a lock on the chain it ran
-    // straight through, found no row on B's engagement, and withdrew nothing,
-    // and the first then moved every row onto a service that no longer
-    // carried the filing: live filings with no link, which nothing withdraws.
+    // THE INTERLEAVING, forced: rows held, the first removal sees B's link live ("covered elsewhere")
+    // and waits to move them onto B; the second starts meanwhile. Without a chain lock the second
+    // withdrew nothing (no row on B yet) and the first moved every row onto a service no longer
+    // carrying the filing: live filings with no link, which nothing withdraws.
     const hold = holdOpen((tx) => tx`
       SELECT id FROM delivery.obligation_instance
        WHERE tenant_id = ${tenantId} AND lineage_id = ${rule.id} FOR UPDATE
@@ -993,8 +948,7 @@ describe("two writers of one filing's calendar take turns (review)", () => {
     const first = service.unlinkRule({ tenantId, serviceEntryId: a.entryId, ruleId: rule.id }, actor);
     await blockedOn(xid);
     const second = service.unlinkRule({ tenantId, serviceEntryId: b.entryId, ruleId: rule.id }, actor);
-    // It WAITS for the first: the chain's lock is held until that commits.
-    // Released in `finally`, so a red run fails rather than hangs.
+    // It WAITS on the chain's lock until the first commits; `finally` makes a red run fail, not hang.
     try {
       expect(await Promise.race([second.then(() => "finished"), pause(750).then(() => "waiting")])).toBe(
         "waiting",
@@ -1015,8 +969,7 @@ describe("two writers of one filing's calendar take turns (review)", () => {
     const a = await serviceEntry(`race-gen-${stamp}`);
     const z = await company(`Cobalt Sprint ${stamp}`);
     const onA = await engagementFor(z, a.versionId, "2026-01-01");
-    // Written in the library and linked by hand, so the calendar is empty
-    // until the generator below runs.
+    // Linked by hand, so the calendar is empty until the generator below runs.
     const rule = await libraryRule("LWF return", 15);
     expect(
       await links.link(tenantId, { id: randomUUID(), lineageId: rule.id, serviceEntryId: a.entryId, byUserId: userId }),
@@ -1026,13 +979,10 @@ describe("two writers of one filing's calendar take turns (review)", () => {
     const start = states.find((s) => s.isInitial);
     if (!start) throw new Error("no initial state");
 
-    // THE INTERLEAVING: an uncommitted row holding October's key makes the
-    // generator's insert wait mid-statement, after it has read the link as
-    // live. The removal is started while it waits. Without a lock on the
-    // chain it ran straight through and found nothing to withdraw, then the
-    // generator committed a year of filings for a service that no longer
-    // carried them. The held row is rolled back, so the generator writes
-    // October itself.
+    // THE INTERLEAVING: an uncommitted row on October's key stalls the generator's insert after it
+    // read the link as live; the removal starts meanwhile. Without a chain lock it withdrew nothing
+    // and the generator then committed a year of filings for an unlinked service. The held row is
+    // rolled back, so the generator writes October itself.
     const hold = holdOpen(
       (tx) => tx`
         INSERT INTO delivery.obligation_instance

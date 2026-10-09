@@ -1,51 +1,15 @@
-// The renderer registered today: pdf-lib, drawing the page directly (T3.8).
-//
-// ── WHY THIS ENGINE AND NOT A HEADLESS BROWSER ─────────────────────────────
-//
-// The obvious approach is HTML + CSS through Chromium, and it was rejected on
-// one requirement that outranks fidelity here: **a rendered document's content
-// hash is evidence.** `crm.engagement_letter.signed_content_hash` exists so that
-// "is the file the client holds the one we issued" is a comparison rather than a
-// matter of trust, and `files.document_version.content_hash` is what it compares
-// against.
-//
-// A headless browser does not guarantee byte-identical output for identical
-// input across versions — font hinting, image encoders and the PDF writer all
-// move between Chromium releases. A firm would upgrade a base image and every
-// re-render would stop matching, with nothing to say why. It also puts ~300 MB
-// of browser in the container and a process to supervise.
-//
-// pdf-lib is pure JavaScript with four pure-JS dependencies and no native
-// modules, and it draws exactly what it is told. The cost, stated rather than
-// discovered: **layout is hand-built.** There is no CSS, no float, no automatic
-// table. What is below is a small column-and-flow engine, and it is the honest
-// price of a document whose bytes are reproducible.
-//
-// It is a one-file decision, behind `DocumentRenderer`. If a firm ever needs
-// fidelity this cannot give, the replacement plugs in here and nothing above
-// changes — but it would have to answer the determinism question first.
-//
-// ── DETERMINISM, AND THE TWO THINGS THAT BREAK IT ──────────────────────────
-//
-// pdf-lib writes CreationDate and ModDate into the document's metadata from the
-// system clock by default. Left alone, rendering the same letter twice produces
-// different bytes, and the whole argument above collapses. Both are pinned from
-// the DOCUMENT's own issue date.
-//
-// It also writes a Producer string carrying its own version. Pinned too — an
-// npm upgrade must not silently change every future document's hash while the
-// content is identical.
-//
-// ── FONTS (T3.9) ───────────────────────────────────────────────────────────
-//
-// Noto Sans, embedded as a CHAIN of three subsets with fallback — see
-// `font-set.ts` for why one font was not enough. The built-in PDF fonts this
-// shipped on first covered Latin-1 and nothing else, which made the rupee sign
-// undrawable in an Indian compliance product.
-//
-// Determinism survives it: the fonts are files on disk, embedded identically
-// every time, and subsetting is a function of which glyphs the document uses.
-// The test that renders twice a second apart covers this.
+// pdf-lib, drawing the page directly (T3.8), behind `DocumentRenderer`.
+// Not headless Chromium, because a document's content hash is EVIDENCE: it is how
+// `crm.engagement_letter.signed_content_hash` is compared with
+// `files.document_version.content_hash`. Chromium's output moves between releases (hinting,
+// image encoders, PDF writer), so a base-image upgrade would break every re-render match; it
+// is also ~300 MB and a process to supervise. pdf-lib is pure JS (no native modules); the
+// price is hand-built layout: the small column-and-flow engine below. A replacement must
+// answer determinism first.
+// Determinism: pdf-lib stamps CreationDate/ModDate from the clock and a Producer carrying its
+// version; all are pinned from the document's issue date (an npm upgrade must not move a hash).
+// Fonts are the Noto Sans chain (T3.9, see `font-set.ts`): files on disk, subsets a function
+// of glyphs used; the render-twice-a-second-apart test covers it.
 import { PDFDocument, rgb } from "pdf-lib";
 import type { PDFImage, PDFPage } from "pdf-lib";
 import { FontSet } from "./font-set";
@@ -67,10 +31,7 @@ import { wrapParagraph } from "../../domain/render/model";
 import { UnrenderableText } from "../../domain/render/errors";
 import type { DocumentRenderer, RenderedWithAnchors } from "../../usecase/render/ports";
 
-// A4 in points, and the margins a business letter uses. Constants rather than
-// configuration: a firm choosing its own page geometry is not a request anybody
-// has made, and every one of these would have to be threaded through the
-// document description to honour it.
+// A4 in points with business-letter margins. Constants: no firm has asked for its own geometry.
 const PAGE_WIDTH = 595.28;
 const PAGE_HEIGHT = 841.89;
 const MARGIN_X = 56;
@@ -173,19 +134,13 @@ const PROPOSAL_FLOW: FlowStyle = {
   },
 };
 
-/**
- * One weight of the chain, with the two operations the layout needs.
- *
- * It exists so the drawing code below reads exactly as it did when there was a
- * single `PDFFont` — `widthOfTextAtSize` and a draw — while underneath, text
- * that spans scripts is segmented and drawn run by run.
- */
+/** One weight of the chain, with the `PDFFont`-like API the layout uses, drawing
+ *  multi-script text run by run underneath. */
 class Face {
   constructor(
     private readonly fonts: FontSet,
     private readonly bold: boolean,
-    /** Where anchored pieces land — null on every render that files a
-     *  document, so those draw exactly as they always did. */
+    /** Null on every render that files a document. */
     private readonly tracker: AnchorTracker | null = null,
   ) {}
 
@@ -193,8 +148,6 @@ class Face {
     return this.fonts.widthOf(text, size, this.bold);
   }
 
-  /** Draws left to right, advancing by each run's measured width. A document in
-   *  one script is one run and one draw call. */
   draw(page: PDFPage, text: string, x: number, y: number, size: number, color: typeof INK): void {
     let cursorX = x;
     for (const run of this.fonts.segment(text)) {
@@ -202,7 +155,7 @@ class Face {
       page.drawText(run.text, { x: cursorX, y, size, font, color });
       cursorX += font.widthOfTextAtSize(run.text, size);
     }
-    // READ-ONLY: what was just drawn, measured. Nothing above changes with it.
+    // Read-only measurement; changes nothing drawn.
     this.tracker?.touch(page, x, y, cursorX - x, size);
   }
 
@@ -215,8 +168,7 @@ class Face {
     this.tracker?.end();
   }
 
-  /** Drawn but belonging to no piece — a page's running head, drawn while a
-   *  paragraph breaks across the page. */
+  /** Drawn but belonging to no piece, e.g. a running head drawn mid-paragraph at a page break. */
   quiet(draw: () => void): void {
     if (this.tracker === null) {
       draw();
@@ -231,20 +183,15 @@ class Face {
   }
 }
 
-/**
- * WHERE EACH ANCHORED PIECE WAS DRAWN (2026-09-28): the union of every line of
- * text drawn for it, per page. A side output of the one drawing pass — it
- * reads the coordinates the draw calls were given and writes nothing to the
- * document, so a render that collects them produces the same bytes as one that
- * does not (`tests/render/anchors.test.ts` hashes both).
- */
+/** Where each anchored piece was drawn (2026-09-28), per page. Writes nothing to the
+ *  document, so bytes match a plain render (`tests/render/anchors.test.ts` hashes both). */
 class AnchorTracker {
-  /** Each piece being drawn, with its OCCURRENCE: one key drawn in two places
-   *  (a fee's line and its Summary row) is two rectangles, never their union. */
+  /** Keyed by OCCURRENCE: one key drawn twice (a fee's line and its Summary row) is two
+   *  rectangles, never their union. */
   private readonly stack: ({ key: string; occurrence: number } | null)[] = [];
   private occurrences = 0;
   private paused = 0;
-  /** In the order first drawn — the document's own order. */
+  /** In the order first drawn. */
   private readonly boxes = new Map<string, { key: string; page: number; x0: number; y0: number; x1: number; y1: number }>();
 
   constructor(private readonly pdf: PDFDocument) {}
@@ -318,10 +265,8 @@ export class PdfLibRenderer implements DocumentRenderer {
   }
 
   private async draw(doc: RenderableDocument, collect: boolean): Promise<RenderedWithAnchors> {
-    // CHECKED UP FRONT, and this is deliberate. pdf-lib raises on the character
-    // it cannot encode, deep inside a draw call, with a message naming neither
-    // the field nor the document. Scanning first means the refusal says WHERE —
-    // and it means a half-drawn page is never produced.
+    // Text is checked up front (below): pdf-lib fails deep in a draw call naming neither field
+    // nor document, so scanning first says WHERE and never leaves a half-drawn page.
     const pdf = await PDFDocument.create();
     const tracker = collect ? new AnchorTracker(pdf) : null;
     const done = async (): Promise<RenderedWithAnchors> => ({
@@ -330,9 +275,7 @@ export class PdfLibRenderer implements DocumentRenderer {
       pageCount: pdf.getPageCount(),
     });
 
-    // ── The determinism block. See the file header. ──────────────────────
-    // Parsed from the document's own issue date, at midday UTC so that a
-    // timezone cannot move it across a date boundary and change the bytes.
+    // Determinism (see the file header). Midday UTC so no timezone moves the date.
     const issued = new Date(`${doc.issuedOn}T12:00:00.000Z`);
     pdf.setCreationDate(issued);
     pdf.setModificationDate(issued);
@@ -340,32 +283,23 @@ export class PdfLibRenderer implements DocumentRenderer {
     pdf.setCreator("BiB");
     pdf.setTitle(`${doc.documentTitle} ${doc.reference}`);
 
-    // The font chain, loaded into THIS document. Fonts embed into a specific
-    // PDF, so a shared instance would leak one document's glyph subset into
-    // another's.
+    // Per document: fonts embed into one PDF (see FontSet).
     const fonts = await FontSet.load(pdf);
-    // CHECKED AGAINST THE FONTS ACTUALLY LOADED, not a hardcoded range. The
-    // guard therefore cannot lie about what this renderer can draw, and it
-    // narrows on its own the day the chain gains a script. It runs BEFORE
-    // anything is drawn, so a half-page is never produced. What it walked is
-    // every character the document draws, so it is also what decides which
-    // of the on-demand symbol fonts this document embeds.
+    // Guard against the fonts actually loaded, before anything is drawn. The characters it
+    // walked also decide which on-demand symbol fonts this document embeds.
     await fonts.prepare(assertRenderable(doc, fonts));
 
     const body = new Face(fonts, false, tracker);
     const bold = new Face(fonts, true, tracker);
 
-    // THE ANNEXURE LETTER (0083) draws pages of its own. Branching HERE — after
-    // the setup every document shares and before the first classic draw — is
-    // what keeps every classic letter and every invoice byte-identical: nothing
-    // from this line down changes for them, and a letter issued before 0083
-    // must re-render as the document its client holds.
+    // Annexure letter (0083) and proposal (0084) branch here, after shared setup and before
+    // the first classic draw, so classic letters and invoices stay byte-identical (a letter
+    // issued before 0083 must re-render as the document its client holds).
     if (doc.annexureLetter !== undefined) {
       await this.drawAnnexureLetter(pdf, doc, doc.annexureLetter, body, bold);
       if (doc.footer !== null) body.quiet(() => { this.drawFooter(pdf, doc, body); });
       return done();
     }
-    // THE PROPOSAL (0084), for the same reason and in the same place.
     if (doc.proposal !== undefined) {
       await this.drawProposal(pdf, doc, doc.proposal, body, bold);
       if (doc.footer !== null) body.quiet(() => { this.drawFooter(pdf, doc, body); });
@@ -381,13 +315,9 @@ export class PdfLibRenderer implements DocumentRenderer {
     for (const section of doc.sections) this.drawSection(cursor, section, body, bold, pdf);
     if (doc.table !== null) this.drawTable(cursor, doc, body, bold, pdf);
     if (doc.totals.length > 0) this.drawTotals(cursor, doc, body, bold, pdf);
-    // The total in words (CA#1), only on a document that carries it.
     if (doc.amountInWords !== undefined) this.drawInWords(cursor, doc.amountInWords, body, bold, pdf);
-    // A GST tax invoice's own block (Q056), only on one that carries it.
     if (doc.taxInvoice !== undefined) this.drawTaxInvoice(cursor, doc.taxInvoice, body, bold, pdf);
-    // THE TERMS, after the commercials and before the signatures — where an
-    // engagement letter has always put them, and where the client is reading
-    // when they reach the line they sign on.
+    // Terms after the commercials, immediately before the signatures.
     for (const term of doc.terms ?? []) this.drawSection(cursor, term, body, bold, pdf);
     for (const block of doc.signatures ?? []) {
       await this.drawSignature(cursor, block, body, bold, pdf);
@@ -405,7 +335,7 @@ export class PdfLibRenderer implements DocumentRenderer {
     cursor.y -= height;
   }
 
-  /** Break onto a new page — the cursor's own way if it has one (0084). */
+  /** Break onto a new page, the cursor's own way if it has one (0084). */
   private newPage(pdf: PDFDocument, cursor: Cursor): void {
     if (cursor.turn !== undefined) {
       cursor.turn(cursor);

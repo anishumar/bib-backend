@@ -1,19 +1,8 @@
-// Postgres adapter for the configuration registry.
-//
-// ONE class, FIVE ports, deliberately — the same pattern as the
-// users/memberships repositories serving both tenancy and identity.
-// `ConfigRepository` is the registry's own seam; `PermissionSource` is gate 3's;
-// `RoleDirectory` is what firm administration asks (which roles exist here, and
-// which of them can administer the place); `ServiceCatalogue` and
-// `PolicyDirectory` are what quoting asks (resolve this pin, and what is the
-// firm's discount limit right now). All five questions are config reads over the
-// same two tables. Splitting them would put five files' worth of "what published
-// means" over one pair of tables, and the day they disagreed, one of them would
-// be answering an authorization question wrongly.
-//
-// Every method runs under withTenant, so the RLS tenant wall applies to each
-// statement. timestamptz arrives as a Date and leaves as an ISO 8601 string —
-// the door where Postgres types become ours.
+// Postgres adapter for the configuration registry: one class for every port that is a config
+// read over `config.entry`/`config.version` (the registry, gate 3's PermissionSource,
+// RoleDirectory, ServiceCatalogue, PolicyDirectory, ...). Split, they could disagree on what
+// "published" means and answer an authorization question wrongly. Every method runs under
+// withTenant; timestamptz arrives as a Date and leaves as an ISO 8601 string.
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
 import type {
@@ -84,8 +73,7 @@ interface VersionRow {
   archived_at: Date | null;
 }
 
-/** entry LEFT JOIN its published version: every entry column, and the version
- *  columns nullable because an entry with only drafts publishes nothing. */
+/** entry LEFT JOIN its published version; nullable because a draft-only entry publishes nothing. */
 interface PublishedRow extends EntryRow {
   v_id: string | null;
   v_version: number | null;
@@ -132,17 +120,10 @@ export class PostgresConfigRepository
   constructor(private readonly app: Db) {}
 
   /**
-   * The `ServiceDirectory` port T3.2 declares — does this catalogue ENTRY exist,
-   * and what is it called?
-   *
-   * The entry and not a version, deliberately: a compliance rule is about what
-   * the firm SELLS, and a firm publishing v4 of 'gst-filing' has not stopped
-   * owing its clients GSTR-3B. Pinning a version on a rule would quietly stop
-   * it generating the day somebody edited the catalogue.
-   *
-   * The name is `usedIn`'s own derivation (`serviceNameSql`), because the link
-   * and unlink events are named from it and the library shows the other: one
-   * service, one name, on the screen and in /audit.
+   * `ServiceDirectory` (T3.2): does this catalogue ENTRY exist, and its name. The entry, not a
+   * version: publishing v4 of 'gst-filing' does not stop the firm owing GSTR-3B, so pinning a
+   * version would silently stop the rule generating. The name is `serviceNameSql`, as in `usedIn`
+   * and the link/unlink events: one service, one name, on screen and in /audit.
    */
   async findService(tenantId: string, entryId: string): Promise<ObligationServiceRef | null> {
     return withTenant(this.app, tenantId, async (db) => {
@@ -164,8 +145,7 @@ export class PostgresConfigRepository
       `;
       if (!entryRow) throw new Error("config.entry insert returned no row");
 
-      // Version 1 by definition — there is nothing to count yet, so this is the
-      // one insert that does not need the max+1 read the others do.
+      // Version 1 by definition, so no max+1 read.
       const [versionRow] = await db<VersionRow[]>`
         INSERT INTO config.version (id, tenant_id, entry_id, version, body)
         VALUES (${firstDraft.id}, ${firstDraft.tenantId}, ${entry.id}, 1,
@@ -189,19 +169,10 @@ export class PostgresConfigRepository
 
   async listPublished(tenantId: string, kind: ConfigKind): Promise<readonly PublishedEntry[]> {
     return withTenant(this.app, tenantId, async (db) => {
-      // LEFT JOIN, not INNER: an entry whose only version is a draft still
-      // belongs in the list, saying plainly that it publishes nothing. Dropping
-      // it would make a half-finished service look like one that was never
-      // created, and the two need different actions.
-      // The pending draft joins here rather than being fetched per row. A screen
-      // needs to know whether anything is waiting, and asking again once per
-      // entry is the per-row lookup CLAUDE.md warns about — it also left a draft
-      // UNPUBLISHABLE from a list once its entry had something in force.
-      //
-      // LATERAL with LIMIT 1 and not a second plain LEFT JOIN: several drafts
-      // may sit beside a published version (0005's unique index is partial), and
-      // a plain join would multiply the entry into one row per draft and quietly
-      // repeat it in the list.
+      // LEFT JOIN: a draft-only entry still lists, saying it publishes nothing (a half-finished
+      // service is not one never created). The pending draft joins here, not per row (a per-row
+      // lookup left a draft UNPUBLISHABLE once its entry had something in force). LATERAL LIMIT 1:
+      // several drafts may sit beside a published version (0005's unique index is partial).
       const rows = await db<PublishedRow[]>`
         SELECT e.id, e.tenant_id, e.kind, e.key,
                v.id           AS v_id,
@@ -241,8 +212,7 @@ export class PostgresConfigRepository
                 published_at: r.v_published_at,
                 archived_at: r.v_archived_at,
               }),
-        // A draft has neither date by definition — 0005's coherence CHECK says
-        // so — which is why they are not selected above.
+        // A draft has neither date (0005's coherence CHECK).
         pendingDraft:
           r.d_id === null || r.d_version === null || r.d_status === null || r.d_body === null
             ? null
@@ -260,8 +230,7 @@ export class PostgresConfigRepository
     });
   }
 
-  /** The clause library's terms in force now (T6.18) — `listPublished`'s read,
-   *  narrowed to what a letter pins. */
+  /** The clause library's terms in force now (T6.18), narrowed to what a letter pins. */
   async publishedClauses(
     tenantId: string,
   ): Promise<readonly { versionId: string; key: string; body: Record<string, unknown> }[]> {
@@ -285,11 +254,8 @@ export class PostgresConfigRepository
 
   async addVersion(v: NewVersion): Promise<ConfigVersion> {
     return withTenant(this.app, v.tenantId, async (db) => {
-      // Lock the ENTRY, then count. Two people drafting against the same
-      // service at once would otherwise both read max=2, both insert version 3,
-      // and one would lose to the unique constraint after doing the work. The
-      // lock is on the entry rather than the versions because the thing being
-      // serialised is "the next number for this entry".
+      // Lock the ENTRY (what is serialised is its next number), then count: two concurrent
+      // drafts would otherwise both insert version 3 and one lose to the unique constraint.
       await db`SELECT id FROM config.entry WHERE id = ${v.entryId} FOR UPDATE`;
       const [row] = await db<VersionRow[]>`
         INSERT INTO config.version (id, tenant_id, entry_id, version, body)
@@ -320,15 +286,11 @@ export class PostgresConfigRepository
       `;
       if (!target) throw new Error(`config.version ${versionId} not found`);
 
-      // Same lock as addVersion, for the neighbouring race: two drafts
-      // published at once would both try to become the single published
-      // version, and the partial unique index would reject one AFTER the other
-      // had already archived what was in force.
+      // Same lock as addVersion: of two drafts published at once, the partial unique index would
+      // reject one AFTER the other had already archived what was in force.
       await db`SELECT id FROM config.entry WHERE id = ${target.entry_id} FOR UPDATE`;
 
-      // Archive first. Reversed, the partial unique index (one published
-      // version per entry) rejects the second statement — and there is no
-      // moment in between when a permission check could see two answers.
+      // Archive first; reversed, the partial unique index (one published per entry) rejects it.
       const [archived] = await db<VersionRow[]>`
         UPDATE config.version SET status = 'archived', archived_at = now()
         WHERE entry_id = ${target.entry_id} AND status = 'published'
@@ -340,8 +302,7 @@ export class PostgresConfigRepository
         RETURNING id, tenant_id, entry_id, version, status, body, published_at, archived_at
       `;
       if (!published) {
-        // The service checks this first; reaching here means somebody else
-        // published the same draft in the moment between the two.
+        // The service checks first; reaching here means another caller published it in between.
         throw new Error(
           `config.version ${versionId} was not a draft by the time it was published — ` +
             `another caller published it first. Re-read the entry and try the new draft.`,
@@ -381,24 +342,13 @@ export class PostgresConfigRepository
     });
   }
 
-  // ── PermissionSource — gate 3 reads the registry ───────────────────────────
-  //
-  // HONEST LIMITATION: one indexed query per authenticated request, uncached.
-  // The session guard already makes a round trip to re-check the membership, so
-  // this is a second on the same request rather than the first. It is uncached
-  // on purpose: a cache means a revoked permission stays live for its TTL, and
-  // a firm that takes an access away expects it gone this afternoon. A shared
-  // cache with explicit invalidation on publish is the fix when the traffic
-  // justifies it, and it goes behind this same port.
+  // ── PermissionSource (gate 3) ──
+  // One indexed query per request (the second, after the session guard's), uncached on purpose:
+  // a cache keeps a revoked permission live for its TTL. A shared cache invalidated on publish
+  // goes behind this port when traffic justifies it.
 
-  /**
-   * Gate 3's read, and the one place this body is turned into a role.
-   *
-   * `permissionsFor` is implemented in terms of it rather than beside it: two
-   * statements reading the same published body is how the audience and the
-   * permissions come to be read under different conditions, and this is a
-   * middleware that runs on every request.
-   */
+  /** Gate 3's read and the one place a body becomes a role; `permissionsFor` is built on it so
+   *  audience and permissions are never read under different conditions. */
   async roleFor(tenantId: string, role: string): Promise<StoredRole | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<{ body: Record<string, unknown> }[]>`
@@ -407,9 +357,7 @@ export class PostgresConfigRepository
         JOIN config.version v ON v.entry_id = e.id AND v.status = 'published'
         WHERE e.kind = 'role' AND e.key = ${role}
       `;
-      // No row is the ordinary answer for a role this firm does not define.
-      // AuthzService asks knownRoles() to tell that apart from a role that
-      // exists and simply lacks the permission.
+      // No row: a role this firm does not define (AuthzService tells it apart via knownRoles()).
       if (!row) return null;
       return {
         audience: readRoleAudience(row.body),
@@ -424,9 +372,7 @@ export class PostgresConfigRepository
 
   async knownRoles(tenantId: string): Promise<readonly string[]> {
     return withTenant(this.app, tenantId, async (db) => {
-      // Published only. A role that exists as a draft is not in force, and
-      // listing it would tell someone locked out to use a role that will not
-      // work.
+      // Published only: listing a draft role would point a locked-out user at one that won't work.
       const rows = await db<{ key: string }[]>`
         SELECT e.key
         FROM config.entry e
@@ -439,31 +385,12 @@ export class PostgresConfigRepository
   }
 
   /**
-   * The roles carrying one permission — the third port this class satisfies
-   * (`RoleDirectory`, for firm administration).
-   *
-   * One query rather than `knownRoles` followed by `permissionsFor` per role.
-   * The caller — "does this firm still have anyone who can administer it" —
-   * asks on every role change and every deactivation, and it should not cost a
-   * round trip per role to answer.
-   *
-   * `jsonb_exists` over the permissions array asks the question in the database
-   * rather than reading every role body back to filter in TypeScript.
-   *
-   * -- AND WHY IT IS STAFF-ONLY -----------------------------------------------
-   *
-   * The one caller asks "does this firm still have anyone who can administer
-   * it", and only a STAFF role can be an answer to that: gate 2 admits a
-   * CLIENT_PORTAL session to `PORTAL_PATHS` and nothing else, so a portal role
-   * carrying `tenant:admin` grants the ability to administer precisely nothing.
-   * Counting one meant a firm could move `tenant:admin` onto `client_contact`,
-   * satisfy both last-administrator guards, and end up with nobody able to
-   * change its configuration back — the unrecoverable state the guards exist to
-   * prevent, reached THROUGH them.
-   *
-   * An absent `audience` reads as STAFF, which is `readRoleAudience`'s rule and
-   * the fail-closed direction: every role written before the field existed was
-   * a staff role.
+   * `RoleDirectory`: the STAFF roles carrying a permission, in one query (`jsonb_exists`), since
+   * "does anyone still administer this firm" is asked on every role change and deactivation.
+   * Staff-only: gate 2 confines a CLIENT_PORTAL session to `PORTAL_PATHS`, so counting a portal
+   * role with `tenant:admin` let a firm move it onto `client_contact`, pass both
+   * last-administrator guards and lock itself out for good. Absent `audience` reads as STAFF
+   * (`readRoleAudience`, fail-closed: roles older than the field were staff).
    */
   async rolesWith(tenantId: string, permission: Permission): Promise<readonly string[]> {
     return withTenant(this.app, tenantId, async (db) => {
@@ -481,15 +408,9 @@ export class PostgresConfigRepository
   }
 
   /**
-   * RESOLVE A PIN — for quoting (`ServiceCatalogue`) and for assembling an
-   * engagement letter's terms (`ClauseLibrary`). Both use cases declared the
-   * same question about the same two tables, so it is answered once.
-   *
-   * Deliberately does NOT filter on status: a proposal line pins the version it
-   * was quoted from, and the whole promise of the registry is that the pin
-   * still resolves after the catalogue moved on and archived it. The CALLER
-   * decides what to do with a draft — the proposal service refuses one, because
-   * a price the firm never put in force must not reach a client's document.
+   * Resolve a pin, for quoting (`ServiceCatalogue`) and letter terms (`ClauseLibrary`). No status
+   * filter: a proposal line's pin must resolve after the catalogue archived it. The CALLER judges
+   * a draft; the proposal service refuses one (an unpublished price must not reach a client).
    */
   async readPinnedVersion(
     tenantId: string,
@@ -520,14 +441,8 @@ export class PostgresConfigRepository
     });
   }
 
-  /**
-   * The firm's discount limit, right now (`PolicyDirectory`).
-   *
-   * Published only, and read LIVE rather than pinned — a firm that lowers its
-   * limit expects the new one to apply this afternoon, the same reasoning that
-   * makes roles a live read. Null means no policy is published, which the
-   * domain reads as zero rather than as "no limit".
-   */
+  /** The firm's discount limit (`PolicyDirectory`), published and read LIVE, not pinned. Null =
+   *  no policy, which the domain reads as zero, not "no limit". */
   async maxDiscountPercent(tenantId: string): Promise<Amount | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<{ body: Record<string, unknown> }[]>`
@@ -541,17 +456,9 @@ export class PostgresConfigRepository
   }
 
   /**
-   * When this firm's compliance calendar goes live (`CompliancePolicySource`).
-   *
-   * The same shape as `maxDiscountPercent` and the OPPOSITE default, which is
-   * the part worth reading twice. No published discount policy means ZERO —
-   * nothing is allowed — because a firm that never set a limit has not decided
-   * anything goes. No published compliance policy means NO FLOOR — everything
-   * is asked about — because the failure to avoid here is a missed deadline
-   * nobody was told about, and hiding rows is the direction that produces it.
-   *
-   * Live rather than pinned: a firm that moves its go-live date expects the
-   * queue to change tonight.
+   * The compliance calendar's go-live date (`CompliancePolicySource`), read live. The OPPOSITE
+   * default to the discount limit: no policy means NO FLOOR (everything is asked about), because
+   * hiding rows is what produces a missed deadline nobody was told about.
    */
   async missedFromOn(tenantId: string): Promise<string | null> {
     return withTenant(this.app, tenantId, async (db) => {
@@ -565,10 +472,8 @@ export class PostgresConfigRepository
     });
   }
 
-  /** The month the firm's financial year starts (T6.13), off the same
-   *  published policy, or null when the firm has not said. Live, like the
-   *  floor, and for the same reason: a firm that answers expects the next
-   *  sweep to cut its quarters. */
+  /** The month the firm's financial year starts (T6.13), off the same policy; null when unsaid.
+   *  Live, so the next sweep cuts quarters by it. */
   async fiscalYearStartMonth(tenantId: string): Promise<number | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<{ body: Record<string, unknown> }[]>`
@@ -581,12 +486,9 @@ export class PostgresConfigRepository
     });
   }
 
-  // ── TemplateSource (the orchestrator's seam) ────────────────────────────────
-  //
-  // Two reads, and the difference between them IS pinning. `publishedTemplate`
-  // is asked once, when a job starts; `pinnedTemplate` every time afterwards. A
-  // single "get the template" method would have collapsed them, and a job would
-  // silently move onto a process edited under it.
+  // ── TemplateSource (orchestrator) ──
+  // `publishedTemplate` is asked once when a job starts, `pinnedTemplate` ever after; one method
+  // would let a job silently move onto a process edited under it.
 
   async publishedTemplate(tenantId: string, key: string): Promise<ResolvedTemplate | null> {
     return withTenant(this.app, tenantId, async (db) => {
@@ -596,26 +498,15 @@ export class PostgresConfigRepository
         JOIN config.version v ON v.entry_id = e.id AND v.status = 'published'
         WHERE e.kind = 'workflow_template' AND e.key = ${key}
       `;
-      // No row is the ordinary answer for a firm that has not written this
-      // process yet, and the orchestrator turns it into a job that WAITS.
-      // A draft is deliberately not accepted: a process somebody is still
-      // writing is not one to run a client's work through.
+      // No row: the process is unwritten and the job WAITS. A draft is never run.
       return row ? toResolvedTemplate(row.id, row.body) : null;
     });
   }
 
   /**
-   * The firm's confidence thresholds, as published (T2.8).
-   *
-   * One entry per firm under a fixed key, not one per agent. A per-agent
-   * threshold is a knob nobody can fill today — there are no agents, so there is
-   * no accuracy record to set one from — and a knob set by guessing is worse
-   * than one that does not exist. When agents exist and their accuracy differs,
-   * this becomes a key per agent and the port does not change.
-   *
-   * Null is the ordinary answer and NOT an error: the caller falls back to
-   * "never commit, always ask" rather than to numbers this code invented, which
-   * is why T2.8 changed no firm's behaviour on the day it shipped.
+   * The firm's confidence thresholds (T2.8): one entry per firm under a fixed key, not per agent
+   * (no agents yet, so no accuracy record to set one from; later a key per agent, same port).
+   * Null is ordinary: the caller falls back to "never commit, always ask", never invented numbers.
    */
   async publishedTiers(tenantId: string): Promise<PublishedTiers | null> {
     return withTenant(this.app, tenantId, async (db) => {
@@ -627,21 +518,14 @@ export class PostgresConfigRepository
       `;
       if (!row) return null;
       const tiers = readConfidenceTierBody(row.body);
-      // A published row that no longer parses reads as nothing published. The
-      // safe direction: a machine that cannot establish what it is allowed to do
-      // does not act unattended.
+      // A body that no longer parses reads as none: unsure what it may do, a machine does not act.
       return tiers === null ? null : { tiers, versionId: row.id };
     });
   }
 
-  // ── VerificationPolicySource (T2.9's seam) ─────────────────────────────────
-  //
-  // The same two reads, for the same reason, one kind later. `publishedPolicy`
-  // is asked ONCE, when a check is opened; `pinnedPolicy` every time
-  // afterwards — so a firm raising its review bar this afternoon does not make
-  // this morning's open checks unapprovable by the people already looking at
-  // them, and an audit asking "who was allowed to approve this" gets the answer
-  // that was true then.
+  // ── VerificationPolicySource (T2.9) ──
+  // `publishedPolicy` once when a check opens, `pinnedPolicy` after: raising the review bar does
+  // not strand open checks, and an audit gets who could approve THEN.
 
   async publishedPolicy(tenantId: string, key: string): Promise<ResolvedPolicy | null> {
     return withTenant(this.app, tenantId, async (db) => {
@@ -651,17 +535,14 @@ export class PostgresConfigRepository
         JOIN config.version v ON v.entry_id = e.id AND v.status = 'published'
         WHERE e.kind = 'verification_policy' AND e.key = ${key}
       `;
-      // No row is the ordinary answer for a firm that has written no review rule
-      // — or has withdrawn one a template still names. The caller opens the
-      // check anyway, under maker != checker alone: the firm said this step is
-      // reviewed, and unpublishing the rule about WHO does it is not the same as
-      // saying nobody does.
+      // No row (no rule, or a withdrawn one a template still names): the caller still opens the
+      // check under maker != checker alone. Unpublishing WHO reviews is not "nobody does".
       return row ? toResolvedPolicy(row.id, key, row.body) : null;
     });
   }
 
-  /** Every rule in force at the firm (CA#27): what a task is checked under
-   *  when its sender names none. Ordered by key, so "the first" is stable. */
+  /** Every rule in force (CA#27): what a task is checked under when its sender names none.
+   *  Ordered by key, so "the first" is stable. */
   async publishedPolicies(tenantId: string): Promise<readonly ResolvedPolicy[]> {
     return withTenant(this.app, tenantId, async (db) => {
       const rows = await db<{ id: string; key: string; body: Record<string, unknown> }[]>`
@@ -680,9 +561,7 @@ export class PostgresConfigRepository
 
   async pinnedPolicy(tenantId: string, versionId: string): Promise<ResolvedPolicy | null> {
     return withTenant(this.app, tenantId, async (db) => {
-      // By VERSION id with no status filter, exactly as `pinnedTemplate` does:
-      // the version a check pinned is `archived` the moment the firm publishes a
-      // newer rule, and reading it is the entire point.
+      // By VERSION id, no status filter, as in `pinnedTemplate`.
       const [row] = await db<{ id: string; key: string; body: Record<string, unknown> }[]>`
         SELECT v.id, e.key, v.body
         FROM config.version v
@@ -695,10 +574,8 @@ export class PostgresConfigRepository
 
   async pinnedTemplate(tenantId: string, versionId: string): Promise<ResolvedTemplate | null> {
     return withTenant(this.app, tenantId, async (db) => {
-      // By VERSION id, with no status filter — the version a job pinned is
-      // `archived` the moment the firm publishes a newer one, and reading it is
-      // the entire point. Filtering on `published` here would quietly break
-      // every job the first time its process was revised.
+      // By VERSION id, no status filter: a pinned version is `archived` once a newer one
+      // publishes, and filtering on `published` would break every job at its first revision.
       const [row] = await db<{ id: string; body: Record<string, unknown> }[]>`
         SELECT id, body FROM config.version WHERE id = ${versionId}
       `;
@@ -707,9 +584,8 @@ export class PostgresConfigRepository
   }
 }
 
-/** A stored body as the verification port states it. Null when the row does not
- *  read as a policy — which for a PINNED version is a fact about the past, not
- *  today's rule applied retroactively to a check somebody already opened. */
+/** Null when the body is not a policy: for a PINNED version a fact about the past, never today's
+ *  rule applied retroactively. */
 function toResolvedPolicy(
   versionId: string,
   key: string,
@@ -719,9 +595,7 @@ function toResolvedPolicy(
   return policy === null ? null : { versionId, key, policy };
 }
 
-/** A stored body as the orchestrator's port states it. Null when the row does
- *  not read as a template — which for a PINNED version is a fact about the past,
- *  not an exception to raise at whoever asked. */
+/** Null when the body is not a template: for a PINNED version a fact about the past, not an error. */
 function toResolvedTemplate(
   versionId: string,
   body: Record<string, unknown>,
@@ -739,10 +613,7 @@ function toResolvedTemplate(
       condition: s.condition,
       verificationPolicyKey: s.verificationPolicyKey,
       performer: s.performer,
-      // Both lists, field by field like the rest (T6.15). `readWorkflowTemplate`
-      // has already turned an absent list into an empty one, so a version
-      // published before the fields existed reaches the orchestrator as a step
-      // with no sub-steps and no review points: exactly what it meant.
+      // T6.15: an absent list is already empty, so an older version means no sub-steps/review points.
       checklist: s.checklist.map((l) => ({ key: l.key, label: l.label })),
       reviewPoints: s.reviewPoints.map((l) => ({ key: l.key, label: l.label })),
     })),

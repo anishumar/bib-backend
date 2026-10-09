@@ -1,19 +1,7 @@
-// In-memory port fakes for the proposal use case. `implements` each port — the
-// compile-time assertion that they stay in step with the real adapters — so
-// quoting's rules can be tested with zero infrastructure.
-//
-// What is NOT faked, and where the real answers live:
-//
-//   THE TOTALS. This fake computes them with scaled-integer arithmetic below,
-//   which is exact for the same reason `numeric` is: it never touches a float.
-//   It is still a SECOND implementation of a formula that lives in
-//   crm.proposal_line_amount (0013), and the migration is the authority — so
-//   tests/proposal/pricing.integration.test.ts checks the two agree on the
-//   awkward numbers rather than trusting this one.
-//
-//   RLS, the one-line-per-position index, and the composite key that holds a
-//   line to its proposal's currency. All database properties, proven against
-//   real Postgres.
+// In-memory port fakes for the proposal use case.
+// Totals here are exact scaled-integer arithmetic, a SECOND copy of crm.proposal_line_amount (0013);
+// the migration is the authority and tests/proposal/pricing.integration.test.ts checks they agree.
+// Not faked: RLS, the one-line-per-position index, the line-to-proposal-currency composite key.
 import { FakeClientStructure, FakePartyStanding } from "./party";
 import { FakeStaffDirectory } from "./lead";
 import { FakeFirmTimeZone } from "./tenancy";
@@ -62,35 +50,23 @@ export class FakeProposalRepo implements ProposalRepository {
   readonly rows: Proposal[] = [];
   readonly lines: (Omit<ProposalLine, "currency"> & { currency: string; removed: boolean })[] = [];
   /**
-   * The catalogue the pins resolve against, so `describe` returns the PINNED
-   * service the way the Postgres adapter's join does instead of a null that
-   * says "this fake does not do that part".
-   *
-   * The SAME instance the use case quotes from (`makeProposalFakes` wires one),
-   * so a test registers a service in one place and the read model cites it — and
-   * a fake that could disagree with the adapter about which version a line
-   * resolved to would be worse than no fake at all. Left null when a test builds
-   * the repo by hand: `service: null` is a real answer the port already allows.
+   * The SAME catalogue the use case quotes from (`makeProposalFakes` wires one), so `describe`
+   * resolves pins as the adapter's join does. Null when a test builds the repo by hand
+   * (`service: null` is a real answer).
    */
   catalogue: FakeServiceCatalogue | null = null;
-  /** Display names for the parties a test quotes, so a joined read returns
-   *  something a screen could render rather than a uuid. */
   partyNames = new Map<string, string>();
-  /** The digests attachShareToken has issued, and what they open. */
   readonly shareDigests = new Map<string, string>();
-  /** The emails recordEmail kept, with the digest each carried (0085). */
+  /** 0085. */
   readonly emails: NewProposalEmail[] = [];
-  /** The client answers recordClientAnswer kept (0085). */
+  /** 0085. */
   readonly answers: NewClientAnswer[] = [];
   /** Acceptances recorded by a colleague (0317). */
   readonly recorded: { proposalId: string; row: NewRecordedAcceptance; recordedAt: string }[] = [];
-  /** `${proposalId}:${documentId}` for every file live-linked to a proposal —
-   *  what the adapter's evidence check reads off `files.document_link`. */
+  /** `${proposalId}:${documentId}`: what the adapter's evidence check reads off `files.document_link`. */
   readonly evidenceLinks = new Set<string>();
-  /** Filed PDFs a test's `FakeProposalPdfs` produced, by version id — what
-   *  `findPdf` resolves, as the join on files.document_version does. */
+  /** By version id; `findPdf` resolves these as the join on files.document_version does. */
   readonly pdfs = new Map<string, FiledPdf>();
-  /** The firm's name, as it appears on the document a recipient reads. */
   firmName = "Harbour Point Advisory";
 
   create(p: NewProposal): Promise<Proposal> {
@@ -128,22 +104,18 @@ export class FakeProposalRepo implements ProposalRepository {
     return Promise.resolve(row);
   }
 
-  /** Display names and addresses for the colleagues a test names as having
-   *  prepared a proposal, so the read model carries what the adapter's join
-   *  would. Unknown ids read as an account with no name. */
+  /** Preparers' names and addresses; unknown ids read as an account with no name. */
   readonly accounts = new Map<string, { displayName: string | null; email: string }>();
-  /** Email identifiers for the people a test names under "Prepared for" —
-   *  what Send offers to email it to (0085). */
+  /** "Prepared for" emails: what Send offers (0085). */
   readonly partyEmails = new Map<string, string>();
-  /** Their phone identifiers — what "Send on WhatsApp" opens (T6.18). */
+  /** What "Send on WhatsApp" opens (T6.18). */
   readonly partyPhones = new Map<string, string>();
-  /** Where the firm's companies are registered, as `core.legal_entity` says. */
+  /** As `core.legal_entity` says. */
   readonly partyJurisdictions = new Map<string, string>();
-  /** The firm's Depts and delivery teams, as `tenancy.service_axis` holds them. */
+  /** As `tenancy.service_axis` holds them. */
   readonly axes: { axis: "dept" | "team"; code: string; name: string; sortOrder: number }[] = [];
 
-  /** The document fakes' block store, so a new issuer's prose is written in the
-   *  same step as the issuer, as the adapter's transaction does (T6.18). */
+  /** So a new issuer's prose is written in the same step, as the adapter's transaction does (T6.18). */
   blocks: FakeDocumentBlockRepo | null = null;
 
   async revise(

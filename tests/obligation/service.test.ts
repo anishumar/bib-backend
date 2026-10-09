@@ -1,11 +1,6 @@
-// The generator, the raise, and the two rules that make the calendar
-// trustworthy (T3.2).
-//
-// The real `ObligationService` over in-memory STORES, never spies. The
-// acceptance line — "re-running the generator changes nothing" — is a claim
-// about state after a second call, and only a store can show it: a spy that
-// recorded "createIfAbsent was called twice" would pass whether or not the
-// second call did anything.
+// The generator, the raise, and the two rules that make the calendar trustworthy (T3.2).
+// The real `ObligationService` over in-memory STORES, never spies: "re-running the generator changes
+// nothing" is a claim about state after a second call, which a spy counting calls cannot show.
 import { beforeEach, describe, expect, it } from "vitest";
 import { ObligationService } from "../../src/usecase/obligation/service";
 import {
@@ -42,11 +37,9 @@ function harness(opts: { readonly now?: string; readonly zone?: string } = {}) {
   const states = new FakeObligationStateRepo();
   const resolutionOptions = new FakeResolutionOptionRepo();
   const instances = new FakeObligationInstanceRepo();
-  // The instance fake reads the FLAGS off the state list, exactly as the sweep
-  // does, so a test that renames a state proves the rule still holds.
+  // The fake reads the state FLAGS as the sweep does, so renaming a state proves the rule holds.
   instances.states = states.rows;
-  // One world, as one database is: the handover moves calendar rows, and the
-  // calendar keys on the rule's lineage (0303).
+  // One world, as one database: the handover moves calendar rows keyed on lineage (0303).
   templates.instances = instances;
   instances.templates = templates;
   const compliancePolicy = new FakeCompliancePolicySource();
@@ -56,9 +49,7 @@ function harness(opts: { readonly now?: string; readonly zone?: string } = {}) {
   const tenants = new FakeObligationTenants();
   const ids = new FakeIds();
   const events = new RecordingEventSink();
-  // The catalogue links (0309), in the same one world: the generator reaches
-  // an engagement only through them, the library names them, and removing one
-  // withdraws calendar rows.
+  // Catalogue links (0309): the generator reaches an engagement only through them; unlink withdraws.
   const links = new FakeRuleServiceLinks();
   links.services = services;
   links.calendar = calendarSource;
@@ -106,11 +97,8 @@ function harness(opts: { readonly now?: string; readonly zone?: string } = {}) {
 
 type H = ReturnType<typeof harness>;
 
-/** A firm that can actually generate: states seeded, one monthly GST rule on
- *  the firm's GST service (written in the catalogue, so linked in the same
- *  act), one entity with a live engagement for that service that started at
- *  the beginning of the year. The subject is added AFTER the rule, so the
- *  create's own spawn reaches nobody and each test generates what it means to. */
+/** States seeded, one monthly GST rule linked to SERVICE, one entity engaged since January. The
+ *  subject is added AFTER the rule, so the create's own spawn reaches nobody. */
 async function firmWithGst(h: H, over: { leadTimeDays?: number; effectiveFrom?: string } = {}) {
   await h.service.seedDefaultStates(FIRM, ACTOR);
   h.services.keys.set(SERVICE, "gst-filing");

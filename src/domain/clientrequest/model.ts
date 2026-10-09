@@ -1,26 +1,12 @@
-// The CLIENT's own request — what a client asks the firm for, unprompted
-// (T6.8, migration 0068).
-//
-// ── THE MIRROR OF `domain/clientask`, AND NOT A COPY OF IT ────────────────
-//
-// `client_ask` is the firm asking a client for something on a named work item.
-// This is the client asking the FIRM, attached to nothing. The shapes rhyme —
-// four states, an append-only thread, two views of one row — and the
-// differences are all in the same place: who may end it, who may attach a file,
-// and the fact that this one has no parent to take its client from.
-//
-// Kept apart rather than generalised into an "ask" with a direction flag. Every
-// rule below would have grown an `if (direction === ...)`, the two policies in
-// 0063 and 0068 differ, and a table that means two things is one somebody
-// eventually filters wrong.
+// The CLIENT's own request to the firm, attached to nothing (T6.8, migration 0068).
+// Mirrors `domain/clientask` (the firm asking a client on a work item) but is kept
+// apart rather than one "ask" with a direction flag: who may end it, who may attach
+// a file and where the client comes from all differ, as do the 0063 and 0068
+// policies, and a table that means two things eventually gets filtered wrong.
 
 /**
- * The four states, and the two endings belong to different people.
- *
- * `closed` is the FIRM's ending, `withdrawn` is the CLIENT's. That is not
- * enforced here — a pure function has no session — it is enforced by which
- * repository the act goes through, and stated on every function below that
- * cares.
+ * `closed` is the FIRM's ending, `withdrawn` the CLIENT's. Enforced by which
+ * repository the act goes through, not here (a pure function has no session).
  */
 export type RequestStatus = "open" | "answered" | "closed" | "withdrawn";
 
@@ -32,24 +18,16 @@ export const REQUEST_STATUSES: readonly RequestStatus[] = [
 ];
 
 /**
- * Which side of the wall wrote a message.
- *
- * On the row rather than derived from the author's account (0068 says why: an
- * account whose membership changes would silently switch sides in an old
- * conversation), and unforgeable from the portal because the policy refuses a
- * portal session any value but `client`.
+ * Which side wrote a message. Stored on the row, not derived from the account
+ * (0068: a membership change would switch sides in an old thread); the portal
+ * policy refuses a portal session any value but `client`.
  */
 export type AuthorSide = "firm" | "client";
 
 /**
- * How a firm routes a request that has just arrived (migration 0070).
- *
- * `none` is the DEFAULT and a real answer, not "unconfigured" — it reproduces
- * exactly what T6.8 shipped, so the setting changed no firm's behaviour on the
- * day it existed. A SPOC is deliberately not a member of this union and cannot
- * become one without an axis: a request names no service, so there is nothing
- * to pick a Dept by, and choosing one would be the arbitrary answer 0068 spent
- * a header refusing to give.
+ * How a firm routes a new request (0070). `none` is the default and a real answer
+ * (what T6.8 shipped). No SPOC option: a request names no service, so there is no
+ * axis to pick a Dept by, and choosing one is the arbitrary answer 0068 refused.
  */
 export type RequestRouting = "none" | "key_manager";
 
@@ -72,11 +50,10 @@ export interface ClientRequest {
   readonly firstRepliedAt: string | null;
   readonly settledBy: string | null;
   readonly settledAt: string | null;
-  /** Whose desk it is on. NULL IS ORDINARY — see `routeRequest`. */
+  /** Whose desk it is on. Null is ordinary — see `routeRequest`. */
   readonly assigneeUserId: string | null;
-  /** Why nobody, when the rule ran and could not name somebody. Null whenever
-   *  there IS an assignee (0070 refuses the pair) and also whenever the firm
-   *  routes nothing at all. */
+  /** Why nobody, when the rule ran and found nobody. Null whenever there is an
+   *  assignee (0070 refuses the pair) or the firm routes nothing. */
   readonly assignmentNote: string | null;
 }
 
@@ -89,22 +66,12 @@ export interface RequestReply {
   readonly writtenAt: string;
 }
 
-/**
- * A reply with its author and its attachment resolved to something a person can
- * read.
- *
- * `authorName` is null when the account has been erased — a real answer, the
- * shape `EventRecord.actor`, `DocumentRecord` and `AskResponseRecord` all use.
- */
+/** A reply with author and attachment resolved; `authorName` is null when the account was erased. */
 export interface RequestReplyRecord {
   readonly reply: RequestReply;
   readonly authorName: string | null;
-  /**
-   * What the firm attached, if anything. A document already filed against this
-   * client (0068's composite FK refuses any other), made visible to them by the
-   * same act — see `PortalRequestRow.replies` for why that is one decision and
-   * not two.
-   */
+  /** A document already filed against this client (0068's composite FK), made
+   *  visible to them by the same act — see `RequestRepository.reply`. */
   readonly document: {
     readonly documentId: string;
     readonly title: string;
@@ -114,42 +81,25 @@ export interface RequestReplyRecord {
   } | null;
 }
 
-/**
- * A request as the FIRM reads it, in the inbox.
- *
- * Names, never ids — the rule this codebase has now learnt seven times. The
- * replies come with the read rather than per row: an inbox that showed the
- * opening message and not what anybody said back is a list somebody has to
- * click through to know whether it has been dealt with.
- */
+/** A request as the FIRM reads it in the inbox: names, never ids, with its replies. */
 export interface ClientRequestRecord {
   readonly request: ClientRequest;
-  /** WHICH of the firm's clients this is from. The firm-wide inbox has no
-   *  routing (0068), so the company name is the only thing telling one row from
-   *  another at a glance. */
+  /** What tells rows apart in the unrouted firm-wide inbox (0068). */
   readonly clientName: string;
-  /** WHO at the client wrote it. The firm needs this — a company with two
-   *  directors asking for different things is two conversations — and it is the
-   *  half of the thread the client's own screen does not need. */
+  /** Who at the client wrote it: two directors asking are two conversations. */
   readonly raisedByName: string | null;
   readonly settledByName: string | null;
-  /** WHO AT THE FIRM holds it, resolved. Deliberately absent from
-   *  `PortalRequestRow`: whose desk the work is on is the firm's business
-   *  (T6.5), and a name there invites a client to chase a junior directly. */
+  /** Who at the firm holds it. Kept off `PortalRequestRow`: whose desk it is on is
+   *  the firm's business (T6.5), and a name invites a client to chase a junior. */
   readonly assigneeName: string | null;
   readonly assigneeEmail: string | null;
   readonly replies: readonly RequestReplyRecord[];
 }
 
 /**
- * A request as the CLIENT reads it, in the action centre.
- *
- * Narrower than `ClientRequestRecord`, and narrower in the direction T6.5 set:
- * no name of anybody at the firm. `RequestReplyRecord.authorName` carries the
- * client's OWN people (a company with two directors needs to know which of them
- * asked), and the handler drops it on the firm's side of the thread — which is
- * where "the firm replied" is the whole fact, and naming a junior invites a
- * client to chase them directly.
+ * A request as the CLIENT reads it in the action centre: no name of anybody at
+ * the firm (T6.5). `authorName` is kept for the client's own people and dropped
+ * by the handler on the firm's replies.
  */
 export interface PortalRequestRow {
   readonly requestId: string;
@@ -158,77 +108,46 @@ export interface PortalRequestRow {
   readonly body: string;
   readonly status: RequestStatus;
   readonly raisedAt: string;
-  /**
-   * When the firm last came back, or null if it never has.
-   *
-   * A DATE AND NOT A COUNT, for `PortalAskRow.lastRemindedAt`'s reason pointed
-   * the other way: the tally belongs on the screen of the side that needs
-   * evidence, and here neither side does — the whole thread is on both screens.
-   * This is a convenience for sorting and for the one line the list shows.
-   */
+  /** When the firm last replied, or null. A date, not a count (unlike
+   *  `PortalAskRow.lastRemindedAt`): the whole thread is on both screens. */
   readonly lastRepliedAt: string | null;
   readonly replies: readonly RequestReplyRecord[];
 }
 
-// ── Pure rules ───────────────────────────────────────────────────────────────
-
 /**
- * Whether anybody may still add to the thread.
- *
- * `answered` stays open to both sides on purpose: the firm replying does not
- * finish a client's request, and a client who was sent the wrong year's balance
- * sheet has to be able to say so without opening a second request that reads as
- * a fresh demand.
- *
- * A settled request takes no more messages. Reopening by replying would let a
- * request the firm has closed come back to life without anybody deciding to
- * reopen it, and "raise a new one" keeps the record honest about what was asked
- * when.
+ * Whether anybody may still add to the thread. `answered` stays open to both
+ * sides: a client sent the wrong year's balance sheet must be able to say so
+ * without a second request. A settled request takes no more messages, so nothing
+ * reopens without somebody deciding to; raise a new one instead.
  */
 export function acceptsReply(status: RequestStatus): boolean {
   return status === "open" || status === "answered";
 }
 
-/**
- * Whether the FIRM may still close it. Closing a settled request is refused
- * rather than written over the first closure, which would move the date
- * somebody is answering questions about.
- */
+/** Whether the FIRM may still close it; a second close would move the settled date. */
 export function acceptsClosure(status: RequestStatus): boolean {
   return status === "open" || status === "answered";
 }
 
 /**
- * Whether the CLIENT may still withdraw it.
- *
- * The same two states, and a separate function rather than an alias of
- * `acceptsClosure`. They are the same today by coincidence, not by rule: the
- * first firm to ask for "a client may not withdraw once we have started work"
- * changes this one and must not change the other, and an alias is how one
- * rule's edit silently becomes two.
+ * Whether the CLIENT may still withdraw it. The same states as `acceptsClosure` by
+ * coincidence, not rule; kept separate so changing one cannot change the other.
  */
 export function acceptsWithdrawal(status: RequestStatus): boolean {
   return status === "open" || status === "answered";
 }
 
 /**
- * Whether a request is still live — the predicate the firm's inbox and the
- * client's own list both mean by "not finished".
- *
- * Here rather than in the two queries, so the screens cannot disagree about
- * which rows they contain. 0068's partial index is written on the same pair and
- * a change here is a change there.
+ * "Not finished", for both the firm's inbox and the client's list so they cannot
+ * disagree. 0068's partial index uses the same pair: change both together.
  */
 export function isLive(status: RequestStatus): boolean {
   return status === "open" || status === "answered";
 }
 
 /**
- * What the routing rule decides for a request that has just arrived.
- *
- * `assigneeUserId` null with a `note` means the rule RAN and could not name
- * somebody; null with NO note means the firm routes nothing. 0070's CHECK
- * refuses a note beside a name, so the third combination cannot be written.
+ * Null assignee with a note: the rule ran and found nobody. With no note: the firm
+ * routes nothing. 0070's CHECK refuses a note beside a name.
  */
 export interface RoutingOutcome {
   readonly assigneeUserId: string | null;
@@ -236,28 +155,11 @@ export interface RoutingOutcome {
 }
 
 /**
- * Whose desk a new request lands on.
- *
- * ── A WRONG ASSIGNEE IS WORSE THAN NONE ─────────────────────────────────
- *
- * 0051's rule, and the reason this function never falls back to anybody: work
- * on the wrong desk sits there while its owner believes it is not theirs, and
- * unassigned work is visible in a queue that gets chased. So the only two
- * answers are the right person and NOBODY — there is no "and otherwise the
- * partner", and adding one would be this product deciding what the firm never
- * said.
- *
- * ── AND `none` PRODUCES NO NOTE, WHICH IS THE SUBTLE HALF ───────────────
- *
- * A firm that routes nothing has not failed to route anything. Writing "the
- * firm routes nothing" onto every row would put a permanent sentence on an
- * inbox where every row is equally unassigned — noise that says the same thing
- * as the empty Assigned column beside it, on every row, for ever. The note
- * exists to separate *"nobody has got to it"* from *"the rule ran and could not
- * decide"*, and under `none` there is no second case.
- *
- * Pure, so both the raise path and any later re-route give the same answer, and
- * so the sentence a firm reads can be tested without a database.
+ * Whose desk a new request lands on: the right person or NOBODY, never a fallback.
+ * A wrong assignee is worse than none (0051): it sits unowned, while unassigned
+ * work is visible and gets chased. `none` writes no note, which would only repeat
+ * the empty Assigned column on every row; the note marks "the rule could not decide".
+ * Pure, so raise and any re-route agree and the sentence is testable.
  */
 export function routeRequest(
   routing: RequestRouting,
@@ -267,9 +169,8 @@ export function routeRequest(
   if (keyManagerUserId !== null) return { assigneeUserId: keyManagerUserId, note: null };
   return {
     assigneeUserId: null,
-    // NAMES THE FIX, not the failure. T3.1's `assignment_note` is what makes an
-    // unassigned queue clearable rather than a pile, and it manages that only
-    // when the sentence says what somebody has to go and do.
+    // Names the fix, not the failure: T3.1's `assignment_note` keeps an
+    // unassigned queue clearable only when it says what to do.
     note:
       "This firm routes a client's request to that client's Key Manager, and this client " +
       "has none on the day it arrived. Name one on the client's page, or take this request " +
@@ -278,30 +179,16 @@ export function routeRequest(
 }
 
 /**
- * Which side spoke last, or null on a request nobody has replied to yet.
- *
- * ── THIS IS WHY A CLIENT'S FOLLOW-UP DOES NOT CHANGE THE STATUS ──────────
- *
- * The obvious alternative was to send `answered` back to `open` when the client
- * writes again — "that is the wrong year's balance sheet" plainly needs the
- * firm's attention. It is refused because `answered` means exactly
- * `first_replied_at IS NOT NULL`, which 0068's CHECK enforces as one fact in
- * two representations; a status that walked backwards would either break that
- * constraint or force it to be loosened, and a loosened one is how a list
- * filtered on `status` and a report joined on `settled_at` come to disagree.
- *
- * So the status records whether the firm has ever come back, and THIS records
- * who is holding the conversation. The firm's inbox shows both, which is more
- * information than a status that tried to carry both.
+ * Which side spoke last, or null if nobody has replied. This, not the status, says
+ * who holds the conversation: a client follow-up does not send `answered` back to
+ * `open`, because `answered` is `first_replied_at IS NOT NULL` (0068's CHECK) and
+ * a status walking backwards would break or loosen that constraint.
  */
 export function lastWordWith(replies: readonly RequestReplyRecord[]): AuthorSide | null {
   return replies.length === 0 ? null : (replies[replies.length - 1]?.reply.authorSide ?? null);
 }
 
-/**
- * Whether the ball is in the firm's court: nobody has replied, or the client
- * spoke last. The label the firm's inbox sorts and colours on.
- */
+/** The firm's court: live, and nobody has replied or the client spoke last. The inbox sorts on it. */
 export function awaitsFirm(record: {
   readonly request: ClientRequest;
   readonly replies: readonly RequestReplyRecord[];
@@ -310,14 +197,9 @@ export function awaitsFirm(record: {
 }
 
 /**
- * Split what the client sees into what the firm has not answered yet and what
- * it has.
- *
- * Pure and here rather than in the query for `splitByAwaiting`'s reason — one
- * read, one predicate, both lists — and note which way round it is. The ask
- * splits on "does this want something from YOU"; a request the client raised
- * never wants anything from them, so it splits on whether the firm has come
- * back.
+ * The client's live requests, split by whether the firm has replied (one read, one
+ * predicate, as `splitByAwaiting`). The ask splits on "wants something from YOU";
+ * a request never wants anything from the client.
  */
 export function splitByReplied(rows: readonly PortalRequestRow[]): {
   readonly awaitingFirm: readonly PortalRequestRow[];
