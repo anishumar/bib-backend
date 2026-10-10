@@ -1,0 +1,115 @@
+# The local database, and nothing else.
+#
+#   docker compose up -d --wait          # from bib-backend/
+#   npm run migrate
+#
+# ── WHY IT LIVES IN THIS REPO ────────────────────────────────────────────────
+#
+# It used to sit in the workspace folder above bib-backend and bib-frontend,
+# which is not a git repository, so it could not be committed or cloned and it
+# went missing twice; each time `npm run demo:fresh` died on its first line.
+# It is tracked here now, and `scripts/demo-fresh.sh` runs compose from this
+# directory (`ROOT=$BACKEND`). Its contents are what that script and
+# `.env.example` require, not choices: `container_name: bib-postgres` because
+# the script removes a leftover by that exact name and execs into it,
+# `-U postgres -d bib` because that is the pg_isready it then runs, and 5432
+# because both URLs in `.env.example` name that port. `name: bib` below keeps
+# the volume `bib_postgres_data`, so a database created from the old location
+# is the same one.
+#
+# ── WHAT IS NOT HERE ─────────────────────────────────────────────────────────
+#
+# No mail sink and no object-store emulator, deliberately. `BIB_MAIL_TRANSPORT`
+# defaults to `log` and `BIB_STORAGE_BACKEND` to `filesystem`, so local
+# development reaches neither, and a container that nothing connects to is a
+# container that rots until the day somebody needs it.
+
+name: bib   # PINNED, and not cosmetic. Without it Compose names the project
+            # after the directory it was invoked from, so `down -v` run from
+            # anywhere else looks for `<thatdir>_postgres_data`, finds nothing,
+            # destroys nothing, and leaves the old database standing while
+            # reporting success — which is the failure `demo-fresh.sh:38-40`
+            # already works around by `docker rm -f` by hand. With a fixed
+            # project name the volume is `bib_postgres_data` wherever the
+            # command is run from.
+
+services:
+  postgres:
+    # 17, stated twice in this repo: `migrations/0300_recurring_engagement_periods.up.sql`
+    # relies on NULLS NOT DISTINCT and says "this product runs 17", and README
+    # asks for 17/18. The four contrib extensions the migrations create —
+    # pgcrypto and citext (0001), pg_trgm (0002), btree_gist (0049) — all ship
+    # in the official image, so there is nothing to build and no init script.
+    # Pin the MAJOR only: a minor upgrade is a pull, a major one is a dump and
+    # restore, and `:17` will never silently do the second.
+    image: postgres:17
+    container_name: bib-postgres
+    restart: unless-stopped
+    # UTC, said out loud rather than inherited. CLAUDE.md's instant-format
+    # section records that `timestamptz::text` renders in the SESSION's zone,
+    # that `src/db/pool.ts` sets none, and that "UTC in the compose container"
+    # is the only reason every string anyone here has looked at ended `+00`. A
+    # container whose zone came from the host would make that accidental, and
+    # the bug it hides — a day derived from an instant by a zone nobody chose —
+    # is invisible east of Greenwich, which is where this is developed. The one
+    # test that varies the zone sets it per session (`tests/architecture/
+    # instant-format.integration.test.ts` reads in Asia/Kolkata), so pinning the
+    # server changes nothing it measures.
+    command: ["postgres", "-c", "timezone=UTC"]
+    environment:
+      # The SUPERUSER, and it is what `BIB_DATABASE_URL` must name against this
+      # container. Not bib_owner: `src/cmd/migrate.ts` creates that role
+      # NOLOGIN and then runs `GRANT bib_owner TO CURRENT_USER`, which a role
+      # cannot do to itself — so `.env.example`'s committed owner URL cannot
+      # migrate a fresh volume, and README already says to point it at a
+      # superuser locally. Against this compose file that line is:
+      #
+      #   BIB_DATABASE_URL=postgres://postgres:bib_local_dev@localhost:5432/bib
+      #
+      # `BIB_APP_DATABASE_URL` needs no change — migrate creates bib_app and
+      # sets its password from that URL.
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bib_local_dev}
+      POSTGRES_DB: bib
+    ports:
+      # 5432 is what both URLs in `.env.example` name. The override exists for
+      # the machine that already runs a native Postgres there — and if you use
+      # it, set it in a `.env` beside THIS file: Compose reads the env file in
+      # the project directory, not `bib-backend/.env`, so an override written
+      # only in the backend's own file moves the URLs and not the container.
+      #
+      # POSTGRES_PORT and POSTGRES_PASSWORD carry no `BIB_` prefix deliberately.
+      # In this codebase that prefix means "read by src/config/config.ts, and
+      # therefore listed in .env.example" — nothing here is read by the
+      # application at all, and a BIB_ name that no schema knows about is a key
+      # somebody will eventually look for in the wrong file.
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # `-h 127.0.0.1` IS THE WHOLE POINT OF THIS LINE, and dropping it gives
+      # back a healthcheck that passes before the database exists.
+      #
+      # The official entrypoint runs a TEMPORARY server during initdb with
+      # `listen_addresses=''` so that nothing outside can reach a half-built
+      # cluster. That server still answers on the unix socket, so a bare
+      # `pg_isready` — which prefers the socket — reports ACCEPTING while the
+      # real TCP listener does not yet exist. `docker compose up -d --wait`
+      # would then return, and `npm run migrate`, which connects over TCP,
+      # would fail against a container that had just been declared healthy.
+      # `demo-fresh.sh:41-44` describes that exact fall-through as something
+      # this project has already hit once and why it uses `--wait` at all.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 -U postgres -d bib"]
+      interval: 2s
+      timeout: 3s
+      # start_period covers initdb on a fresh volume, where the checks above
+      # are SUPPOSED to fail; failures inside it do not count against retries,
+      # and the first success ends it. 30 retries at 2s is a minute of patience
+      # after that, which is a wedged container rather than a slow one.
+      start_period: 20s
+      retries: 30
+
+volumes:
+  # Named, so `docker compose down -v` destroys it and `down` alone does not —
+  # which is the distinction `demo:fresh` is built on.
+  postgres_data:

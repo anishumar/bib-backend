@@ -27,7 +27,7 @@ set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 BACKEND=$(cd "$HERE/.." && pwd)
-ROOT=$(cd "$BACKEND/.." && pwd)   # the workspace holding docker-compose.yml
+ROOT=$BACKEND   # docker-compose.yml lives in this repo, so it is tracked
 API=${API:-http://localhost:8080}
 
 say() { printf '\n\033[1m%s\033[0m\n' "$1"; }
