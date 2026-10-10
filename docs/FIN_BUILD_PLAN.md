@@ -116,17 +116,28 @@ Estimate: 3–4 days. This is v3.2 §11.
   - *A staff `dueOn` before the firm's today is refused with `INVALID_DUE_DATE` (400). A template ask accepts a past due day.*
   - *The portal wire carries `dueOn` only; the staff wire also carries `fromTemplate {templateKey, itemKey}`.*
   - *Not done: the portal month view has no `dueOn` yet.*
-- [ ] **F1.4 Requests sweep.**
+- [x] **F1.4 Requests sweep.**
   - New queue `delivery.requests` in `setup/worker.ts`, scheduled on the escalation cron as the chaser and the nudge are (one daily knob, not a new one).
   - It runs an anti-join: period work items whose step names a template, and items not yet raised on or after the send date.
   - It raises asks through `ClientAskService.raise`, and also runs from `worker:once`.
   ✔ Running it twice raises the asks once. A ledger event is written only for rows actually created.
-- [ ] **F1.5 Due date shown.** The portal action centre and the staff screens show `due_on`, and the chaser still works.
+  *Done 2026-10-10 by Agent C (`2194438`), with no migration. `RequestSweepService` (`usecase/requests`) runs on `delivery.requests` with the escalation cron, and in `worker:once` after the chaser so a fresh ask is never chased on the same run. Decisions:*
+  - *One task per period job is asked, chosen the same way every pass, and "already asked" is checked across ALL the job's tasks.*
+  - *`awaitingPin` counts only ended periods at firms that have published a template.*
+  - *A withdrawn template ask is never re-raised.*
+  - *There is no time limit on how far back it asks. A backlog shows as `overdueOnRaise`, logged as a warning.*
+
+  *Known limits: two different jobs of one client naming the same template ask twice, and an offset-0 item is raised a pass late (S7).*
+- [ ] **F1.5 Due date shown.** *(staff side done; client side checked only on mocked data)* The portal action centre and the staff screens show `due_on`, and the chaser still works.
   ✔ A browser walk as a client and as staff.
+  *Partly done 2026-10-10 by Agent D (frontend `8b53459`, merged in `924364e`):*
+  - *Staff: "Due 05 Nov 2026", marked ", late" when open and past, "From Monthly close" provenance, and an optional "Due by" field on the raise form, all walked in Chromium against the real API.*
+  - *Portal: the due day shows beside "Waiting on you", with no "late" wording on the client's page. This was checked only against mocked API answers, because the sandbox has no portal contact. **Open:** walk it as a real client.*
 - [ ] **F1.6 Uploads.** Allow multi-file upload on one ask, and staff "upload on behalf" of a client.
   ✔ Uploading 3 files to one ask stores 3 versions. An on-behalf upload is recorded with the staff actor.
-- [ ] **F1.7 Templates screen and seed.** Add an admin screen for request templates, and seed **"Monthly close"**: sales invoices, purchase invoices, bank statements and expense claims, due on the 5th.
+- [x] **F1.7 Templates screen and seed.** Add an admin screen for request templates, and seed **"Monthly close"**: sales invoices, purchase invoices, bank statements and expense claims, due on the 5th.
   ✔ A sandbox client receives 4 asks on the send date.
+  *Done 2026-10-10 by Agent D. The screen is at `/admin/request-templates`, under Processes in the nav. "Start from an example: Monthly close" fills Sales invoices, Purchase invoices, Bank statements and Expense claims as `books_input`, sent 1 day and due 5 days after the period ends, and each item says its days back in words. The Processes editor gains an "Ask the client for" select per step. "Seed" is an example button, not a migration, because this codebase seeds nothing a firm has not confirmed. The 4-asks check is proven by `tests/requests/sweep.integration.test.ts`; the sandbox has no signed monthly engagement to show it live.*
 - [ ] **F1.8 Per-step desk (only if the decision above says yes).** Extend the owner rule so that a step can name its own Dept or desk.
   ✔ Two steps of one job land on two different people.
 
@@ -404,3 +415,4 @@ India pack (GST and TDS evaluators, Tally intake); GSTR-2B and IRAS register che
 | 2026-10-10 | F0.10 | (this commit) | Training-pack loader and the `/internal` fin switch. Loaded all 1,168 pack files into a local sandbox, and fin took them all in (pdf 840 · sheet 222 · image 101 · manual 5). Found that `/internal/v1/tenants/{id}/status` cannot record its event (system actor with a non-null id); listed under open decisions. `check` 3574 and `test:integration` 1131 pass on Node 22. |
 | 2026-10-10 | decision | (this commit) | Document kind for books files: option B. `0383_books_input_kind`; fin takes only `books_input`. Frontend `feat/fin` adds the labels and regenerated API types. Checked against the real API: a `books_input` upload is taken in and an `other` upload is left alone. The 1,168 sandbox files were loaded as `other` before this, so their intake items stand; a fresh `fin:pack` files as `books_input`. `check` 3575 and `test:integration` 1131 pass. |
 | 2026-10-10 | F1.1–F1.3 | 7d34df0, c3770cb | Built by two agents in parallel worktrees against the F1 contract, then merged without conflicts. Merged gates: `check` 3637 and `test:integration` 1153 on Node 22. |
+| 2026-10-10 | F1.4, F1.5 (staff), F1.7 | merge of 2194438, 924364e (frontend) | Phase 2 ran as two parallel agents: the sweep (backend) and the screens (frontend). Merged gates: `check` 3677 and `test:integration` 1161. **Local DB note:** the sweep agent ran `worker:once` (mail to the log) once, so every sweep caught up on the dev DB: about 511 jobs and 294 period jobs spawned, 56 advance bills, 14 tasks and so on. The sandbox walk left a published "Monthly close" template, a draft process and one test task. |
