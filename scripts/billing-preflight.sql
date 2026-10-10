@@ -1,11 +1,11 @@
 -- Billing preflight: READ-ONLY. Run it BEFORE anyone switches "Automatic billing" ON for a firm.
 -- (Audit 2026-10-03, billing cluster; moved into the repo from Shrestha's workspace on 2026-10-04
--- so the person deploying has it. Release note: docs/deploy/release-2026-10-04.md.)
+-- so the person deploying has it. Release note: bib-docs/backend/deploy/release-2026-10-04.md.)
 --
 -- How to run (it reads every firm, so it needs the OWNER, not bib_app):
 --   local:  docker exec -i bib-postgres psql -U postgres -d bib -f - < scripts/billing-preflight.sql
 --   QA:     psql "<the bib-owner-database-url secret>" -f scripts/billing-preflight.sql
---           (through the Cloud SQL Auth Proxy from your machine; see docs/deploy/runbook.md)
+--           (through the Cloud SQL Auth Proxy from your machine; see bib-docs/backend/deploy/runbook.md)
 --
 -- The script does SET ROLE bib_owner: the tables' owner is not filtered by RLS (FORCE RLS is
 -- not on). CHECK THE FIRST LINE OF OUTPUT: if "firms visible" is 0, RLS is hiding the rows and

@@ -205,7 +205,7 @@ BEGIN
       'would still be open, because membership of cloudsqlsuperuser reaches every table as '
       'its owner and an owner is exempt from its own row policies. This is what creating '
       'bib_app as a Cloud SQL user looks like. It must be created by SQL: see '
-      'infra/sql/0000_cloudsql_bootstrap.sql and docs/deploy/database.md.',
+      'infra/sql/0000_cloudsql_bootstrap.sql and bib-docs/backend/deploy/database.md.',
       current_user, array_to_string(wrong, ', ');
   END IF;
   RAISE NOTICE '  privileges   ok  no SUPERUSER, CREATEROLE, CREATEDB or cloudsqlsuperuser';

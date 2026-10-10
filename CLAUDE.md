@@ -5,7 +5,7 @@ force at all times. **Read it before writing a single line.** The rules here are
 preferences — most are enforced by the build (`npm run check`) and CI, so breaking one does
 not merge. When something is unclear, stop and ask; do not fill the gap with a guess.
 
-> Companion docs: `HANDOFF.md` (why we're building this + the decisions), `CONTRIBUTING.md`
+> Companion docs: `../bib-docs/backend/HANDOFF.md` (why we're building this + the decisions), `CONTRIBUTING.md`
 > (the PR gate), `migrations/README.md` (the migration rules). The reference implementation
 > of these patterns is `/Users/anishumar/Desktop/10xcrm` — read its `CLAUDE.md` for the
 > deeper rationale.
