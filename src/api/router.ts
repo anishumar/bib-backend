@@ -99,6 +99,8 @@ import { registerClientMailRoutes } from "./handler/clientmail";
 import type { ClientMailDeps } from "./handler/clientmail";
 import { registerFxRoutes } from "./handler/fx";
 import type { FxDeps } from "./handler/fx";
+import { registerFinRoutes } from "./handler/fin";
+import type { FinDeps } from "./handler/fin";
 import type { ReadinessDeps } from "./handler/readiness";
 import type { FileStoreDeps } from "./handler/filestore";
 import type { InvoiceDeps } from "./handler/invoice";
@@ -221,6 +223,9 @@ export interface RouterDeps {
   /** The day's exchange rate, as a suggestion (0345). */
   readonly fx: FxDeps;
   readonly auth: AuthDeps;
+  /** FinCompliance (docs/FIN_BUILD_PLAN.md). Absent when BIB_FIN_ENABLED is
+   *  off, and then no /api/v1/fin route exists at all. */
+  readonly fin?: FinDeps;
 }
 
 const healthRoute = createRoute({
@@ -505,6 +510,7 @@ export function buildRouter(
   registerReadinessRoutes(app, deps.readiness);
   registerClientMailRoutes(app, deps.clientMail);
   registerFxRoutes(app, deps.fx);
+  if (deps.fin !== undefined) registerFinRoutes(app, deps.fin);
 
   // Docs are generated FROM the routes above, so this must come after them.
   if (opts.docsEnabled) {

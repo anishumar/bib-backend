@@ -28,6 +28,8 @@ import {
 import { ScryptPasswordHasher } from "../infrastructure/crypto/scrypt-hasher";
 import { RandomTokenFactory, Sha256ContentHasher } from "../infrastructure/crypto/random-tokens";
 import { fxServiceFor } from "./fx";
+import { finApiDeps } from "./fin";
+import type { FinDeps } from "../api/handler/fin";
 import { mailerFor } from "./mailer";
 import { PostgresFirmTimeZone } from "../infrastructure/postgres/firm-timezone-repository";
 
@@ -1509,6 +1511,8 @@ export function wire(cfg: Config, log: Logger): Wired {
         readiness: { service: readiness },
         clientMail: { service: new ClientMailService({ store: clientSenders, events: ledger }) },
         fx: { service: fx },
+        // FinCompliance: present only when BIB_FIN_ENABLED is on.
+        ...finRoutes(finApiDeps(cfg, pools.app, ledger)),
       },
       log,
       {
@@ -1541,4 +1545,10 @@ export function wire(cfg: Config, log: Logger): Wired {
       await assertLedgerAppendOnly(pools.app);
     },
   };
+}
+
+/** Spread into the router's deps: `fin` is optional, and under
+ *  exactOptionalPropertyTypes an absent module is no key, never `undefined`. */
+function finRoutes(deps: FinDeps | undefined): { fin?: FinDeps } {
+  return deps === undefined ? {} : { fin: deps };
 }

@@ -429,6 +429,12 @@ version is exactly what gets asked about afterwards.
 | `output.approved` | verification | A checker approved an output. Never the actor that produced it. When the step has review points (T6.15), `reviewPoints: { total, done, notApplicable }` for THIS check: counts only. |
 | `output.rejected` | verification | Sent back. Carries `reviewPoints` counts as `output.approved` does, because "sent back with two of six points ticked" is worth a GROUP BY; which two is prose that stays on the rows. |
 
+### FinCompliance — written only by the fin job (docs/FIN_BUILD_PLAN.md)
+
+| Verb | object_type | Meaning |
+|---|---|---|
+| `fin.intake_routed` | intake_item | The fin job took in a file a client supplied and sent it to a reader: `sheet`, `pdf`, `image`, `archive`, or `manual` (a person reads it). **Per FILE and only when the row was created**, so a second run of the job writes nothing. Actor is the SYSTEM. Payload: `documentVersionId`, `route`, `routeBasis`, `mediaType`, `byteSize`; never the filename or title, which routinely name a client. |
+
 > **One rename from the build plan.** T2.4 describes its trigger as a `contract.active`
 > event. Registered here as **`contract.activated`** — every verb is past tense, and a
 > vocabulary with one exception is a vocabulary people stop trusting. Same event, same

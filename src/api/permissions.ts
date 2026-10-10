@@ -941,6 +941,9 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // is the thing the fifth axis exists to prevent.
   // A public market rate, as a suggestion for a rate box (0345).
   [routeKey("GET", "/api/v1/fx/quote"), "party:read" as const],
+  // FinCompliance (docs/FIN_BUILD_PLAN.md). Registered only when the kill switch
+  // is on; a firm with fin off answers 404 from the service.
+  [routeKey("GET", "/api/v1/fin/intake"), "books:read" as const],
   [routeKey("GET", "/api/v1/dashboard/overview"), "party:read" as const],
   [routeKey("GET", "/api/v1/dashboard/mrr/{axis}"), "party:read" as const],
   [routeKey("GET", "/api/v1/dashboard/mrr-by-currency"), "party:read" as const],

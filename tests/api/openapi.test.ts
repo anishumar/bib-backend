@@ -16,6 +16,8 @@ import { FakeClock } from "../../src/testfakes/clock";
 import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 import { describe, expect, it } from "vitest";
 import { buildRouter } from "../../src/api/router";
+import { FinIntakeService } from "../../src/usecase/fin/intake";
+import { FakeFinFirms, FakeFinIntakeStore } from "../../src/testfakes/fin";
 import { InMemoryRateLimiter } from "../../src/platform/ratelimit";
 import { CAPABILITIES } from "../../src/api/capabilities";
 import { AuthzService } from "../../src/usecase/authz/service";
@@ -555,6 +557,17 @@ function deps(): RouterDeps {
       firmEntities: makeFirmEntityFakes().service,
     },
     fx: { service: makeFxFakes().service },
+    // FinCompliance's routes exist only when wired; wiring them here is what
+    // puts /api/v1/fin under this sweep.
+    fin: {
+      intake: new FinIntakeService({
+        firms: new FakeFinFirms(),
+        candidates: new FakeFinIntakeStore(),
+        items: new FakeFinIntakeStore(),
+        events: new RecordingEventSink(),
+        ids: new FakeIds(),
+      }),
+    },
     clientMail: {
       service: new ClientMailService({
         store: { sendFromDomains: () => Promise.resolve([]), setSendFromDomains: () => Promise.resolve() },

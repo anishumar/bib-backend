@@ -18,6 +18,8 @@ export default defineConfig({
     "cmd/migrate": "src/cmd/migrate.ts",
     "cmd/worker": "src/cmd/worker.ts",
     "cmd/worker-once": "src/cmd/worker-once.ts",
+    // FinCompliance's own process: a Cloud Run Job, one run per invocation.
+    "cmd/fin-once": "src/cmd/fin-once.ts",
   },
   format: ["esm"],
   // Matches package.json engines. Raised from node20 with pg-boss, which needs

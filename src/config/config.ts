@@ -52,6 +52,15 @@ const EnvSchema = z.object({
   // production-like — the spec lists every endpoint, so a public environment
   // opts in explicitly rather than leaking it by default.
   BIB_DOCS_ENABLED: z.enum(["true", "false"]).optional(),
+  // ── FinCompliance (docs/FIN_BUILD_PLAN.md F0.3) ───────────────────────────
+  // The global kill switch. OFF unless set to "true", in every environment: an
+  // unset value must never turn on a module that reads clients' books. Off,
+  // the API registers no /api/v1/fin route and `fin:once` exits at once. A
+  // firm also needs its own switch (tenancy.tenant.fin_enabled_since, 0381).
+  BIB_FIN_ENABLED: z.enum(["true", "false"]).default("false"),
+  // The fin job's own pool. Small on purpose: the database is shared, and fin
+  // must never be able to take the connections the API and worker need.
+  BIB_FIN_DB_POOL: z.coerce.number().int().positive().max(10).default(3),
 
   // ── Auth (T1.7) ───────────────────────────────────────────────────────────
   BIB_SESSION_COOKIE_NAME: z.string().min(1).default("bib_session"),
@@ -370,6 +379,13 @@ export interface Config {
   readonly docusign: DocusignConfig;
   readonly mail: MailConfig;
   readonly fx: FxConfig;
+  readonly fin: FinConfig;
+}
+
+/** FinCompliance's switch and the fin job's pool (F0.3, F0.5). */
+export interface FinConfig {
+  readonly enabled: boolean;
+  readonly poolSize: number;
 }
 
 /** The exchange-rate feed (0345). */
@@ -516,6 +532,10 @@ export function load(): Config {
       shutdownGraceMs: env.BIB_WORKER_SHUTDOWN_GRACE_MS,
       fxCron: env.BIB_WORKER_FX_CRON,
     },
+    fin: {
+      enabled: env.BIB_FIN_ENABLED === "true",
+      poolSize: env.BIB_FIN_DB_POOL,
+    },
     fx: {
       feed: env.BIB_FX_FEED,
       exchangeRateApiKey: env.BIB_FX_EXCHANGERATE_API_KEY ?? null,
@@ -598,6 +618,7 @@ export function redacted(cfg: Config): Record<string, unknown> {
     logLevel: cfg.logLevel,
     port: cfg.port,
     docsEnabled: cfg.docsEnabled,
+    fin: cfg.fin,
     // The internal key is a credential; redacted() exists so a config dump is
     // safe to log, and this is exactly the field that would make it unsafe.
     // Every key is a credential; redacted() exists so a config dump is safe to

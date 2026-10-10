@@ -37,6 +37,7 @@ import { BillingError } from "../domain/billing/errors";
 import { FileStoreError } from "../domain/filestore/errors";
 import { RenderError } from "../domain/render/errors";
 import { NotifyError } from "../domain/notify/errors";
+import { FinError } from "../domain/fin/errors";
 
 /** The closed set, as a runtime value so the OpenAPI error schema and the
  *  ErrorCode type derive from ONE source and cannot drift apart. */
@@ -1121,6 +1122,16 @@ export function mapError(err: unknown): MappedError {
       // The fee axis's one reason code, as every other money refusal has.
       case "ADVANCE_FEES_NOT_VISIBLE":
         return { status: 403, code: "FORBIDDEN", message: err.message, reason: "FEES_NOT_VISIBLE" };
+      default:
+        return unmapped(err.code);
+    }
+  }
+  if (err instanceof FinError) {
+    switch (err.code) {
+      // To a firm without fin, fin is not there: a 404, never a 403 that would
+      // send somebody looking for a permission no role change can grant.
+      case "FIN_NOT_ENABLED":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
     }

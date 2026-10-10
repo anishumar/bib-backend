@@ -63,6 +63,17 @@ module.exports = {
       to: { path: "^src/api" },
     },
     {
+      name: "core-never-imports-fin",
+      severity: "error",
+      comment:
+        "FinCompliance can fail without BiB failing (docs/FIN_BUILD_PLAN.md, ground rule 4). Fin is domain/fin, usecase/fin, infrastructure/fin and api/handler/fin.ts; fin may import core, core may not import fin. The only seams are the router (which mounts fin's routes when they are wired), the error mapper (api/domainerr.ts, which maps every family's codes to HTTP), setup/fin.ts and setup/server.ts (which wire them), cmd/fin-once.ts (fin's own process) and fin's test fakes.",
+      from: {
+        pathNot:
+          "^src/((domain|usecase|infrastructure)/fin/|api/handler/fin\\.ts$|api/(router|domainerr)\\.ts$|setup/(fin|server)\\.ts$|cmd/fin-once\\.ts$|testfakes/fin\\.ts$)",
+      },
+      to: { path: "^src/((domain|usecase|infrastructure)/fin/|api/handler/fin\\.ts$|testfakes/fin\\.ts$)" },
+    },
+    {
       name: "no-orphans",
       severity: "warn",
       comment: "A file nothing imports is usually dead or mis-wired.",

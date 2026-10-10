@@ -322,6 +322,9 @@ export const EVENT_VERBS = {
   "agent_run.decided":           { objectType: "agent_run",           lane: "delivery",   description: "A person accepted, corrected or rejected what a machine proposed. The payload carries WHICH of the three and never the values — accepted vs corrected is the entire accuracy signal, and an agent's output can hold a client's own data, which may not enter a log that cannot be erased." },
   "output.approved":             { objectType: "verification",        lane: "delivery",   description: "A checker approved an output. Never the same actor that produced it." },
   "output.rejected":             { objectType: "verification",        lane: "delivery",   description: "A checker rejected an output and sent it back." },
+
+  // ── FinCompliance (docs/FIN_BUILD_PLAN.md) · written only by the fin job ───
+  "fin.intake_routed":           { objectType: "intake_item",         lane: "delivery",   description: "The fin job took in a file a client supplied and sent it to a reader (F2.1): `sheet`, `pdf`, `image`, `archive`, or `manual` when it cannot be read and goes to a person. PER FILE and only when the row was created, so a second run writes nothing. The actor is the SYSTEM. Payload: `documentVersionId`, `route`, `routeBasis`, `mediaType`, `byteSize`; never the filename or title, which routinely name a client." },
 } as const satisfies Record<string, VerbSpec>;
 
 export type EventVerb = keyof typeof EVENT_VERBS;
