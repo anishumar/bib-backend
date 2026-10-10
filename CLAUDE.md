@@ -4798,6 +4798,71 @@ have a different subject and a different cadence. There is no screen for the lad
 is reachable through the generic config API, and an editor belongs with the first firm that
 wants to change one.
 
+## The monthly ask — request templates and the sweep (F1.4, 2026-10-10)
+
+`usecase/requests` (`RequestSweepService`), pure rules in `domain/requests/model.ts`, adapters in
+`infrastructure/postgres/request-sweep-repository.ts`, queue `delivery.requests` on the ESCALATION
+cron (one daily knob, shared with the chaser and the nudge; no env var of its own). It is what turns
+a firm's `request_template` (F1.1) and the process step naming it (F1.2) into asks on the client's
+page (F1.3), one per item per period. No migration.
+
+**WHAT IT DOES, per active firm per pass.** Subjects are `engagement_period` jobs not done or
+cancelled that have an OPEN task (the state's flag). A pinned job's body is read by its
+`template_version_id` through `readWorkflowTemplate` (the orchestrator's resolved template does not
+carry `requestTemplateKey`, and the orchestrator was not changed). Each step naming a key asks,
+unless its `job_step` row is `skipped` or `failed`; no row yet asks (S7 lays steps out late); two
+steps naming one key ask once. The key resolves to the template PUBLISHED now (read live, cached
+per key per firm per pass); none, or a body that no longer reads, is counted `noTemplate` and asks
+nothing. Each item is raised once the firm's today reaches `requestDates(period_end, item).sendOn`,
+through `ClientAskService.raiseFromTemplate` (the `TemplateAskRaiser` port, satisfied
+structurally): prompt = the item's label, its ask and document kinds, `dueOn` = `requestDates`'s,
+the published version pinned on the ask. One firm's failure is reported (`failure`) and the loop
+goes on.
+
+**TODAY IS THE FIRM'S DAY** (T6.14): `dayInZone(now, timeZoneFor(tenant))`, once per firm per pass.
+19:00 UTC on 31 October is already 1 November in Kolkata, and October's items are asked then.
+
+**ONE TASK PER JOB, AND THE JOB REMEMBERS WHAT IT ASKED (decided here).** A period job merged over
+several engagements of one company (0046's grouping, per period since 0300) has a task per
+engagement, and they are the same client's same month: asking on each would put the same bank
+statements on the client's page twice. So the read offers each job ONCE, on one open task chosen
+the same way every pass (client-visible first, since 0062 hides an ask with its task; then the
+oldest), and reads what was already asked on ANY task of the job (`asked`). 0385's unique index is
+per TASK and cannot say this; without the read, the job's first task finishing would move the asks
+to its second and ask again (the integration test goes red with it). The index stays the wall under
+two passes racing. Two DIFFERENT jobs of one client naming one template (two processes each asking
+for "Monthly close") are still asked twice: that is the firm's process saying so.
+
+**AT-LEAST-ONCE.** An item the job already asked is counted `alreadyRaised` (the read) and so is a
+raise the index refused (`created: false`); `client_ask.raised` is the ask module's, recorded only
+for a row it created, actor SYSTEM, `raised_by` null. A second pass writes and records nothing.
+
+**WHAT IT NEVER DOES.** It never closes, withdraws or changes an ask, never moves a task or a job,
+never sends mail: its deps are a tenant list, a zone, two reads, the one raise and a clock, and
+`tests/requests/service.test.ts` pins that list. A withdrawn template ask still counts as asked: the
+firm said "never mind", and the sweep does not overrule it.
+
+**THE S7 CAVEAT.** A period job's steps are laid out, and its process PINNED, only when its period
+ends (`runnable_at`: once its last day is over). So on the last day itself an
+offset-0 item is due and the job is unpinned: it is counted `awaitingPin` and asked a pass later.
+`awaitingPin` counts only jobs whose period has ended or ends today (this month's jobs could owe
+nothing yet, and counting them would make the number never zero), and only at a firm that has
+published at least one request template (`anyPublished`): elsewhere nothing could ever be asked,
+and the number was the orchestrator's `awaitingTemplate` again, every morning (47 such jobs on the
+first local run). A job whose firm published no process stays there, as `awaitingTemplate` says.
+
+**THE BACKLOG.** There is no horizon: a period job left open from an earlier period asks for that
+period's items with the firm's own due day, already past (`raiseFromTemplate` accepts one; moving
+the day would be a deadline this product invented). Those are counted `overdueOnRaise`, logged at
+WARN and printed loudly by `worker:once`, because a firm adopting templates with old open jobs will
+see a burst of asks a client reads as late on arrival. The cure is closing the old jobs first.
+
+**`worker:once` runs it AFTER the chaser** (so an ask raised on a run is never chased on it: a
+firm's first chaser rung may be at 0 days) and after the orchestrator (which pins a job whose period
+has just ended). In the worker the two queues share one cron and either may finish first.
+`setup/sweep-log.ts` `logRequestSweep` decides what is logged. Tests: `tests/requests/model.test.ts`,
+`service.test.ts`, `sweep.integration.test.ts`, `tests/setup/sweep-log.test.ts`.
+
 ## The self-serve library — and the flag that decides what is in it (T6.7)
 
 `usecase/portallibrary` + migration 0066. The board's line is *"a client finds last year's
