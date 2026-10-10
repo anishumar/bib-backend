@@ -98,11 +98,19 @@ const AskSchema = z
     }),
     workItemTitle: z.string().openapi({ description: "What the firm is doing that this is part of." }),
     raisedAt: z.string().openapi({
-      description:
-        "When you were asked. THERE IS NO DUE DATE ON THIS SURFACE and there will not be " +
-        "one: no deadline this product invented reaches a client, so how long it has been " +
-        "outstanding is a fact and 'by Friday' would be a promise nobody made.",
+      description: "When you were asked.",
     }),
+    dueOn: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .nullable()
+      .openapi({
+        description:
+          "The day the firm wants this by, as YYYY-MM-DD, or null when the firm stated none. " +
+          "Only ever a day the FIRM set — its monthly request list's own date, or one somebody " +
+          "at the firm typed — never one this product worked out. A DAY and not an instant: " +
+          "show it as written. It may already have passed by the time you read it.",
+      }),
     lastRemindedAt: z.string().nullable().openapi({
       description:
         "When the firm last reminded you about this, or null if it never has. A DATE AND " +
@@ -370,7 +378,8 @@ async function filePart(
 
 /** Field by field. On THIS surface an accidental field is one that reached
  *  somebody outside the firm — which is why `documentKind` is on the row and not
- *  here: it is the firm's filing decision and tells a client nothing. */
+ *  here: it is the firm's filing decision and tells a client nothing. The
+ *  request template an ask came from is absent for the same reason (0385). */
 function toWire(r: PortalAskRow): z.infer<typeof AskSchema> {
   return {
     askId: r.askId,
@@ -381,6 +390,7 @@ function toWire(r: PortalAskRow): z.infer<typeof AskSchema> {
     companyName: r.companyName,
     workItemTitle: r.workItemTitle,
     raisedAt: r.raisedAt,
+    dueOn: r.dueOn,
     lastRemindedAt: r.lastRemindedAt,
     responses: r.responses.map((x) => ({
       responseId: x.response.id,

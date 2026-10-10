@@ -20,6 +20,7 @@ import { FakeBlobStore, FakeContentDigest } from "../../src/testfakes/filestore"
 import { FakeIds } from "../../src/testfakes/ids";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
 import { FakeClock } from "../../src/testfakes/clock";
+import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 import {
   AskAlreadySettled,
   AskAnswerEmpty,
@@ -27,6 +28,7 @@ import {
   AskDocumentKindMismatch,
   AskNotFound,
   AskWorkItemNotFound,
+  InvalidAskDueDate,
   InvalidAskKind,
   InvalidAskPrompt,
 } from "../../src/domain/clientask/errors";
@@ -44,7 +46,13 @@ const STRANGER = "00000000-0000-4000-8000-0000000000d9";
 const staff = { type: "human", id: PARTNER } as const;
 const client = { type: "human", id: MEERA } as const;
 
-function svc() {
+/**
+ * `now` and `zone` default to UTC midnight on 1 September 2026, the shape every
+ * test here had before 0385. The due-day tests move them, because "today" is
+ * the FIRM's and the interesting cases are the hours when the firm's day and
+ * the server's are different days.
+ */
+function svc(opts: { now?: string; zone?: string } = {}) {
   const store = new FakeAskStore()
     .workItem(WI_COBALT, COBALT, "GST monthly filing")
     .workItem(WI_LAKEVIEW, LAKEVIEW, "TDS quarterly return");
@@ -58,7 +66,8 @@ function svc() {
     digest: new FakeContentDigest(),
     ids: new FakeIds(),
     events,
-    clock: new FakeClock(new Date("2026-09-01T00:00:00.000Z")),
+    clock: new FakeClock(new Date(opts.now ?? "2026-09-01T00:00:00.000Z")),
+    timeZones: new FakeFirmTimeZone(opts.zone ?? "UTC"),
     maxUploadBytes: 1_000_000,
   });
   return { service, store, events, scope };
@@ -494,5 +503,265 @@ describe("closing and withdrawing", () => {
       actor: client,
     });
     expect(row.responses).toHaveLength(2);
+  });
+});
+
+// ── 0385: a due day, and an ask a request template raises (F1.3) ───────────
+//
+// T6.6 said "no due date, anywhere". 0385 reverses it for a day the FIRM states
+// — a request template's own offset, or one a person types — and keeps the
+// rest: absent is still the ordinary answer, and nothing here invents a day.
+
+const OCTOBER = {
+  versionId: "00000000-0000-4000-8000-0000000000f1",
+  templateKey: "monthly-close",
+  itemKey: "bank-statements",
+} as const;
+
+function templateAsk(service: ClientAskService, overrides: { dueOn?: string; itemKey?: string } = {}) {
+  return service.raiseFromTemplate({
+    tenantId: TENANT,
+    workItemId: WI_COBALT,
+    prompt: "Bank statements for October 2026",
+    askKind: "document",
+    documentKind: "books_input",
+    dueOn: overrides.dueOn ?? "2026-11-05",
+    template: { ...OCTOBER, itemKey: overrides.itemKey ?? OCTOBER.itemKey },
+  });
+}
+
+describe("a due day a person types (raise)", () => {
+  it("is kept as the day it was given, and reaches the client's row", async () => {
+    const { service } = svc();
+    const ask = await service.raise({
+      tenantId: TENANT,
+      workItemId: WI_COBALT,
+      askKind: "question",
+      prompt: "Which bank is the term loan with?",
+      documentKind: null,
+      dueOn: "2026-09-15",
+      actor: staff,
+    });
+    expect(ask.ask.dueOn).toBe("2026-09-15");
+    expect(ask.ask.fromTemplate).toBeNull();
+    const centre = await service.actionCentre(TENANT, MEERA);
+    expect(centre.awaitingYou[0]?.dueOn).toBe("2026-09-15");
+  });
+
+  it("stays optional: no day means none, exactly as before 0385", async () => {
+    const { service } = svc();
+    const ask = await openDocumentAsk(service);
+    expect(ask.ask.dueOn).toBeNull();
+  });
+
+  it("accepts the firm's today itself", async () => {
+    const { service } = svc();
+    const ask = await service.raise({
+      tenantId: TENANT,
+      workItemId: WI_COBALT,
+      askKind: "question",
+      prompt: "Confirm the GSTIN on the new branch",
+      documentKind: null,
+      dueOn: "2026-09-01",
+      actor: staff,
+    });
+    expect(ask.ask.dueOn).toBe("2026-09-01");
+  });
+
+  it("refuses a day already gone, and writes nothing", async () => {
+    const { service, store, events } = svc();
+    await expect(
+      service.raise({
+        tenantId: TENANT,
+        workItemId: WI_COBALT,
+        askKind: "question",
+        prompt: "Confirm the GSTIN on the new branch",
+        documentKind: null,
+        dueOn: "2026-08-31",
+        actor: staff,
+      }),
+    ).rejects.toBeInstanceOf(InvalidAskDueDate);
+    expect(store.asks).toHaveLength(0);
+    expect(events.verbs()).toEqual([]);
+  });
+
+  it("cuts 'already gone' on the FIRM's calendar, not the server's", async () => {
+    // 20:00 UTC on 1 September is 01:30 on the 2nd in Kolkata. For an Indian
+    // firm the 1st is yesterday, though the server's own day is still the 1st —
+    // the five-and-a-half hours T6.14 closed for every sweep.
+    const { service } = svc({ now: "2026-09-01T20:00:00.000Z", zone: "Asia/Kolkata" });
+    const attempt = (dueOn: string) =>
+      service.raise({
+        tenantId: TENANT,
+        workItemId: WI_COBALT,
+        askKind: "question",
+        prompt: "Confirm the GSTIN on the new branch",
+        documentKind: null,
+        dueOn,
+        actor: staff,
+      });
+    await expect(attempt("2026-09-01")).rejects.toBeInstanceOf(InvalidAskDueDate);
+    await expect(attempt("2026-09-01")).rejects.toThrow(/02 Sep 2026/);
+    const ok = await attempt("2026-09-02");
+    expect(ok.ask.dueOn).toBe("2026-09-02");
+  });
+
+  it("refuses a day that does not exist, and one that is not a day at all", async () => {
+    const { service } = svc();
+    for (const dueOn of ["2026-02-30", "2026-13-01", "next Friday", "2026-9-5"]) {
+      await expect(
+        service.raise({
+          tenantId: TENANT,
+          workItemId: WI_COBALT,
+          askKind: "question",
+          prompt: "Confirm the GSTIN on the new branch",
+          documentKind: null,
+          dueOn,
+          actor: staff,
+        }),
+      ).rejects.toMatchObject({ code: "INVALID_DUE_DATE", dueOn });
+    }
+  });
+
+  it("puts the day on the event, still without the prompt", async () => {
+    const { service, events } = svc();
+    await service.raise({
+      tenantId: TENANT,
+      workItemId: WI_COBALT,
+      askKind: "question",
+      prompt: "Which bank is the term loan with?",
+      documentKind: null,
+      dueOn: "2026-09-15",
+      actor: staff,
+    });
+    const event = events.recorded.find((e) => e.verb === "client_ask.raised");
+    expect(event?.payload).toMatchObject({ dueOn: "2026-09-15" });
+    expect(event?.payload).not.toHaveProperty("templateKey");
+    expect(JSON.stringify(event?.payload)).not.toContain("term loan");
+  });
+
+  it("records a missing day as null on the event, an answer rather than an absence", async () => {
+    const { service, events } = svc();
+    await openDocumentAsk(service);
+    const event = events.recorded.find((e) => e.verb === "client_ask.raised");
+    expect(event?.payload).toMatchObject({ dueOn: null });
+  });
+});
+
+describe("an ask a request template raises (raiseFromTemplate)", () => {
+  it("raises it once, as the SYSTEM, naming the template and no person", async () => {
+    const { service, events } = svc();
+    const first = await templateAsk(service);
+    expect(first.created).toBe(true);
+    expect(first.ask?.ask.raisedBy).toBeNull();
+    expect(first.ask?.raisedByName).toBeNull();
+    expect(first.ask?.ask.dueOn).toBe("2026-11-05");
+    expect(first.ask?.ask.fromTemplate).toEqual(OCTOBER);
+    // The client is still read from the work item, never passed in.
+    expect(first.ask?.ask.clientPartyId).toBe(COBALT);
+
+    const raised = events.recorded.filter((e) => e.verb === "client_ask.raised");
+    expect(raised).toHaveLength(1);
+    expect(raised[0]?.actorType).toBe("system");
+    expect(raised[0]?.actorId).toBeNull();
+  });
+
+  it("raises nothing the second time, and records nothing the second time", async () => {
+    // At-least-once: pg-boss redelivers and a pass re-reads what it has seen.
+    // A second ask for the same item on the same task is a second request on
+    // the client's screen for a thing they were already asked for.
+    const { service, store, events } = svc();
+    await templateAsk(service);
+    const again = await templateAsk(service);
+    expect(again).toEqual({ created: false, ask: null });
+    expect(store.asks).toHaveLength(1);
+    expect(events.verbs().filter((v) => v === "client_ask.raised")).toHaveLength(1);
+  });
+
+  it("raises another item of the same template on the same task", async () => {
+    const { service, store } = svc();
+    await templateAsk(service, { itemKey: "bank-statements" });
+    const other = await templateAsk(service, { itemKey: "sales-invoices" });
+    expect(other.created).toBe(true);
+    expect(store.asks).toHaveLength(2);
+  });
+
+  it("carries the day and the two KEYS on the event, and never the prompt", async () => {
+    const { service, events } = svc();
+    await templateAsk(service);
+    const event = events.recorded.find((e) => e.verb === "client_ask.raised");
+    expect(event?.payload).toMatchObject({
+      askKind: "document",
+      workItemId: WI_COBALT,
+      clientPartyId: COBALT,
+      documentKind: "books_input",
+      dueOn: "2026-11-05",
+      templateKey: "monthly-close",
+      itemKey: "bank-statements",
+    });
+    expect(JSON.stringify(event?.payload)).not.toContain("Bank statements for October");
+  });
+
+  it("ACCEPTS a due day already past: a late sweep must still ask, with the firm's own day", async () => {
+    // The clock says 1 September; the template's day was 5 August. A sweep that
+    // ran late must not leave the client un-asked, and must not move the day —
+    // that would be this product inventing a deadline.
+    const { service } = svc();
+    const late = await templateAsk(service, { dueOn: "2026-08-05" });
+    expect(late.created).toBe(true);
+    expect(late.ask?.ask.dueOn).toBe("2026-08-05");
+  });
+
+  it("still refuses a due day that is not a day", async () => {
+    const { service } = svc();
+    await expect(templateAsk(service, { dueOn: "2026-02-30" })).rejects.toBeInstanceOf(
+      InvalidAskDueDate,
+    );
+  });
+
+  it("validates the ask exactly as a person's ask is validated", async () => {
+    const { service } = svc();
+    const base = {
+      tenantId: TENANT,
+      workItemId: WI_COBALT,
+      dueOn: "2026-11-05",
+      template: OCTOBER,
+    };
+    await expect(
+      service.raiseFromTemplate({ ...base, prompt: "  ", askKind: "question", documentKind: null }),
+    ).rejects.toBeInstanceOf(InvalidAskPrompt);
+    await expect(
+      service.raiseFromTemplate({ ...base, prompt: "x", askKind: "telepathy", documentKind: null }),
+    ).rejects.toBeInstanceOf(InvalidAskKind);
+    await expect(
+      service.raiseFromTemplate({ ...base, prompt: "x", askKind: "document", documentKind: null }),
+    ).rejects.toBeInstanceOf(AskDocumentKindMismatch);
+    await expect(
+      service.raiseFromTemplate({ ...base, prompt: "x", askKind: "document", documentKind: "ledger" }),
+    ).rejects.toBeInstanceOf(InvalidAskKind);
+  });
+
+  it("refuses a work item this firm does not have", async () => {
+    const { service } = svc();
+    await expect(
+      service.raiseFromTemplate({
+        tenantId: TENANT,
+        workItemId: "00000000-0000-4000-8000-00000000dead",
+        prompt: "Bank statements for October 2026",
+        askKind: "document",
+        documentKind: "books_input",
+        dueOn: "2026-11-05",
+        template: OCTOBER,
+      }),
+    ).rejects.toBeInstanceOf(AskWorkItemNotFound);
+  });
+
+  it("reaches the client with its day and WITHOUT the template", async () => {
+    const { service } = svc();
+    await templateAsk(service);
+    const centre = await service.actionCentre(TENANT, MEERA);
+    const row = centre.awaitingYou[0];
+    expect(row?.dueOn).toBe("2026-11-05");
+    expect(row).not.toHaveProperty("fromTemplate");
   });
 });

@@ -7,6 +7,8 @@
 // `unmapped` takes `never`. `StaffGradeError` shipped without an entry and every
 // one of its refusals answered 500, because unit tests assert on the thrown
 // sentinel and only a real HTTP request ever sees a status code.
+import { longDay } from "../day";
+import type { DueDayRefusal } from "./model";
 
 export class ClientAskError extends Error {
   constructor(
@@ -26,7 +28,8 @@ export type ClientAskErrorCode =
   | "ASK_DOCUMENT_KIND_MISMATCH"
   | "ASK_ALREADY_SETTLED"
   | "ASK_DECISION_NOT_WANTED"
-  | "ASK_ANSWER_EMPTY";
+  | "ASK_ANSWER_EMPTY"
+  | "INVALID_DUE_DATE";
 
 export class AskNotFound extends ClientAskError {
   readonly askId: string;
@@ -106,6 +109,29 @@ export class AskDecisionNotWanted extends ClientAskError {
         `is a decision the firm may act on; recording one against a request for a document ` +
         `would leave a record saying the client agreed to something nobody asked them about.`,
     );
+  }
+}
+
+/**
+ * A due day that cannot stand (0385): not a real calendar day, or a day already
+ * gone on the firm's calendar. The two are one code because the answer to the
+ * caller is the same — choose another day, or leave it out — and the sentence
+ * says which it was.
+ */
+export class InvalidAskDueDate extends ClientAskError {
+  readonly dueOn: string;
+
+  constructor(dueOn: string, why: DueDayRefusal, firmToday: string | null) {
+    super(
+      "INVALID_DUE_DATE",
+      why === "not_a_day"
+        ? `dueOn ${JSON.stringify(dueOn)} is not a day. Send a calendar day that exists, as ` +
+            `YYYY-MM-DD, or leave it out: an ask with no due day is still an ask.`
+        : `dueOn ${longDay(dueOn)} is before today${firmToday === null ? "" : ` (${longDay(firmToday)})`} ` +
+            `on the firm's calendar. A day already gone would reach the client as overdue the ` +
+            `moment they read it: choose today or later, or leave it out.`,
+    );
+    this.dueOn = dueOn;
   }
 }
 

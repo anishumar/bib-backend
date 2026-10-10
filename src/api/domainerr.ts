@@ -456,6 +456,7 @@ export function mapError(err: unknown): MappedError {
       case "ASK_DOCUMENT_KIND_MISMATCH":
       case "ASK_DECISION_NOT_WANTED":
       case "ASK_ANSWER_EMPTY":
+      case "INVALID_DUE_DATE":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       // 404 AND NOT 403 FOR AN ASK THIS SESSION MAY NOT REACH. The row was
       // filtered by gate 4 in the database, so the service genuinely cannot tell

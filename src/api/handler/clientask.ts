@@ -34,6 +34,7 @@ export interface ClientAskDeps {
 }
 
 const WorkItemParam = z.object({ workItemId: z.string().uuid() });
+const IsoDay = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const AskParam = z.object({ askId: z.string().uuid() });
 
 const ResponseSchema = z
@@ -109,8 +110,33 @@ const AskSchema = z
         "decides whether what arrived was what it needed. A client who sent last quarter's " +
         "register would otherwise see the ask marked done.",
     }),
-    raisedByName: z.string().nullable(),
+    raisedByName: z.string().nullable().openapi({
+      description:
+        "Who asked. Null when a request template raised it (`fromTemplate` is set): the " +
+        "requests sweep asks on the firm's behalf and names no person. Also null when the " +
+        "account has been erased — a real answer, the shape the ledger's actor join has.",
+    }),
     raisedAt: z.string(),
+    dueOn: IsoDay.nullable().openapi({
+      description:
+        "The day you want it by, as YYYY-MM-DD, or null when none was stated. A DAY, never " +
+        "an instant: show it as written, never through a Date in the reader's zone. Set by a " +
+        "request template's due offset, or typed when raising by hand. The chaser still counts " +
+        "from when you asked (`raisedAt`), not from this day.",
+    }),
+    fromTemplate: z
+      .object({
+        templateKey: z.string().openapi({ description: "The request template's config key." }),
+        itemKey: z.string().openapi({ description: "The item's key inside that template." }),
+      })
+      .nullable()
+      .openapi({
+        description:
+          "The request template and item this ask was raised from, or null when a person " +
+          "raised it. One template item is asked at most once per task, so this pair is also " +
+          "why a second sweep raised nothing. Not on the client's surface: it is your own " +
+          "bookkeeping.",
+      }),
     firstAnsweredAt: z.string().nullable().openapi({
       description:
         "When they FIRST replied, never restated by a later one. It is the number a firm " +
@@ -148,9 +174,18 @@ const RaiseRequest = z
           "on the other two — the client does not choose where in your document store their " +
           "file lands, you did when you asked.",
       }),
-    // NO DUE DATE, and its absence is the API's own statement. No deadline this
-    // product invented reaches a client: the firm has never given its turnaround
-    // times, so "by Friday" would be a promise nobody made, quoted back at it.
+    // A DUE DAY ONLY WHEN YOU STATE ONE (0385, reversing T6.6's "no due date").
+    // No deadline this product invents reaches a client; one the firm types is
+    // the firm's own, and absent stays the ordinary answer.
+    dueOn: IsoDay.nullable()
+      .optional()
+      .openapi({
+        description:
+          "The day you want it by, as YYYY-MM-DD. Optional: leave it out and the ask has no due " +
+          "day, as every ask did before. A day that does not exist, or one before today on your " +
+          "firm's calendar (your firm's time zone, not the browser's), is 400 INVALID_DUE_DATE. " +
+          "The client sees it. Reminders still count from when you asked.",
+      }),
   })
   .openapi("RaiseClientAskRequest");
 
@@ -187,7 +222,10 @@ const raiseRoute = createRoute({
   },
   responses: {
     201: { description: "Raised", content: { "application/json": { schema: AskSchema } } },
-    400: errorResponse("Empty prompt, unknown kind, or a documentKind that does not fit"),
+    400: errorResponse(
+      "Empty prompt, unknown kind, a documentKind that does not fit, or a dueOn that is not a " +
+        "day or is before the firm's today (INVALID_DUE_DATE)",
+    ),
     401: errorResponse("No authenticated session"),
     403: errorResponse("No org chosen, or the role may not write work"),
     404: errorResponse("No such work item at this firm"),
@@ -247,6 +285,7 @@ export function registerClientAskRoutes(app: OpenAPIHono<AppEnv>, deps: ClientAs
       askKind: body.askKind,
       prompt: body.prompt,
       documentKind: body.documentKind ?? null,
+      dueOn: body.dueOn ?? null,
       actor: s.actor,
     });
     return c.json(toWire(record), 201);
@@ -284,6 +323,13 @@ export function toWire(r: AskRecord): z.infer<typeof AskSchema> {
     status: r.ask.status,
     raisedByName: r.raisedByName,
     raisedAt: r.ask.raisedAt,
+    dueOn: r.ask.dueOn,
+    // The keys only: the pinned version id is the firm's internal pin and no
+    // screen needs it to say where an ask came from.
+    fromTemplate:
+      r.ask.fromTemplate === null
+        ? null
+        : { templateKey: r.ask.fromTemplate.templateKey, itemKey: r.ask.fromTemplate.itemKey },
     firstAnsweredAt: r.ask.firstAnsweredAt,
     closedByName: r.closedByName,
     closedAt: r.ask.closedAt,

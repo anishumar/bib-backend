@@ -4610,6 +4610,22 @@ unchanged. `raised_at` is on the row and elapsed time is a fact, which is also a
 needs. **Raising an ask does not block the task**, deliberately: coupling them would make that the
 product's opinion rather than the firm's.
 
+**REVERSED 2026-10-10 (F1.3, migration 0385): an ask may carry `due_on`, a day the FIRM stated.**
+The reason above was that the firm had never given its turnaround times, so a date would be one
+this product invented. A request template (FinCompliance v3.2 §11, F1) is the firm writing its own
+day down — "the month's records by the 5th" — so the day is the firm's, published in its config;
+a person raising an ask by hand may also type one (optional; a real day, not before the FIRM's
+today, else `INVALID_DUE_DATE`, 400). NULL still means none stated, every older ask has none, and
+nothing invents one. **The chaser is unchanged: it still counts from `raised_at`.** Both wires
+carry `dueOn` (a DAY, read as `::text`). The same migration links an ask to the template it came
+from — `request_template_version_id` (pinned, composite FK to `config.version`), `_key` and
+`request_item_key`, all or none — with a partial UNIQUE index on (firm, task, template key, item
+key), so `ClientAskService.raiseFromTemplate` (the requests sweep's door, SYSTEM actor, `ON
+CONFLICT DO NOTHING`, `client_ask.raised` only when created) raises each item once per task; it
+accepts a due day already past, because a late sweep must still ask with the firm's own day.
+`raised_by` is NULL exactly for such an ask (a CHECK: a person or a template). The template is on
+the staff wire (`fromTemplate`, keys only) and never on the portal's.
+
 **RESPONSES ARE APPEND-ONLY BY GRANT**, the arrangement `files.document_version` and the `ledger`
 schema have. A client's answer is evidence, and "the wrong file, then the right one" is a history.
 `first_answered_at` is written `coalesce(first_answered_at, now())` so a later response never

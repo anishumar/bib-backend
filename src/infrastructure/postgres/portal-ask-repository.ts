@@ -65,6 +65,8 @@ interface Row {
   company_name: string | null;
   work_item_title: string;
   raised_at: string;
+  /** `due_on::text` — a DAY as `YYYY-MM-DD`, never a `Date`. */
+  due_on: string | null;
   last_reminded_at: string | null;
   responses: RawResponse[] | null;
 }
@@ -263,6 +265,11 @@ export class PostgresPortalAskRepository implements PortalAskRepository {
              ent.display_name AS company_name,
              wi.title         AS work_item_title,
              ${db.unsafe(isoInstant("a.raised_at", "raised_at"))},
+             -- The FIRM's stated day (0385), as text: a date column read as a
+             -- JS Date lands at UTC midnight and names the day before west of
+             -- Greenwich, on a CLIENT's screen. The template it came from is
+             -- not read here at all: it is the firm's bookkeeping.
+             a.due_on::text AS due_on,
              -- ── WHEN WE LAST REMINDED THEM, AND NOT HOW OFTEN ───────────
              --
              -- delivery.client_ask_chase (0065) carried a portal policy from
@@ -342,6 +349,7 @@ function toPortalRow(r: Row): PortalAskRow {
     companyName: r.company_name,
     workItemTitle: r.work_item_title,
     raisedAt: r.raised_at,
+    dueOn: r.due_on,
     lastRemindedAt: r.last_reminded_at,
     responses: (r.responses ?? []).map((x) => toResponseRecord(x, r.id)),
   };
