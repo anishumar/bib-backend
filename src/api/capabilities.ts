@@ -57,6 +57,9 @@ export const ROUTE_CAPABILITIES: ReadonlyMap<RouteKey, Capability> = new Map([
   // same for an account. Neither needs `credential.set`, which is the one that
   // hands over a login and is deliberately held alone.
   [routeKey("PUT", "/internal/v1/tenants/{tenantId}/status"), "tenant.provision" as const],
+  // FinCompliance's per-firm switch (0381): whoever brings a firm into being
+  // decides which platform modules it runs, as with suspending it.
+  [routeKey("PUT", "/internal/v1/tenants/{tenantId}/fin"), "tenant.provision" as const],
   [routeKey("PUT", "/internal/v1/users/{userId}/status"), "user.provision" as const],
 ]);
 

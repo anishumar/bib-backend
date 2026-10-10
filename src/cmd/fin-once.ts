@@ -51,11 +51,14 @@ async function main(): Promise<void> {
     const manual = intake.reduce((n, r) => n + r.manual, 0);
     const already = intake.reduce((n, r) => n + r.alreadyTaken, 0);
     const backlog = intake.filter((r) => r.more).length;
+    // The firms that took something in, not the firms visited: a firm with
+    // fin on and nothing new is not part of "across".
+    const firmsWithFiles = intake.filter((r) => r.taken > 0).length;
     if (intake.length > 0) {
       console.log(
         taken === 0
-          ? "  nothing to take in — every file supplied since fin was switched on has been."
-          : `  took in ${String(taken)} file(s) across ${String(intake.length)} firm(s)`,
+          ? `  nothing to take in at ${String(intake.length)} firm(s) — every file supplied since fin was switched on has been.`
+          : `  took in ${String(taken)} file(s) at ${String(firmsWithFiles)} of ${String(intake.length)} firm(s) with fin on`,
       );
     }
     if (manual > 0) console.log(`  ${String(manual)} of them fit no reader and wait for a person`);

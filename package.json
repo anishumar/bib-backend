@@ -14,6 +14,7 @@
     "worker:once": "tsx src/cmd/worker-once.ts",
     "worker:start": "node dist/cmd/worker.js",
     "fin:once": "tsx src/cmd/fin-once.ts",
+    "fin:pack": "tsx src/cmd/fin-pack-load.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "arch": "depcruise src --config .dependency-cruiser.cjs",

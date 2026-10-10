@@ -43,6 +43,7 @@ Each one names the tasks it blocks.
 - [ ] **Team:** the chaser sends no email (T4.4), so decide whether there is a "you have new requests" email. It is needed before real clients only.
 - [ ] **Team:** per-step desks. Today a job's steps go to whoever holds the job's task (if their grade fits), and only review goes to someone else (maker ≠ checker). Decide whether "Reconcile desk ≠ Process desk" is needed (F1.8).
 - [ ] **Team:** the extraction model is chosen by the scorecard per format (digital, scanned, photo), not up front.
+- [ ] **Team (found while building F0.10, not fin's bug):** `PUT /internal/v1/tenants/{id}/status` passes the caller's NAME as a system actor's id, and the ledger accepts a system actor only with a null id. So suspending or reinstating a firm through that route fails with a 500 on any real change, and no test calls it over HTTP. The fin switch avoids this by using the system actor with the caller in the payload (`by`). Fix the status route the same way.
 - [ ] **Team:** which document kind a client's books files are stored as. Fin skips the fee-wall kinds (`invoice`, `credit_note`, `proposal`, `engagement_letter`): those are the firm's own commercial documents, and only staff who see fees may open them. A request template (F1) that files purchase invoices as kind `invoice` would therefore hide them from fin. Options: file them as `other`, or add a `books_input` kind. Blocks F1.1.
 
 ---
@@ -87,12 +88,18 @@ Estimate: 3–4 days.
   - a Cloud Scheduler trigger every 10 minutes (no scheduler exists in Terraform yet)
   - IAM to run the job.
   ✔ `terraform plan` against `qa.tfvars` shows only fin resources. It is applied in F9.
-- [ ] **F0.10 Sandbox and pack loader.** Add a script that:
+- [x] **F0.10 Sandbox and pack loader.** Add a script that:
   - creates a sandbox tenant
   - creates companies A–E as clients
   - loads folders `00`–`07` month by month through asks and uploads.
   It refuses any path under `99_Ground_Truth`.
   ✔ The loader runs end to end. A test proves that a `99_` path is refused.
+  *Done 2026-10-10. `npm run fin:pack` works over HTTP against a running local API:
+  - it provisions the firm through `/internal` and switches fin on with the new `PUT /internal/v1/tenants/{id}/fin` (`tenant.provision`, ledger `tenant.fin_enabled` / `tenant.fin_disabled`, which F9.4 needs too);
+  - it signs in as a sandbox partner, creates companies A–E as clients and uploads folders 00–07 as kind `other`;
+  - it refuses a non-local API and an existing slug, and `--dry-run` uploads nothing.*
+  *First real run: 1,168 files uploaded in about 3 minutes. Six `fin:once` runs took in all 1,168: pdf 840, sheet 222, image 101, and manual 5 (the `company_profile.json` files, since JSON has no reader).*
+  *Still to come: the month-by-month replay through the monthly asks arrives with F1.*
 
 ## F1: Collection (core)
 
@@ -321,7 +328,7 @@ Estimate: 2–3 days.
   - Migrate QA.
   - Deploy the API, worker, fin job and frontend (manual gcloud deploys; the pre-push hook needs Node 22).
   ✔ `/version` shows the new build, and the fin job runs on schedule.
-- [ ] **F9.4 Enable for a test firm only.** Fin stays off for 10x's live firm.
+- [ ] **F9.4 Enable for a test firm only.** Fin stays off for 10x's live firm. Use `PUT /internal/v1/tenants/{id}/fin` with a key carrying `tenant.provision`.
   ✔ Check `fin_enabled` per tenant on QA.
 - [ ] **F9.5 Browser walk** as staff and as a client on the pack: every screen, the review load, and minutes per client-month.
 - [ ] **F9.6 Walkthrough with 10x.**
@@ -360,4 +367,5 @@ India pack (GST and TDS evaluators, Tally intake); GSTR-2B and IRAS register che
 | Date | Task | Commit | Note |
 |---|---|---|---|
 | 2026-10-10 | F0.1 | — | Plan written on `feat/fin`, from v3.2 checked against the code. |
-| 2026-10-10 | F0.2–F0.5, F0.7, F2.1, F2.2 | uncommitted | First vertical slice: an upload in a fin-enabled firm is taken in by `npm run fin:once`, routed, and listed at `GET /api/v1/fin/intake`. Migrations 0381–0382. `npm run check` passes (3560 tests) and `npm run test:integration` passes (1130) **on Node 22**. On Node 20, `tests/fx/feeds.test.ts` fails the same way on `main`, so that failure predates fin. |
+| 2026-10-10 | F0.2–F0.5, F0.7, F2.1, F2.2 | d530d7c | First vertical slice: an upload in a fin-enabled firm is taken in by `npm run fin:once`, routed, and listed at `GET /api/v1/fin/intake`. Migrations 0381–0382. `npm run check` passes (3560 tests) and `npm run test:integration` passes (1130) **on Node 22**. On Node 20, `tests/fx/feeds.test.ts` fails the same way on `main`, so that failure predates fin. |
+| 2026-10-10 | F0.10 | (this commit) | Training-pack loader and the `/internal` fin switch. Loaded all 1,168 pack files into a local sandbox, and fin took them all in (pdf 840 · sheet 222 · image 101 · manual 5). Found that `/internal/v1/tenants/{id}/status` cannot record its event (system actor with a non-null id); listed under open decisions. `check` 3574 and `test:integration` 1131 pass on Node 22. |

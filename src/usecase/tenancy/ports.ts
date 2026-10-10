@@ -40,6 +40,16 @@ export interface TenantRepository {
    * `TenantStanding`.
    */
   setStatus(tenantId: string, status: "active" | "suspended"): Promise<Tenant | null>;
+  /**
+   * FinCompliance's per-firm switch (0381): when it was switched on, or null
+   * when it is off. Undefined when there is no such firm.
+   */
+  finEnabledSince(tenantId: string): Promise<string | null | undefined>;
+  /**
+   * Switch fin on (stamping `now()` as the cut) or off (clearing it). Returns
+   * the switch as it now stands.
+   */
+  setFinEnabled(tenantId: string, enabled: boolean): Promise<string | null>;
 }
 
 export interface NewFirmSignatory {

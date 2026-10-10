@@ -13,6 +13,7 @@ import {
   PostgresIntakeRepository,
 } from "../../src/infrastructure/fin/postgres-intake";
 import { LedgerService } from "../../src/usecase/ledger/service";
+import { PostgresTenantRepository } from "../../src/infrastructure/postgres/tenant-repository";
 import { FinIntakeService } from "../../src/usecase/fin/intake";
 
 const cfg = load();
@@ -145,6 +146,18 @@ describe("the fin intake sweep, in Postgres", () => {
       routeBasis: "media_type",
     });
     expect(statement?.takenAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  });
+
+  it("is switched by the platform: on keeps its cut, off clears it, on again cuts afresh", async () => {
+    const tenants = new PostgresTenantRepository(app);
+    const cut = await tenants.finEnabledSince(firm);
+    expect(cut).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(await tenants.setFinEnabled(firm, true)).toBe(cut);
+    expect(await tenants.setFinEnabled(off, false)).toBeNull();
+    const fresh = await tenants.setFinEnabled(off, true);
+    expect(fresh).not.toBeNull();
+    expect(await tenants.setFinEnabled(off, false)).toBeNull();
+    expect(await tenants.finEnabledSince("00000000-0000-4000-8000-00000000dead")).toBeUndefined();
   });
 
   it("is append-only for the app role", async () => {

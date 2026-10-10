@@ -90,6 +90,21 @@ export class FakeTenantRepo implements TenantRepository {
     this.rows[index] = updated;
     return Promise.resolve(updated);
   }
+  /** FinCompliance's switch, by tenant id (0381). Absent means off. */
+  readonly finSince = new Map<string, string>();
+  finEnabledSince(tenantId: string): Promise<string | null | undefined> {
+    if (!this.rows.some((r) => r.id === tenantId)) return Promise.resolve(undefined);
+    return Promise.resolve(this.finSince.get(tenantId) ?? null);
+  }
+  setFinEnabled(tenantId: string, enabled: boolean): Promise<string | null> {
+    if (!enabled) {
+      this.finSince.delete(tenantId);
+      return Promise.resolve(null);
+    }
+    const since = this.finSince.get(tenantId) ?? "2026-10-10T12:00:00.000Z";
+    this.finSince.set(tenantId, since);
+    return Promise.resolve(since);
+  }
   setFirmSignatory(tenantId: string, userId: string, title: string): Promise<Tenant> {
     const index = this.rows.findIndex((r) => r.id === tenantId);
     const current = this.rows[index];

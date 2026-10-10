@@ -16,8 +16,11 @@
 -- behaviour. A timestamp rather than a boolean because the instant is also
 -- the CUT: fin takes the files stored FROM that moment, never a firm's years
 -- of earlier uploads, which were filed by hand and are already in its books.
--- It is set by the platform, not by a firm's own screen — the pilot is one
--- test firm — and there is deliberately no UPDATE grant for `bib_app`.
+-- It is set by the PLATFORM — `PUT /internal/v1/tenants/{id}/fin`, behind
+-- `tenant.provision` — never by a firm's own screen: the pilot is one test
+-- firm. `bib_app` holds UPDATE on all of `tenancy` (0001), so what keeps a firm
+-- from switching itself on is that no session route writes this column, with
+-- 0077's row wall behind it.
 --
 -- ── fin.intake_item: one row per stored file fin has picked up ──────────────
 --

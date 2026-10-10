@@ -5,6 +5,7 @@
 import type { Db } from "../../db/pool";
 import type { Tenant } from "../../domain/tenancy/model";
 import type { NewTenant, TenantRepository } from "../../usecase/tenancy/ports";
+import { isoInstant } from "./instant";
 
 interface TenantRow {
   id: string;
@@ -95,5 +96,29 @@ export class PostgresTenantRepository implements TenantRepository {
                 firm_signatory_user_id, firm_signatory_title
     `;
     return row ? toTenant(row) : null;
+  }
+
+  async finEnabledSince(tenantId: string): Promise<string | null | undefined> {
+    const [row] = await this.app<{ since: string | null }[]>`
+      SELECT ${this.app.unsafe(isoInstant("fin_enabled_since", "since"))}
+        FROM tenancy.tenant WHERE id = ${tenantId}
+    `;
+    return row === undefined ? undefined : row.since;
+  }
+
+  /**
+   * FinCompliance's switch (0381). On keeps an existing stamp — switching on
+   * twice must not move the cut forward and drop the files in between — and
+   * off clears it, so switching on again later cuts afresh. No tenant context,
+   * like `setStatus`: a platform act, which 0077's row wall allows.
+   */
+  async setFinEnabled(tenantId: string, enabled: boolean): Promise<string | null> {
+    const [row] = await this.app<{ since: string | null }[]>`
+      UPDATE tenancy.tenant
+         SET fin_enabled_since = CASE WHEN ${enabled} THEN coalesce(fin_enabled_since, now()) ELSE NULL END
+       WHERE id = ${tenantId}
+      RETURNING ${this.app.unsafe(isoInstant("fin_enabled_since", "since"))}
+    `;
+    return row?.since ?? null;
   }
 }

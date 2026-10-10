@@ -403,6 +403,36 @@ export class TenancyService {
   }
 
   /**
+   * Switch FinCompliance on or off for one firm (0381). A PLATFORM act, like
+   * suspending a firm: reached only through `/internal`, never from a session,
+   * so a firm cannot turn a module that reads its clients' books on by itself.
+   * Idempotent: setting the switch it already has records nothing and keeps
+   * the original cut.
+   *
+   * The actor is the SYSTEM and the provisioning caller's NAME rides in the
+   * payload (`by`): the ledger accepts a system actor only with a null id, so
+   * naming the caller as the actor's id would be refused at the write.
+   */
+  async setFinEnabled(
+    tenantId: string,
+    enabled: boolean,
+    by: string,
+  ): Promise<{ readonly finEnabledSince: string | null }> {
+    const current = await this.deps.tenants.finEnabledSince(tenantId);
+    if (current === undefined) throw new TenantNotFound(tenantId);
+    if ((current !== null) === enabled) return { finEnabledSince: current };
+    const since = await this.deps.tenants.setFinEnabled(tenantId, enabled);
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: enabled ? "tenant.fin_enabled" : "tenant.fin_disabled",
+      objectId: tenantId,
+      actor: SYSTEM_ACTOR,
+      payload: enabled ? { since, by } : { wasSince: current, by },
+    });
+    return { finEnabledSince: since };
+  }
+
+  /**
    * Disable a login across the platform, or let it back in.
    *
    * The other status with no writer. Deliberately NOT in the ledger: the ledger

@@ -463,6 +463,53 @@ const setTenantStatusRoute = createRoute({
   },
 });
 
+const setTenantFinRoute = createRoute({
+  method: "put",
+  path: "/internal/v1/tenants/{tenantId}/fin",
+  tags: ["tenancy"],
+  summary: "Switch FinCompliance on or off for a firm",
+  description:
+    "Platform surface, like suspending a firm: no session reaches it, so a firm cannot turn on " +
+    "a module that reads its clients' books by itself. On, the fin job takes in the files the " +
+    "firm's clients supply FROM THAT MOMENT (`finEnabledSince`); nothing stored earlier is ever " +
+    "taken in. Off, fin's routes answer 404 for the firm and the job skips it; what fin already " +
+    "took in is kept, and switching on again cuts afresh. Idempotent: setting the switch it " +
+    "already has is a 200, records nothing and keeps the original cut. The global " +
+    "BIB_FIN_ENABLED must also be on for anything to run.",
+  request: {
+    params: z.object({ tenantId: z.string().uuid() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({ enabled: z.boolean() }).openapi("SetTenantFinRequest"),
+        },
+      },
+      required: true,
+    },
+  },
+  responses: {
+    200: {
+      description: "The switch as it now stands",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              tenantId: z.string().uuid(),
+              finEnabledSince: z.string().nullable().openapi({
+                description: "When fin was switched on (ISO 8601), or null when it is off.",
+              }),
+            })
+            .openapi("TenantFin"),
+        },
+      },
+    },
+    400: errorResponse("Request failed validation"),
+    401: errorResponse("Missing or wrong platform key"),
+    403: errorResponse("That key does not carry tenant.provision"),
+    404: errorResponse("No such tenant"),
+  },
+});
+
 const setUserStatusRoute = createRoute({
   method: "put",
   path: "/internal/v1/users/{userId}/status",
@@ -965,6 +1012,17 @@ export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDep
     const input = c.req.valid("json");
     const user = await deps.service.ensureUser(input.email, input.displayName);
     return c.json(userWire(user), 201);
+  });
+
+  app.openapi(setTenantFinRoute, async (c) => {
+    const { tenantId } = c.req.valid("param");
+    const { enabled } = c.req.valid("json");
+    const fin = await deps.service.setFinEnabled(
+      tenantId,
+      enabled,
+      c.get("internalClient")?.name ?? "internal",
+    );
+    return c.json({ tenantId, finEnabledSince: fin.finEnabledSince }, 200);
   });
 
   app.openapi(setTenantStatusRoute, async (c) => {
