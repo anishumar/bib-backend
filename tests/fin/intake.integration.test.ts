@@ -50,7 +50,7 @@ async function store(
 ): Promise<string> {
   const [doc] = await owner<{ id: string }[]>`
     INSERT INTO files.document (tenant_id, title, origin, kind, party_id)
-    VALUES (${tenantId}, ${label}, ${over.origin ?? "uploaded"}, ${over.kind ?? "other"}, ${over.partyId === undefined ? null : over.partyId})
+    VALUES (${tenantId}, ${label}, ${over.origin ?? "uploaded"}, ${over.kind ?? "books_input"}, ${over.partyId === undefined ? null : over.partyId})
     RETURNING id
   `;
   const hash = Buffer.from(`${label}-${stamp}`).toString("hex").padEnd(64, "0").slice(0, 64);
@@ -84,6 +84,8 @@ beforeAll(async () => {
   versions.doc = await store(firm, "notes", { mediaType: "application/msword", filename: "notes.doc", partyId: client });
   versions.generated = await store(firm, "letter", { origin: "generated", partyId: client });
   versions.kyc = await store(firm, "passport", { kind: "identity_proof", partyId: client });
+  // Not filed for the books: fin leaves it alone (0383).
+  versions.notes = await store(firm, "meeting-notes", { kind: "other", partyId: client });
   versions.otherFirm = await store(other, "other-firm-invoice");
   versions.offFirm = await store(off, "off-firm-invoice");
 });

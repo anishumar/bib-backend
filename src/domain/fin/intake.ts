@@ -6,16 +6,12 @@
 //
 // ── WHICH FILES ──────────────────────────────────────────────────────────────
 //
-// A file a PERSON supplied (`origin = uploaded`), never one the product
-// rendered — fin reads what clients send, not the firm's own letters. And not
-// every kind: an identity proof is KYC and a brand asset is the firm's own
-// logo, neither of which is a client's books. The kinds behind the FEE WALL
-// (`showsFees`: proposal, letter, invoice, credit note) are left out too, and
-// that is the conservative half of a real question: those kinds are the
-// firm's own commercial documents, and listing them in fin would show a fee
-// document to staff the wall keeps it from. A client's purchase invoice must
-// therefore be filed under a non-fee kind — decided with the request templates
-// (F1), recorded in the plan's open decisions.
+// A file a PERSON supplied (`origin = uploaded`) of kind `books_input` (0383),
+// and nothing else. That kind exists so fin reads exactly what somebody filed
+// for the books: not the firm's own fee documents behind the wall (`invoice`,
+// `credit_note`, `proposal`, `engagement_letter`), not KYC, and not whatever
+// lands in `other`. Settled 2026-10-10 (option B in the plan); before it, fin
+// guessed from four general kinds and would have read meeting notes.
 //
 // ── WHICH READER ─────────────────────────────────────────────────────────────
 //
@@ -25,7 +21,6 @@
 // recognised means `manual`: the file goes to a person as "not read", and is
 // never discarded.
 import type { DocumentKind } from "../filestore/model";
-import { showsFees } from "../filestore/model";
 
 export type IntakeRoute = "sheet" | "pdf" | "image" | "archive" | "manual";
 
@@ -41,9 +36,7 @@ export interface RouteDecision {
 
 /** Whether fin takes a stored document of this kind and origin at all. */
 export function takesDocument(kind: DocumentKind, origin: "generated" | "uploaded"): boolean {
-  if (origin !== "uploaded") return false;
-  if (showsFees(kind)) return false;
-  return kind !== "identity_proof" && kind !== "brand_asset";
+  return origin === "uploaded" && kind === "books_input";
 }
 
 /** The kinds `takesDocument` accepts from an upload — the adapter's WHERE clause

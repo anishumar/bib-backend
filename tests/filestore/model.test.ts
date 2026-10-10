@@ -60,7 +60,16 @@ function checkMembers(constraint: string): string[] {
 
 describe("the closed sets agree with the database", () => {
   it("document kinds", () => {
-    expect(checkMembers("  kind        text NOT NULL CHECK")).toEqual(
+    // 0383 widened this one for `books_input` by dropping 0037's auto-named
+    // CHECK and adding it back BY NAME, the way 0084 did for brand assets — so
+    // the needle is the name, and the newest migration stating it wins.
+    expect(checkMembers("document_kind_check CHECK (kind IN (")).toEqual(
+      [...DOCUMENT_KINDS].sort(),
+    );
+  });
+
+  it("the kinds an ask files its upload under (0063, widened by 0383)", () => {
+    expect(checkMembers("client_ask_document_kind_check CHECK (document_kind IN (")).toEqual(
       [...DOCUMENT_KINDS].sort(),
     );
   });

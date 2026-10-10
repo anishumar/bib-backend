@@ -44,14 +44,7 @@ Each one names the tasks it blocks.
 - [ ] **Team:** per-step desks. Today a job's steps go to whoever holds the job's task (if their grade fits), and only review goes to someone else (maker ≠ checker). Decide whether "Reconcile desk ≠ Process desk" is needed (F1.8).
 - [ ] **Team:** the extraction model is chosen by the scorecard per format (digital, scanned, photo), not up front.
 - [ ] **Team (found while building F0.10, not fin's bug):** `PUT /internal/v1/tenants/{id}/status` passes the caller's NAME as a system actor's id, and the ledger accepts a system actor only with a null id. So suspending or reinstating a firm through that route fails with a 500 on any real change, and no test calls it over HTTP. The fin switch avoids this by using the system actor with the caller in the payload (`by`). Fix the status route the same way.
-- [ ] **Team:** which document kind a client's books files are stored as. Fin skips the fee-wall kinds (`invoice`, `credit_note`, `proposal`, `engagement_letter`): those are the firm's own commercial documents, and only staff who see fees may open them. A request template (F1) that files purchase invoices as kind `invoice` would therefore hide them from fin. Options: file them as `other`, or add a `books_input` kind. Blocks F1.1.
-
----
-
-## F0: Foundation
-
-Estimate: 3–4 days.
-
+- [x] **Team:** which document kind a client's books files are stored as. **Decided 2026-10-10 (Anish): option B, a new kind `books_input`.** It shipped in migration `0383_books_input_kind` (both CHECKs widened, and the parity tests now read the named constraints). It is outside the fee wall and not client-visible by default. Fin takes `books_input` and nothing else. The frontend has labels for it: "Client's books (invoices, statements, payroll)" for staff and "Records you sent" on the portal. The pack loader files as `books_input`.
 - [ ] **F0.1 Plan and board.** This file exists. Re-scope T4.3, T4.6, T4.7 and T4.10 in `docs/MERGE_BUILD-PLAN.md`, pointing to the F-ids. Bring `bib-docs/backend/MERGE_BUILD-PLAN.md` back in line with it.
   ✔ Both board files agree, and the four T-ids point here.
 - [x] **F0.2 Import wall.** Create `src/domain/fin/`, `src/usecase/fin/` and `src/infrastructure/fin/`. Add a dependency-cruiser rule `core-never-imports-fin` in `.dependency-cruiser.cjs`. Only `src/setup/fin.ts` and `src/setup/server.ts` may wire fin.
@@ -107,7 +100,7 @@ Estimate: 3–4 days. This is v3.2 §11.
 
 - [ ] **F1.1 `request_template` config kind (the 13th).**
   - Add it to `CONFIG_KINDS` (`domain/config/model.ts:53`) with a body validator in `validateBody`.
-  - The body is a list of items, each with `key`, `label`, `kind` (`document`, `question` or `approval`), `required`, `finHint`, `sendOffsetDays` and `dueOffsetDays`.
+  - The body is a list of items, each with `key`, `label`, `kind` (`document`, `question` or `approval`), `required`, `finHint`, `sendOffsetDays` and `dueOffsetDays`. A `document` item that feeds the books files its upload as `books_input` (0383).
   - Add a migration widening `entry_kind_check`.
   - Fix the stale "ten kinds" wording in CLAUDE.md.
   ✔ Validator tests refuse a duplicate key, an unknown kind, and a due date before the send date. Publish and read work over HTTP.
@@ -369,3 +362,4 @@ India pack (GST and TDS evaluators, Tally intake); GSTR-2B and IRAS register che
 | 2026-10-10 | F0.1 | — | Plan written on `feat/fin`, from v3.2 checked against the code. |
 | 2026-10-10 | F0.2–F0.5, F0.7, F2.1, F2.2 | d530d7c | First vertical slice: an upload in a fin-enabled firm is taken in by `npm run fin:once`, routed, and listed at `GET /api/v1/fin/intake`. Migrations 0381–0382. `npm run check` passes (3560 tests) and `npm run test:integration` passes (1130) **on Node 22**. On Node 20, `tests/fx/feeds.test.ts` fails the same way on `main`, so that failure predates fin. |
 | 2026-10-10 | F0.10 | (this commit) | Training-pack loader and the `/internal` fin switch. Loaded all 1,168 pack files into a local sandbox, and fin took them all in (pdf 840 · sheet 222 · image 101 · manual 5). Found that `/internal/v1/tenants/{id}/status` cannot record its event (system actor with a non-null id); listed under open decisions. `check` 3574 and `test:integration` 1131 pass on Node 22. |
+| 2026-10-10 | decision | (this commit) | Document kind for books files: option B. `0383_books_input_kind`; fin takes only `books_input`. Frontend `feat/fin` adds the labels and regenerated API types. Checked against the real API: a `books_input` upload is taken in and an `other` upload is left alone. The 1,168 sandbox files were loaded as `other` before this, so their intake items stand; a fresh `fin:pack` files as `books_input`. `check` 3575 and `test:integration` 1131 pass. |

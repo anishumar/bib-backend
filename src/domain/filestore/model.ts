@@ -46,7 +46,11 @@ export type DocumentKind =
   | "working_paper"
   | "correspondence"
   | "brand_asset"
-  | "other";
+  | "other"
+  /** A file a client sends for their BOOKS (0383): purchase and sales
+   *  invoices, statements, payroll, receipts. FinCompliance reads this kind and
+   *  no other. Not the firm's own `invoice`, which is behind the fee wall. */
+  | "books_input";
 
 export const DOCUMENT_KINDS: readonly DocumentKind[] = [
   "proposal",
@@ -59,6 +63,7 @@ export const DOCUMENT_KINDS: readonly DocumentKind[] = [
   "correspondence",
   "brand_asset",
   "other",
+  "books_input",
 ];
 
 /**
@@ -187,6 +192,9 @@ export function clientVisibleByDefault(kind: DocumentKind): boolean {
     case "correspondence":
     case "brand_asset":
     case "other":
+    case "books_input":
+      // books_input (0383): the client supplied it and already holds it,
+      // identity_proof's reason.
       return false;
   }
 }
@@ -250,6 +258,10 @@ export function showsFees(kind: DocumentKind): boolean {
     case "correspondence":
     case "brand_asset":
     case "other":
+    case "books_input":
+      // books_input (0383) is the client's data, not the firm's price: a
+      // bookkeeper who does not see the firm's fees still reads a client's
+      // purchase invoices.
       return false;
   }
 }

@@ -24,7 +24,7 @@
 //     every file again and fin would take each in twice; pick a new --slug;
 //   * the answer key: `99_Ground_Truth` is never walked (see cmd/fin-pack.ts).
 //
-// Folders 00-07 go up in pack order, as kind `other` against each company. The
+// Folders 00-07 go up in pack order, as kind `books_input` against each company. The
 // month-by-month replay through the monthly asks comes with F1.
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -229,7 +229,7 @@ async function main(): Promise<void> {
       const bytes = readFileSync(f.absPath);
       form.set("file", new Blob([bytes], { type: mediaTypeFor(f.relPath) }), basename(f.relPath));
       form.set("title", f.relPath);
-      form.set("kind", "other");
+      form.set("kind", "books_input");
       form.set("partyId", party.partyId);
       const res = await api.upload(form);
       if (res.ok) uploaded += 1;

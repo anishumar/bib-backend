@@ -48,17 +48,16 @@ describe("which reader a file goes to", () => {
 });
 
 describe("which files fin takes", () => {
-  it("takes only what a person supplied", () => {
-    expect(takesDocument("other", "uploaded")).toBe(true);
-    expect(takesDocument("other", "generated")).toBe(false);
+  it("takes books files a person supplied, and nothing the product rendered", () => {
+    expect(takesDocument("books_input", "uploaded")).toBe(true);
+    expect(takesDocument("books_input", "generated")).toBe(false);
   });
 
-  it("leaves out KYC, the firm's own brand, and every kind behind the fee wall", () => {
-    const left: DocumentKind[] = ["identity_proof", "brand_asset", "proposal", "engagement_letter", "invoice", "credit_note"];
-    for (const kind of left) expect(takesDocument(kind, "uploaded"), kind).toBe(false);
-    expect([...takenKinds(DOCUMENT_KINDS)].sort()).toEqual(
-      ["correspondence", "other", "statutory_filing", "working_paper"].sort(),
-    );
+  it("takes no other kind: not the fee wall's, not KYC, not whatever lands in `other` (0383)", () => {
+    for (const kind of DOCUMENT_KINDS.filter((k): k is DocumentKind => k !== "books_input")) {
+      expect(takesDocument(kind, "uploaded"), kind).toBe(false);
+    }
+    expect(takenKinds(DOCUMENT_KINDS)).toEqual(["books_input"]);
   });
 });
 
@@ -75,7 +74,7 @@ function file(over: Partial<StoredFile> = {}): StoredFile {
     byteSize: 48_213,
     filename: "INV-25-1001.pdf",
     title: "Purchase invoice",
-    kind: "other",
+    kind: "books_input",
     origin: "uploaded",
     ...over,
   };
@@ -143,7 +142,12 @@ describe("the intake sweep", () => {
 
   it("does not take what a person did not supply, or a kind it leaves out", async () => {
     const { service, store } = svc();
-    store.files.push(file({ origin: "generated" }), file({ kind: "identity_proof" }), file({ kind: "invoice" }));
+    store.files.push(
+      file({ origin: "generated" }),
+      file({ kind: "identity_proof" }),
+      file({ kind: "invoice" }),
+      file({ kind: "other" }),
+    );
     const [report] = await service.sweep();
     expect(report).toMatchObject({ taken: 0 });
   });
