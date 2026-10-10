@@ -98,18 +98,26 @@ Each one names the tasks it blocks.
 
 Estimate: 3–4 days. This is v3.2 §11.
 
-- [ ] **F1.1 `request_template` config kind (the 13th).**
+- [x] **F1.1 `request_template` config kind (the 13th).**
   - Add it to `CONFIG_KINDS` (`domain/config/model.ts:53`) with a body validator in `validateBody`.
   - The body is a list of items, each with `key`, `label`, `kind` (`document`, `question` or `approval`), `required`, `finHint`, `sendOffsetDays` and `dueOffsetDays`. A `document` item that feeds the books files its upload as `books_input` (0383).
   - Add a migration widening `entry_kind_check`.
   - Fix the stale "ten kinds" wording in CLAUDE.md.
   ✔ Validator tests refuse a duplicate key, an unknown kind, and a due date before the send date. Publish and read work over HTTP.
-- [ ] **F1.2 Step → template reference.** A `WorkflowStep` (or a checklist sub-step) carries an optional `requestTemplateKey`, and the job pins the template version.
+  *Done 2026-10-10 by Agent A (`b1d852f`, merged in `7d34df0`), migration `0384`. Exports: `RequestTemplateBody`, `readRequestTemplate`, `requestDates`, and limits of 30 items, 500-character labels, send 0–90 and due 1–120. All six item fields are required; a question or approval item must say `documentKind: null`. A new parity test reads the newest one-line `ADD CONSTRAINT entry_kind_check CHECK`, so later widenings must keep that form. Nothing is seeded.*
+- [x] **F1.2 Step → template reference.** A `WorkflowStep` (or a checklist sub-step) carries an optional `requestTemplateKey`, and the job pins the template version.
   ✔ Validator tests pass. A job pinned to version 1 keeps version 1 after version 2 is published.
-- [ ] **F1.3 Ask fields.** Add a migration for `client_ask.due_on`, plus the template version and item-key reference. Add a unique key on `(tenant_id, work_item_id, template_item_key)`. Write the reversal of T6.6 into the migration header and into CLAUDE.md.
+  *Done 2026-10-10 by Agent A. The link is on the STEP only; sub-steps can follow if 10x asks. It holds a config key read live, and the ASK pins the version (0385). It is checked for shape only. `toResolvedTemplate` does not carry it into the orchestrator, so the sweep reads the job's pinned body itself.*
+- [x] **F1.3 Ask fields.** Add a migration for `client_ask.due_on`, plus the template version and item-key reference. Add a unique key on `(tenant_id, work_item_id, template_item_key)`. Write the reversal of T6.6 into the migration header and into CLAUDE.md.
   ✔ The integration test refuses a duplicate. The old asks with no template still read correctly.
+  *Done 2026-10-10 by Agent B (`9b3d9cf`, merged in `c3770cb`), migration `0385`.*
+  - *`raised_by` is now nullable, but only on an ask a template raised (CHECK: a person or a template).*
+  - *`raiseFromTemplate` → `{created:true, ask} | {created:false, ask:null}`. It is idempotent on `client_ask_template_item_once`, and a race test proves one row and one event.*
+  - *A staff `dueOn` before the firm's today is refused with `INVALID_DUE_DATE` (400). A template ask accepts a past due day.*
+  - *The portal wire carries `dueOn` only; the staff wire also carries `fromTemplate {templateKey, itemKey}`.*
+  - *Not done: the portal month view has no `dueOn` yet.*
 - [ ] **F1.4 Requests sweep.**
-  - New queue `delivery.requests` and a cron setting `BIB_WORKER_REQUESTS_CRON` in `setup/worker.ts`.
+  - New queue `delivery.requests` in `setup/worker.ts`, scheduled on the escalation cron as the chaser and the nudge are (one daily knob, not a new one).
   - It runs an anti-join: period work items whose step names a template, and items not yet raised on or after the send date.
   - It raises asks through `ClientAskService.raise`, and also runs from `worker:once`.
   ✔ Running it twice raises the asks once. A ledger event is written only for rows actually created.
@@ -395,3 +403,4 @@ India pack (GST and TDS evaluators, Tally intake); GSTR-2B and IRAS register che
 | 2026-10-10 | F0.2–F0.5, F0.7, F2.1, F2.2 | d530d7c | First vertical slice: an upload in a fin-enabled firm is taken in by `npm run fin:once`, routed, and listed at `GET /api/v1/fin/intake`. Migrations 0381–0382. `npm run check` passes (3560 tests) and `npm run test:integration` passes (1130) **on Node 22**. On Node 20, `tests/fx/feeds.test.ts` fails the same way on `main`, so that failure predates fin. |
 | 2026-10-10 | F0.10 | (this commit) | Training-pack loader and the `/internal` fin switch. Loaded all 1,168 pack files into a local sandbox, and fin took them all in (pdf 840 · sheet 222 · image 101 · manual 5). Found that `/internal/v1/tenants/{id}/status` cannot record its event (system actor with a non-null id); listed under open decisions. `check` 3574 and `test:integration` 1131 pass on Node 22. |
 | 2026-10-10 | decision | (this commit) | Document kind for books files: option B. `0383_books_input_kind`; fin takes only `books_input`. Frontend `feat/fin` adds the labels and regenerated API types. Checked against the real API: a `books_input` upload is taken in and an `other` upload is left alone. The 1,168 sandbox files were loaded as `other` before this, so their intake items stand; a fresh `fin:pack` files as `books_input`. `check` 3575 and `test:integration` 1131 pass. |
+| 2026-10-10 | F1.1–F1.3 | 7d34df0, c3770cb | Built by two agents in parallel worktrees against the F1 contract, then merged without conflicts. Merged gates: `check` 3637 and `test:integration` 1153 on Node 22. |
