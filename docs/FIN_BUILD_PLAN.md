@@ -122,6 +122,38 @@ Estimate: 3–4 days. This is v3.2 §11.
 - [ ] **F1.8 Per-step desk (only if the decision above says yes).** Extend the owner rule so that a step can name its own Dept or desk.
   ✔ Two steps of one job land on two different people.
 
+### F1 contract (fixed 2026-10-10, before the work was split)
+
+Agents A and B and the sweep (C) build against these shapes. A change goes through the plan owner, not into one branch.
+
+**`request_template` body** (`domain/config/model.ts`, Agent A):
+```ts
+interface RequestTemplateItem {
+  key: string;            // STEP_KEY_PATTERN, unique within the template
+  label: string;          // what the client reads; trimmed, 1–500 chars
+  askKind: "document" | "question" | "approval";
+  documentKind: DocumentKind | null;  // present exactly when askKind = "document"
+  sendOffsetDays: number; // integer 0–90, counted from the period's LAST day
+  dueOffsetDays: number;  // integer 1–120, and greater than sendOffsetDays
+}
+interface RequestTemplateBody { label: string; items: RequestTemplateItem[] }  // 1–30 items
+```
+- No `required` and no `finHint`. Nothing reads them yet, and this codebase refuses a field designed against no consumer. They come with their consumers.
+- Pure helper `requestDates(periodEnd, item) → { sendOn, dueOn }`, using `addDays` from `domain/scheduler/model.ts`.
+- **Example:** October's "Monthly close" has `periodEnd` 2025-10-31, `sendOffsetDays` 1 and `dueOffsetDays` 5. The client is asked on 1 Nov, due 5 Nov.
+
+**Step link** (Agent A): `WorkflowStep.requestTemplateKey: string | null`. Absent or null means none, so every published process still reads. It holds a config KEY, read live like `verificationPolicyKey`: the ASK records the version it was raised from.
+
+**Ask fields** (Agent B, migration `0385`): `delivery.client_ask` gains
+- `due_on date`
+- `request_template_version_id uuid`, with a composite FK to `config.version (id, tenant_id)`
+- `request_template_key text`
+- `request_item_key text`
+
+The last three are all set or all null. A partial UNIQUE index on `(tenant_id, work_item_id, request_template_key, request_item_key)` makes the sweep idempotent. `ClientAskService.raiseFromTemplate(...)` returns `{ created: boolean }` and writes `client_ask.raised` only when created. The staff and portal wire shapes gain `dueOn: string | null`.
+
+**Migrations:** A takes `0384`, B takes `0385`. The sweep (C) takes `0386` only if it needs one.
+
 ## F2: Intake and standardise (T4.7)
 
 Estimate: 4–5 days, plus 6–10 days of readers, plus scan tuning. This is v3.2 §12.
