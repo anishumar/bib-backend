@@ -3,13 +3,16 @@
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
 import type { DocumentKind } from "../../domain/filestore/model";
+import { INTAKE_ROUTES } from "../../domain/fin/intake";
 import type { IntakeRoute, RouteBasis } from "../../domain/fin/intake";
 import type {
   FinFirms,
   IntakeCandidate,
   IntakeCandidateSource,
+  IntakeFilter,
   IntakeItemView,
   IntakeRepository,
+  IntakeSummary,
   NewIntakeItem,
 } from "../../usecase/fin/ports";
 import { isoInstant } from "../postgres/instant";
@@ -36,12 +39,13 @@ export class PostgresFinFirms implements FinFirms {
     return rows.map((r) => r.id);
   }
 
-  async isEnabled(tenantId: string): Promise<boolean> {
-    const [row] = await this.app<{ on: boolean }[]>`
-      SELECT (status = 'active' AND fin_enabled_since IS NOT NULL) AS on
+  async enabledSince(tenantId: string): Promise<string | null> {
+    const [row] = await this.app<{ since: string | null }[]>`
+      SELECT CASE WHEN status = 'active'
+                  THEN ${this.app.unsafe(isoInstant("fin_enabled_since"))} END AS since
         FROM tenancy.tenant WHERE id = ${tenantId}
     `;
-    return row?.on === true;
+    return row?.since ?? null;
   }
 }
 
@@ -130,7 +134,22 @@ export class PostgresIntakeRepository implements IntakeRepository {
     });
   }
 
-  async recent(tenantId: string, limit: number): Promise<readonly IntakeItemView[]> {
+  async summary(tenantId: string, clientPartyId: string | null): Promise<IntakeSummary> {
+    return withTenant(this.app, tenantId, async (db) => {
+      await db`SELECT set_config('statement_timeout', ${String(FIN_READ_TIMEOUT_MS)}, true)`;
+      const rows = await db<{ route: IntakeRoute; n: number }[]>`
+        SELECT route, count(*)::int AS n
+          FROM fin.intake_item
+         WHERE (${clientPartyId}::uuid IS NULL OR client_party_id = ${clientPartyId}::uuid)
+         GROUP BY route
+      `;
+      const byRoute = Object.fromEntries(INTAKE_ROUTES.map((r) => [r, 0])) as Record<IntakeRoute, number>;
+      for (const r of rows) byRoute[r.route] = r.n;
+      return { total: rows.reduce((n, r) => n + r.n, 0), byRoute };
+    });
+  }
+
+  async list(tenantId: string, filter: IntakeFilter): Promise<readonly IntakeItemView[]> {
     return withTenant(this.app, tenantId, async (db) => {
       await db`SELECT set_config('statement_timeout', ${String(FIN_READ_TIMEOUT_MS)}, true)`;
       const rows = await db<ItemRow[]>`
@@ -150,8 +169,15 @@ export class PostgresIntakeRepository implements IntakeRepository {
           JOIN files.document_version v ON v.id = i.document_version_id AND v.tenant_id = i.tenant_id
           JOIN files.document d ON d.id = v.document_id AND d.tenant_id = v.tenant_id
           LEFT JOIN core.party p ON p.id = i.client_party_id AND p.tenant_id = i.tenant_id
+         WHERE (${filter.clientPartyId}::uuid IS NULL OR i.client_party_id = ${filter.clientPartyId}::uuid)
+           AND (${filter.route}::text IS NULL OR i.route = ${filter.route}::text)
+           -- The cursor is the previous page's last row, compared at that row's
+           -- own precision. An id this firm does not hold matches no row, so
+           -- the page is empty rather than another firm's.
+           AND (${filter.before}::uuid IS NULL OR (i.created_at, i.id) < (
+                 SELECT c.created_at, c.id FROM fin.intake_item c WHERE c.id = ${filter.before}::uuid))
          ORDER BY i.created_at DESC, i.id DESC
-         LIMIT ${limit}
+         LIMIT ${filter.limit}
       `;
       return rows.map((r) => ({
         id: r.id,

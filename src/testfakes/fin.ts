@@ -6,12 +6,16 @@
 // conflict — and nothing else. RLS and the grants are database properties,
 // proven against real Postgres in tests/fin/intake.integration.test.ts.
 import type { DocumentKind } from "../domain/filestore/model";
+import { INTAKE_ROUTES } from "../domain/fin/intake";
+import type { IntakeRoute } from "../domain/fin/intake";
 import type {
   FinFirms,
   IntakeCandidate,
   IntakeCandidateSource,
+  IntakeFilter,
   IntakeItemView,
   IntakeRepository,
+  IntakeSummary,
   NewIntakeItem,
 } from "../usecase/fin/ports";
 
@@ -21,8 +25,8 @@ export class FakeFinFirms implements FinFirms {
   enabledFirmIds(): Promise<readonly string[]> {
     return Promise.resolve([...this.enabled]);
   }
-  isEnabled(tenantId: string): Promise<boolean> {
-    return Promise.resolve(this.enabled.has(tenantId));
+  enabledSince(tenantId: string): Promise<string | null> {
+    return Promise.resolve(this.enabled.has(tenantId) ? "2026-10-10T12:00:00.000Z" : null);
   }
 }
 
@@ -74,11 +78,20 @@ export class FakeFinIntakeStore implements IntakeCandidateSource, IntakeReposito
     return Promise.resolve(true);
   }
 
-  recent(tenantId: string, limit: number): Promise<readonly IntakeItemView[]> {
-    const views = this.items
+  /** Newest first is insertion order reversed, which is what `created_at` gives
+   *  the adapter. */
+  list(tenantId: string, filter: IntakeFilter): Promise<readonly IntakeItemView[]> {
+    let rows = this.items
       .filter((i) => i.tenantId === tenantId)
-      .reverse()
-      .slice(0, limit)
+      .filter((i) => filter.clientPartyId === null || i.clientPartyId === filter.clientPartyId)
+      .filter((i) => filter.route === null || i.route === filter.route)
+      .reverse();
+    if (filter.before !== null) {
+      const at = rows.findIndex((i) => i.id === filter.before);
+      rows = at === -1 ? [] : rows.slice(at + 1);
+    }
+    const views = rows
+      .slice(0, filter.limit)
       .map((i): IntakeItemView => {
         const file = this.files.find((f) => f.documentVersionId === i.documentVersionId);
         return {
@@ -97,5 +110,14 @@ export class FakeFinIntakeStore implements IntakeCandidateSource, IntakeReposito
         };
       });
     return Promise.resolve(views);
+  }
+
+  summary(tenantId: string, clientPartyId: string | null): Promise<IntakeSummary> {
+    const rows = this.items
+      .filter((i) => i.tenantId === tenantId)
+      .filter((i) => clientPartyId === null || i.clientPartyId === clientPartyId);
+    const byRoute = Object.fromEntries(INTAKE_ROUTES.map((r) => [r, 0])) as Record<IntakeRoute, number>;
+    for (const r of rows) byRoute[r.route] += 1;
+    return Promise.resolve({ total: rows.length, byRoute });
   }
 }

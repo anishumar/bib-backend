@@ -9,7 +9,9 @@ export interface FinFirms {
   /** Active firms with fin switched on — the one read above RLS, ids only, as
    *  every sweep's tenant list is. */
   enabledFirmIds(): Promise<readonly string[]>;
-  isEnabled(tenantId: string): Promise<boolean>;
+  /** When fin was switched on for this firm (ISO 8601), or null when it is off
+   *  or the firm is not active. */
+  enabledSince(tenantId: string): Promise<string | null>;
 }
 
 /** A stored file fin has not taken in yet. */
@@ -64,9 +66,27 @@ export interface IntakeItemView {
   readonly takenAt: string;
 }
 
+/** Which intake items a staff screen asks for, newest first. */
+export interface IntakeFilter {
+  readonly clientPartyId: string | null;
+  readonly route: IntakeRoute | null;
+  /** The id of the last item on the previous page; null for the newest page.
+   *  The adapter reads that row's own instant, so no rounding can skip or
+   *  repeat a row between pages. */
+  readonly before: string | null;
+  readonly limit: number;
+}
+
+/** How many files fin has taken in, by reader — for one client or the firm. */
+export interface IntakeSummary {
+  readonly total: number;
+  readonly byRoute: Readonly<Record<IntakeRoute, number>>;
+}
+
 export interface IntakeRepository {
   /** True when the row was created; false when this version was already taken
    *  in (a second run, or two runs at once). Never throws for that case. */
   insert(item: NewIntakeItem): Promise<boolean>;
-  recent(tenantId: string, limit: number): Promise<readonly IntakeItemView[]>;
+  list(tenantId: string, filter: IntakeFilter): Promise<readonly IntakeItemView[]>;
+  summary(tenantId: string, clientPartyId: string | null): Promise<IntakeSummary>;
 }

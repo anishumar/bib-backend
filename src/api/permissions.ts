@@ -943,6 +943,7 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("GET", "/api/v1/fx/quote"), "party:read" as const],
   // FinCompliance (docs/FIN_BUILD_PLAN.md). Registered only when the kill switch
   // is on; a firm with fin off answers 404 from the service.
+  [routeKey("GET", "/api/v1/fin/status"), "books:read" as const],
   [routeKey("GET", "/api/v1/fin/intake"), "books:read" as const],
   [routeKey("GET", "/api/v1/dashboard/overview"), "party:read" as const],
   [routeKey("GET", "/api/v1/dashboard/mrr/{axis}"), "party:read" as const],

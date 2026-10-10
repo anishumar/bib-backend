@@ -178,17 +178,53 @@ describe("the intake sweep", () => {
   });
 });
 
+const ALL = { clientPartyId: null, route: null, before: null } as const;
+
 describe("reading the intake list", () => {
   it("answers a firm with fin on, newest first", async () => {
     const { service, store } = svc();
     store.files.push(file({ filename: "first.pdf" }), file({ filename: "second.pdf" }));
     await service.sweep();
-    const items = await service.recent(FIRM, 10);
-    expect(items.map((i) => i.filename)).toEqual(["second.pdf", "first.pdf"]);
+    const page = await service.intake(FIRM, { ...ALL, limit: 10 });
+    expect(page.items.map((i) => i.filename)).toEqual(["second.pdf", "first.pdf"]);
+    expect(page.nextBefore).toBeNull();
   });
 
-  it("refuses a firm with fin off as not there", async () => {
+  it("pages without skipping or repeating a file", async () => {
+    const { service, store } = svc();
+    store.files.push(file({ filename: "a.pdf" }), file({ filename: "b.pdf" }), file({ filename: "c.pdf" }));
+    await service.sweep();
+    const first = await service.intake(FIRM, { ...ALL, limit: 2 });
+    expect(first.items.map((i) => i.filename)).toEqual(["c.pdf", "b.pdf"]);
+    expect(first.nextBefore).toBe(first.items[1]?.id);
+    const second = await service.intake(FIRM, { ...ALL, before: first.nextBefore, limit: 2 });
+    expect(second.items.map((i) => i.filename)).toEqual(["a.pdf"]);
+    expect(second.nextBefore).toBeNull();
+  });
+
+  it("filters by reader and by client, and counts the whole filtered set, not the page", async () => {
+    const { service, store } = svc();
+    const other = "00000000-0000-4000-8000-0000000000c2";
+    store.files.push(
+      file(),
+      file({ mediaType: "application/msword", filename: "notes.doc" }),
+      file({ mediaType: "text/csv", filename: "bank.csv", clientPartyId: other }),
+    );
+    await service.sweep();
+    const manual = await service.intake(FIRM, { ...ALL, route: "manual", limit: 10 });
+    expect(manual.items.map((i) => i.filename)).toEqual(["notes.doc"]);
+    const theirs = await service.intake(FIRM, { ...ALL, clientPartyId: other, limit: 1 });
+    expect(theirs.items.map((i) => i.filename)).toEqual(["bank.csv"]);
+    expect(theirs.summary).toEqual({ total: 1, byRoute: { sheet: 1, pdf: 0, image: 0, archive: 0, manual: 0 } });
+    const firmWide = await service.intake(FIRM, { ...ALL, limit: 1 });
+    expect(firmWide.summary.total).toBe(3);
+    expect(firmWide.summary.byRoute).toMatchObject({ pdf: 1, sheet: 1, manual: 1 });
+  });
+
+  it("says since when fin is on, and refuses a firm with fin off as not there", async () => {
     const { service } = svc();
-    await expect(service.recent(OTHER, 10)).rejects.toBeInstanceOf(FinNotEnabled);
+    expect((await service.status(FIRM)).enabledSince).toMatch(/^\d{4}-/);
+    await expect(service.status(OTHER)).rejects.toBeInstanceOf(FinNotEnabled);
+    await expect(service.intake(OTHER, { ...ALL, limit: 10 })).rejects.toBeInstanceOf(FinNotEnabled);
   });
 });

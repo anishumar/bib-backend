@@ -25,8 +25,10 @@ import type { EventSink } from "../ledger/ports";
 import type {
   FinFirms,
   IntakeCandidateSource,
+  IntakeFilter,
   IntakeItemView,
   IntakeRepository,
+  IntakeSummary,
 } from "./ports";
 
 /** How many files one run takes in per firm. A month-end batch larger than
@@ -125,9 +127,35 @@ export class FinIntakeService {
     return { tenantId, taken, manual, alreadyTaken, more: candidates.length >= limit };
   }
 
-  /** The files fin has taken in for this firm, newest first. */
-  async recent(tenantId: string, limit: number): Promise<readonly IntakeItemView[]> {
-    if (!(await this.deps.firms.isEnabled(tenantId))) throw new FinNotEnabled();
-    return this.deps.items.recent(tenantId, limit);
+  /** Whether fin is on for this firm, and since when. A firm with it off is
+   *  told fin is not there (`FinNotEnabled`, a 404), which is also how the
+   *  staff screens know to hide it. */
+  async status(tenantId: string): Promise<{ readonly enabledSince: string }> {
+    const since = await this.deps.firms.enabledSince(tenantId);
+    if (since === null) throw new FinNotEnabled();
+    return { enabledSince: since };
   }
+
+  /**
+   * The files fin has taken in for this firm, newest first, a page at a time,
+   * with the counts by reader for the same client filter (never for the page
+   * alone: "12 wait for a person" must not change as somebody scrolls).
+   */
+  async intake(tenantId: string, filter: IntakeFilter): Promise<IntakePage> {
+    await this.status(tenantId);
+    // One more than the page, to know whether there is a next one without a
+    // second query.
+    const rows = await this.deps.items.list(tenantId, { ...filter, limit: filter.limit + 1 });
+    const items = rows.slice(0, filter.limit);
+    const last = items.at(-1);
+    const summary = await this.deps.items.summary(tenantId, filter.clientPartyId);
+    return { items, summary, nextBefore: rows.length > filter.limit && last !== undefined ? last.id : null };
+  }
+}
+
+export interface IntakePage {
+  readonly items: readonly IntakeItemView[];
+  readonly summary: IntakeSummary;
+  /** Pass back as `before` for the next page; null when this is the last. */
+  readonly nextBefore: string | null;
 }

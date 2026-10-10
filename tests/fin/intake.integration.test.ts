@@ -107,7 +107,8 @@ describe("the fin intake sweep, in Postgres", () => {
     const ids = await firms.enabledFirmIds();
     expect(ids).toEqual(expect.arrayContaining([firm, other]));
     expect(ids).not.toContain(off);
-    expect(await firms.isEnabled(off)).toBe(false);
+    expect(await firms.enabledSince(off)).toBeNull();
+    expect(await firms.enabledSince(firm)).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
   });
 
   it("takes in what clients supplied since the switch, and nothing else", async () => {
@@ -137,8 +138,25 @@ describe("the fin intake sweep, in Postgres", () => {
     expect(await taken(off)).toEqual([]);
   });
 
+  it("pages at the rows' own precision, filters, and counts the filtered set", async () => {
+    const all = { clientPartyId: null, route: null, before: null } as const;
+    const first = await service.intake(firm, { ...all, limit: 2 });
+    const second = await service.intake(firm, { ...all, before: first.nextBefore, limit: 2 });
+    expect(first.items).toHaveLength(2);
+    expect(second.items).toHaveLength(1);
+    expect(second.nextBefore).toBeNull();
+    const ids = [...first.items, ...second.items].map((i) => i.documentVersionId).sort();
+    expect(ids).toEqual([versions.invoice, versions.statement, versions.doc].sort());
+    expect(first.summary).toEqual({ total: 3, byRoute: { sheet: 1, pdf: 1, image: 0, archive: 0, manual: 1 } });
+    const manual = await service.intake(firm, { ...all, route: "manual", limit: 10 });
+    expect(manual.items.map((i) => i.documentVersionId)).toEqual([versions.doc]);
+    // Another firm's id as the cursor matches no row: an empty page, never theirs.
+    const [foreign] = await owner<{ id: string }[]>`SELECT id FROM fin.intake_item WHERE tenant_id = ${other} LIMIT 1`;
+    expect((await service.intake(firm, { ...all, before: foreign?.id ?? null, limit: 10 })).items).toEqual([]);
+  });
+
   it("reads the list back with the client and the route, newest first", async () => {
-    const items = await service.recent(firm, 10);
+    const items = (await service.intake(firm, { clientPartyId: null, route: null, before: null, limit: 10 })).items;
     expect(items).toHaveLength(3);
     const statement = items.find((i) => i.documentVersionId === versions.statement);
     expect(statement).toMatchObject({
