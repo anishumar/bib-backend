@@ -9,8 +9,8 @@
 //   npm run worker:once
 //
 // It runs EVERY sweep the worker does — spawn, orchestrate, dunning, the
-// compliance calendar, the escalation ladder, the chaser and the proactive
-// nudge — because that is what the worker does, and an entry point that
+// compliance calendar, the escalation ladder, the chaser, the monthly asks and
+// the proactive nudge — because that is what the worker does, and an entry point that
 // mirrored part of the process would be a worse lie than none at all.
 //
 // THE COUNT IN THIS COMMENT HAS NOW GONE STALE TWICE. It said THREE until T4.5
@@ -286,6 +286,62 @@ async function main(): Promise<void> {
     if (frozen > 0) {
       console.log(
         `  ${String(frozen)} ask(s) skipped — their client is frozen (a dispute somebody is negotiating)`,
+      );
+    }
+    console.log();
+
+    // THE MONTHLY ASKS (F1.4), from request templates.
+    //
+    // AFTER THE CHASER, deliberately, so an ask raised on this run is never
+    // chased on it: the chaser counts from `raised_at`, and a firm's first rung
+    // may be at 0 days, so the other order would remind a client about an ask
+    // in the same breath as asking. (In the worker the two queues share one
+    // cron and either may finish first; here the order is fixed.) And AFTER THE
+    // ORCHESTRATOR, which pins the process of a job whose period has just ended
+    // (S7): only a pinned job's steps say what to ask for.
+    const asked = await wired.requests.sweep();
+    for (const r of asked.filter((x) => x.failure !== undefined)) {
+      console.log(`  ! firm ${r.tenantId}: requests sweep FAILED — ${r.failure ?? ""}`);
+    }
+    const raisedAsks = asked.reduce((n, r) => n + r.raised, 0);
+    const alreadyAsked = asked.reduce((n, r) => n + r.alreadyRaised, 0);
+    const lateAsks = asked.reduce((n, r) => n + r.overdueOnRaise, 0);
+    const unpublished = asked.reduce((n, r) => n + r.noTemplate, 0);
+    const unpinned = asked.reduce((n, r) => n + r.awaitingPin, 0);
+    if (raisedAsks === 0) {
+      // TWO QUIET ANSWERS, and the line names both, for the chaser's reason:
+      // nothing is seeded, so a firm whose processes name no request template
+      // asks nobody, exactly as one whose items are all asked or not yet due.
+      console.log(
+        "  nothing to ask — either no request item has reached its send day that its job has " +
+          "not already asked for, or no process step names a published request template, which " +
+          "means the firm asks its clients for nothing.",
+      );
+    } else {
+      console.log(`  raised ${String(raisedAsks)} client ask(s) from request templates`);
+    }
+    // PRINTED LOUDLY: the backlog. A job left open from an earlier period asks
+    // for that period's items with the firm's own due day, already gone by.
+    if (lateAsks > 0) {
+      console.log(
+        `  !! ${String(lateAsks)} of them were raised ALREADY PAST their due day — period jobs ` +
+          `left open from earlier periods; the client sees the firm's own day, not a new one`,
+      );
+    }
+    if (alreadyAsked > 0) {
+      console.log(`  ${String(alreadyAsked)} item(s) already asked on their job — nothing done`);
+    }
+    if (unpublished > 0) {
+      console.log(
+        `  ${String(unpublished)} process step(s) name a request template that is not published — ` +
+          `nothing was asked for them`,
+      );
+    }
+    if (unpinned > 0) {
+      console.log(
+        `  ${String(unpinned)} period job(s) whose period has ended have no process pinned yet, at ` +
+          `firms that ask clients from request templates — their asks wait for the orchestrator ` +
+          `(or for the firm to publish a workflow template)`,
       );
     }
     console.log();

@@ -11,6 +11,7 @@ import type { Logger } from "../platform/log";
 import type { SweepReport } from "../usecase/scheduler/service";
 import type { WalkReport } from "../usecase/orchestrator/service";
 import type { DunningSweepReport } from "../usecase/dunning/service";
+import type { RequestSweepReport } from "../domain/requests/model";
 
 /** The hourly spawn sweep (T2.6, T6.13). */
 export function logSpawnSweep(log: Logger, reports: readonly SweepReport[]): void {
@@ -90,5 +91,35 @@ export function logDunningSweep(log: Logger, reports: readonly DunningSweepRepor
       },
       "dunning sweep",
     );
+  }
+}
+
+/** The daily requests sweep (F1.4): the monthly asks raised from request
+ *  templates. */
+export function logRequestSweep(log: Logger, reports: readonly RequestSweepReport[]): void {
+  for (const r of reports) {
+    if (r.failure !== undefined) {
+      log.error({ tenantId: r.tenantId, failure: r.failure }, "requests sweep could not visit firm");
+      continue;
+    }
+    if (r.raised === 0 && r.alreadyRaised === 0 && r.noTemplate === 0 && r.awaitingPin === 0) continue;
+    const fields = {
+      tenantId: r.tenantId,
+      raised: r.raised,
+      alreadyRaised: r.alreadyRaised,
+      overdueOnRaise: r.overdueOnRaise,
+      noTemplate: r.noTemplate,
+      awaitingPin: r.awaitingPin,
+    };
+    // AT WARN when an ask went out already past its due day: the backlog of a
+    // job left open from an earlier period, which a client reads as late the
+    // moment it arrives. `noTemplate` and `awaitingPin` are what somebody has
+    // to act on otherwise: a step naming a list nobody published, and a period
+    // over with no process pinned.
+    if (r.overdueOnRaise > 0) {
+      log.warn(fields, "requests sweep: asks raised already past their due day");
+    } else {
+      log.info(fields, "requests sweep");
+    }
   }
 }

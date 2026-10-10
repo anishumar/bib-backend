@@ -54,7 +54,7 @@ import {
   PostgresIssuerTaxDefaults,
 } from "../infrastructure/postgres/advance-reminders";
 import { invoiceIssuedCopies } from "./invoice-copies";
-import { logDunningSweep, logOrchestratorSweep, logSpawnSweep } from "./sweep-log";
+import { logDunningSweep, logOrchestratorSweep, logRequestSweep, logSpawnSweep } from "./sweep-log";
 import { fxServiceFor } from "./fx";
 import { mailerFor } from "./mailer";
 import { PostgresAdvanceBillFacts, PostgresFinalBillFacts } from "../infrastructure/postgres/billing-facts";
@@ -62,6 +62,17 @@ import { EscalationService } from "../usecase/escalation/service";
 import { ChaserService } from "../usecase/chaser/service";
 import { PostgresFirmTimeZone } from "../infrastructure/postgres/firm-timezone-repository";
 import { NudgeService } from "../usecase/nudge/service";
+import { RequestSweepService } from "../usecase/requests/service";
+import { ClientAskService } from "../usecase/clientask/service";
+import { PortalAccessService } from "../usecase/portalaccess/service";
+import {
+  PostgresPublishedRequestTemplates,
+  PostgresRequestSubjects,
+} from "../infrastructure/postgres/request-sweep-repository";
+import { PostgresClientAskRepository } from "../infrastructure/postgres/client-ask-repository";
+import { PostgresPortalAskRepository } from "../infrastructure/postgres/portal-ask-repository";
+import { PostgresPortalAccessRepository } from "../infrastructure/postgres/portal-access-repository";
+import { PostgresPortalGroup } from "../infrastructure/postgres/portal-group";
 import { OrchestratorService } from "../usecase/orchestrator/service";
 import { PostgresJobStepRepository } from "../infrastructure/postgres/job-step-repository";
 import { PostgresJobDeskResolver } from "../infrastructure/postgres/job-desk-resolver";
@@ -215,6 +226,12 @@ export const CHASER_QUEUE = "delivery.chaser";
  *  one would stop the others. */
 export const NUDGE_QUEUE = "delivery.nudge";
 
+/** The requests sweep (F1.4): each period job's monthly asks, raised on their
+ *  send day. Its own queue, on the escalation CRON with the chaser and the
+ *  nudge — one daily knob, not another — because the send day is a DAY and a
+ *  failure here must not silence a different daily sweep. */
+export const REQUESTS_QUEUE = "delivery.requests";
+
 /**
  * The credential sweep: dead sessions and spent magic links, deleted.
  *
@@ -278,6 +295,8 @@ export interface WiredWorker {
   readonly escalations: EscalationService;
   readonly chaser: ChaserService;
   readonly nudges: NudgeService;
+  /** The monthly asks, from request templates (F1.4). */
+  readonly requests: RequestSweepService;
   readonly engagement: EngagementService;
   /** Register the queues and their cadences. Split from `wireWorker` so a test
    *  can build the graph without starting anything. */
@@ -887,6 +906,52 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     events: ledger,
   });
 
+  // THE REQUESTS SWEEP (F1.4): a period job's monthly asks, on their send day.
+  //
+  // The ask goes through `ClientAskService.raiseFromTemplate`, the ask
+  // module's own door, built from the API's adapters: idempotent on 0385's
+  // index, `client_ask.raised` only for a row it created, the client read from
+  // the task inside the INSERT. The portal-side ports are the real adapters
+  // and not stand-ins, for the signature sweep's reason above: this process
+  // only ever raises, and a stub that threw would be one waiting for somebody
+  // to call it. NO MAILER, the chaser's arrangement: the client sees the ask on
+  // their own page, and transport is P10.
+  const portalAccessRepository = new PostgresPortalAccessRepository(pools.app);
+  const portalAccess = new PortalAccessService({
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    grants: portalAccessRepository,
+    memberships: portalAccessRepository,
+    clients: portalAccessRepository,
+    groups: new PostgresPortalGroup(pools.app),
+    ids: systemIds,
+    clock: systemClock,
+    events: ledger,
+  });
+  const clientAsks = new ClientAskService({
+    asks: new PostgresClientAskRepository(pools.app),
+    portal: new PostgresPortalAskRepository(pools.app),
+    scope: {
+      scopedCompanies: (tenantId, userId) => portalAccess.scopedClientsForUser(tenantId, userId),
+    },
+    blobs,
+    digest: new Sha256ByteDigest(),
+    ids: systemIds,
+    events: ledger,
+    clock: systemClock,
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    maxUploadBytes: cfg.storage.maxUploadBytes,
+  });
+  const requests = new RequestSweepService({
+    // ACTIVE firms only, like every sweep since B14: a suspended firm's clients
+    // are not asked for anything.
+    tenants: new PostgresTenantDirectory(pools.app),
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    subjects: new PostgresRequestSubjects(pools.app),
+    templates: new PostgresPublishedRequestTemplates(pools.app),
+    asks: clientAsks,
+    clock: systemClock,
+  });
+
   const queue = new BossJobQueue({ connectionString: cfg.db.appUrl, log });
 
   return {
@@ -908,6 +973,7 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     escalations,
     chaser,
     nudges,
+    requests,
     engagement,
     async run(): Promise<void> {
       await queue.start();
@@ -1148,6 +1214,13 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
         }
       });
       await queue.schedule(CHASER_QUEUE, cfg.worker.escalationCron);
+
+      // THE MONTHLY ASKS, on the same cron and their own queue. See
+      // REQUESTS_QUEUE; what is logged, and at which level, is `sweep-log.ts`'s.
+      await queue.register(REQUESTS_QUEUE, async () => {
+        logRequestSweep(log, await requests.sweep());
+      });
+      await queue.schedule(REQUESTS_QUEUE, cfg.worker.escalationCron);
 
       // THE NUDGE, on the same cron and its own queue. See NUDGE_QUEUE.
       await queue.register(NUDGE_QUEUE, async () => {
