@@ -24,6 +24,7 @@
     "demo:fresh": "bash scripts/demo-fresh.sh",
     "demo:verify": "bash scripts/demo-verify.sh",
     "migrate": "tsx src/cmd/migrate.ts",
+    "db:qa": "bash scripts/db.sh connect qa",
     "check": "npm run typecheck && npm run lint && npm run arch && npm run test",
     "prepare": "husky || true"
   },

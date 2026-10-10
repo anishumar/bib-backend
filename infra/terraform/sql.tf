@@ -70,12 +70,21 @@ resource "google_sql_database_instance" "bib" {
     disk_autoresize_limit = var.db_disk_size_gb * 4
 
     ip_configuration {
-      # NO PUBLIC IP. This is the reason network.tf exists. The app role is
-      # NOBYPASSRLS and every business table carries a policy, but RLS defends
-      # against one tenant reading another — it does not defend against a
-      # password reaching somebody on the internet. There is no second wall
-      # behind a public database.
-      ipv4_enabled    = false
+      # A PUBLIC IP THAT NOTHING CAN DIAL DIRECTLY. The workloads still connect
+      # over the private network below; the public address exists only so a
+      # developer's laptop can reach the instance through the Cloud SQL Auth
+      # Proxy (scripts/db.sh). Who may do that is managed in the Cloud console
+      # (IAM roles + Cloud IAM database users), not here.
+      #
+      # The worry this block used to state — "RLS does not defend against a
+      # password reaching somebody on the internet" — is answered by the empty
+      # authorized_networks list, not by the absence of an address: with no
+      # network authorised, a plain TCP connection to the public IP is refused
+      # whatever password it carries. The only way in from outside the VPC is
+      # the proxy, and the proxy needs a Google identity holding
+      # roles/cloudsql.client on this project. Adding an authorized_networks
+      # entry undoes that; do not.
+      ipv4_enabled    = true
       private_network = google_compute_network.bib.id
 
       # ENCRYPTED_ONLY refuses an unencrypted connection at the server. It
@@ -89,6 +98,14 @@ resource "google_sql_database_instance" "bib" {
       # Lets Google-managed services inside the private path reach the instance
       # without a public address of their own.
       enable_private_path_for_google_cloud_services = true
+    }
+
+    # Developers log in as their own Google account (a Cloud IAM user), with a
+    # short-lived token the proxy fetches — no shared password to hand out or
+    # rotate when somebody leaves.
+    database_flags {
+      name  = "cloudsql.iam_authentication"
+      value = "on"
     }
 
     backup_configuration {
