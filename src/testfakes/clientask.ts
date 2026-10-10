@@ -30,8 +30,10 @@ import type {
   AskRepository,
   NewAsk,
   NewResponse,
+  NewTemplateAsk,
   PortalAskRepository,
   PortalScopeSource,
+  TemplateAskInsert,
   UploadedBytes,
 } from "../usecase/clientask/ports";
 
@@ -119,9 +121,51 @@ export class FakeAskRepo implements AskRepository {
       firstAnsweredAt: null,
       closedBy: null,
       closedAt: null,
+      dueOn: ask.dueOn,
+      fromTemplate: null,
     };
     this.store.asks.push(row);
     return Promise.resolve(this.record(row));
+  }
+
+  /**
+   * 0385's partial unique index, reproduced: one ask per (firm, task, template
+   * key, item key). The real adapter leaves it to `ON CONFLICT DO NOTHING`;
+   * here it is a find, which is the same answer for a single-threaded test and
+   * says nothing about the race — that is the integration test's.
+   */
+  raiseFromTemplate(ask: NewTemplateAsk): Promise<TemplateAskInsert> {
+    const wi = this.store.workItems.get(ask.workItemId);
+    if (!wi) return Promise.resolve({ outcome: "no_work_item" });
+    const already = this.store.asks.some(
+      (a) =>
+        a.tenantId === ask.tenantId &&
+        a.workItemId === ask.workItemId &&
+        a.fromTemplate !== null &&
+        a.fromTemplate.templateKey === ask.template.templateKey &&
+        a.fromTemplate.itemKey === ask.template.itemKey,
+    );
+    if (already) return Promise.resolve({ outcome: "already_raised" });
+    const row: ClientAsk = {
+      id: ask.id,
+      tenantId: ask.tenantId,
+      workItemId: ask.workItemId,
+      clientPartyId: wi.clientPartyId,
+      askKind: ask.askKind,
+      prompt: ask.prompt,
+      documentKind: ask.documentKind,
+      status: "open",
+      // NULL — a template raised it, and 0385's CHECK allows that only here.
+      raisedBy: null,
+      raisedAt: this.store.now(),
+      firstAnsweredAt: null,
+      closedBy: null,
+      closedAt: null,
+      dueOn: ask.dueOn,
+      fromTemplate: { ...ask.template },
+    };
+    this.store.asks.push(row);
+    return Promise.resolve({ outcome: "created", record: this.record(row) });
   }
 
   listForWorkItem(tenantId: string, workItemId: string): Promise<readonly AskRecord[]> {
@@ -166,7 +210,7 @@ export class FakeAskRepo implements AskRepository {
     return {
       ask,
       clientName: `Client ${ask.clientPartyId.slice(0, 4)}`,
-      raisedByName: "Aarav Menon",
+      raisedByName: ask.raisedBy === null ? null : "Aarav Menon",
       closedByName: ask.closedBy === null ? null : "Aarav Menon",
       responses: this.store.responses
         .filter((r) => r.askId === ask.id)
@@ -272,6 +316,7 @@ export class FakePortalAskRepo implements PortalAskRepository {
       companyName: "Cobalt Foods Private Limited",
       workItemTitle: this.store.workItems.get(ask.workItemId)?.title ?? "a task",
       raisedAt: ask.raisedAt,
+      dueOn: ask.dueOn,
       // THE LAST DATE AND NO COUNT — the client's half, and the difference from
       // `record()` above is the whole decision, not an oversight. `max()` in the
       // real adapter, the same reduction here.

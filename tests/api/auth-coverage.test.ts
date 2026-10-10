@@ -273,6 +273,7 @@ function askService(): ClientAskService {
     ids: new FakeIds(),
     events: new RecordingEventSink(),
     clock: new FakeClock(new Date("2026-09-01T00:00:00.000Z")),
+    timeZones: new FakeFirmTimeZone(),
     maxUploadBytes: 10_000_000,
   });
 }

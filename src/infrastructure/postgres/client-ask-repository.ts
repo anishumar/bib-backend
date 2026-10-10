@@ -37,7 +37,12 @@ import type {
   ResponseKind,
 } from "../../domain/clientask/model";
 import type { DocumentKind } from "../../domain/filestore/model";
-import type { AskRepository, NewAsk } from "../../usecase/clientask/ports";
+import type {
+  AskRepository,
+  NewAsk,
+  NewTemplateAsk,
+  TemplateAskInsert,
+} from "../../usecase/clientask/ports";
 import { isoInstant } from "./instant";
 
 interface AskRow {
@@ -49,11 +54,16 @@ interface AskRow {
   prompt: string;
   document_kind: string | null;
   status: string;
-  raised_by: string;
+  raised_by: string | null;
   raised_at: string;
   first_answered_at: string | null;
   closed_by: string | null;
   closed_at: string | null;
+  /** `due_on::text` — a DAY as `YYYY-MM-DD`, never a `Date` (see `select`). */
+  due_on: string | null;
+  request_template_version_id: string | null;
+  request_template_key: string | null;
+  request_item_key: string | null;
   client_name: string;
   raised_by_name: string | null;
   closed_by_name: string | null;
@@ -91,7 +101,8 @@ export class PostgresClientAskRepository implements AskRepository {
     return withTenant(this.app, ask.tenantId, async (db) => {
       const [row] = await db<{ id: string }[]>`
         INSERT INTO delivery.client_ask
-          (id, tenant_id, work_item_id, client_party_id, ask_kind, prompt, document_kind, raised_by)
+          (id, tenant_id, work_item_id, client_party_id, ask_kind, prompt, document_kind,
+           raised_by, due_on)
         SELECT ${ask.id},
                ${ask.tenantId},
                wi.id,
@@ -100,7 +111,8 @@ export class PostgresClientAskRepository implements AskRepository {
                ${ask.askKind},
                ${ask.prompt},
                ${ask.documentKind},
-               ${ask.raisedBy}
+               ${ask.raisedBy},
+               ${ask.dueOn}::date
           FROM delivery.work_item wi
          WHERE wi.id = ${ask.workItemId}
            AND wi.tenant_id = ${ask.tenantId}
@@ -108,6 +120,73 @@ export class PostgresClientAskRepository implements AskRepository {
       `;
       if (!row) return null;
       return this.read(db, ask.tenantId, ask.id);
+    });
+  }
+
+  /**
+   * A template's ask, at most once (0385).
+   *
+   * `ON CONFLICT … DO NOTHING` names 0385's partial unique index by its columns
+   * AND its predicate — Postgres infers a partial index only when the WHERE is
+   * repeated — so a second sweep over the same item writes nothing and returns
+   * no row. Two sweeps racing: the second INSERT waits on the first's
+   * uncommitted row, then skips it. No read before the write, so there is no
+   * window to lose.
+   *
+   * Zero rows back is then one of two things, told apart in the same
+   * transaction: the item was already raised on this task, or there is no such
+   * work item at this firm (the SELECT feeding the INSERT found nothing). The
+   * second is a refusal; the first is the sweep's ordinary second pass.
+   *
+   * `raised_by` is NOT in the column list: NULL is the honest raiser of a
+   * template's ask, and 0385's CHECK accepts it only because the template
+   * columns are set in the same row.
+   */
+  async raiseFromTemplate(ask: NewTemplateAsk): Promise<TemplateAskInsert> {
+    return withTenant(this.app, ask.tenantId, async (db) => {
+      const [row] = await db<{ id: string }[]>`
+        INSERT INTO delivery.client_ask
+          (id, tenant_id, work_item_id, client_party_id, ask_kind, prompt, document_kind,
+           due_on, request_template_version_id, request_template_key, request_item_key)
+        SELECT ${ask.id},
+               ${ask.tenantId},
+               wi.id,
+               -- THE WALL COLUMN, TAKEN FROM THE WORK ITEM. See the header.
+               wi.client_party_id,
+               ${ask.askKind},
+               ${ask.prompt},
+               ${ask.documentKind},
+               ${ask.dueOn}::date,
+               ${ask.template.versionId}::uuid,
+               ${ask.template.templateKey},
+               ${ask.template.itemKey}
+          FROM delivery.work_item wi
+         WHERE wi.id = ${ask.workItemId}
+           AND wi.tenant_id = ${ask.tenantId}
+        ON CONFLICT (tenant_id, work_item_id, request_template_key, request_item_key)
+          WHERE request_item_key IS NOT NULL
+          DO NOTHING
+        RETURNING id
+      `;
+      if (row) {
+        const record = await this.read(db, ask.tenantId, ask.id);
+        // Unreachable: the row was inserted in this transaction and is read
+        // through the same tenant scope. THROWN, so the transaction rolls the
+        // insert back: answering "already raised" would leave a row the ledger
+        // never hears about, and "created" with no record cannot be said.
+        if (record === null) {
+          throw new Error(
+            `client_ask ${ask.id} was inserted for work item ${ask.workItemId} and could not be ` +
+              `read back in the same transaction; nothing was kept`,
+          );
+        }
+        return { outcome: "created", record };
+      }
+      const [item] = await db<{ id: string }[]>`
+        SELECT id FROM delivery.work_item
+         WHERE id = ${ask.workItemId} AND tenant_id = ${ask.tenantId}
+      `;
+      return item ? { outcome: "already_raised" } : { outcome: "no_work_item" };
     });
   }
 
@@ -179,6 +258,14 @@ export class PostgresClientAskRepository implements AskRepository {
              ${db.unsafe(isoInstant("a.first_answered_at", "first_answered_at"))},
              a.closed_by,
              ${db.unsafe(isoInstant("a.closed_at", "closed_at"))},
+             -- A DAY, AS TEXT. postgres.js would hand a date column back as a JS
+             -- Date at UTC midnight, which names the day before anywhere west of
+             -- Greenwich; ::text constructs no Date and involves no zone
+             -- (CLAUDE.md, "A date column is a DAY").
+             a.due_on::text AS due_on,
+             a.request_template_version_id,
+             a.request_template_key,
+             a.request_item_key,
              cp.display_name    AS client_name,
              -- LEFT joins, and null is a real answer: an erased account stops
              -- resolving and the ask survives, exactly as the ledger's actor
@@ -303,6 +390,19 @@ function toRecord(r: AskRow): AskRecord {
       firstAnsweredAt: r.first_answered_at,
       closedBy: r.closed_by,
       closedAt: r.closed_at,
+      dueOn: r.due_on,
+      // 0385's CHECK holds the three together; reading all three keeps the
+      // type honest without trusting it.
+      fromTemplate:
+        r.request_template_version_id !== null &&
+        r.request_template_key !== null &&
+        r.request_item_key !== null
+          ? {
+              versionId: r.request_template_version_id,
+              templateKey: r.request_template_key,
+              itemKey: r.request_item_key,
+            }
+          : null,
     },
     clientName: r.client_name,
     raisedByName: r.raised_by_name,

@@ -33,11 +33,15 @@
 import type { Clock } from "../../platform/clock";
 import type { IdGen } from "../../platform/ids";
 import type { Actor } from "../../domain/ledger/model";
+import { SYSTEM_ACTOR } from "../../domain/ledger/model";
+import { isCalendarDay } from "../../domain/day";
+import { dayInZone } from "../../domain/scheduler/zone";
 import type { EventSink } from "../ledger/ports";
 import type {
   AskKind,
   AskRecord,
   AskResponseRecord,
+  AskTemplateRef,
   PortalAskRow,
 } from "../../domain/clientask/model";
 import {
@@ -45,6 +49,7 @@ import {
   acceptsResponse,
   ASK_KINDS,
   decisionFits,
+  dueDayRefusal,
   isAskKind,
   splitByAwaiting,
 } from "../../domain/clientask/model";
@@ -55,6 +60,7 @@ import {
   AskDocumentKindMismatch,
   AskNotFound,
   AskWorkItemNotFound,
+  InvalidAskDueDate,
   InvalidAskKind,
   InvalidAskPrompt,
 } from "../../domain/clientask/errors";
@@ -74,6 +80,7 @@ import {
 import type { BlobStore, ContentDigest } from "../filestore/ports";
 import type {
   AskRepository,
+  FirmTimeZone,
   PortalAskRepository,
   PortalScopeSource,
 } from "./ports";
@@ -104,6 +111,9 @@ export interface Deps {
   readonly ids: IdGen;
   readonly events: EventSink;
   readonly clock: Clock;
+  /** The firm's zone, so "today" for a due day a person types is the FIRM's
+   *  today (T6.14's rule) and never the server's or the browser's. */
+  readonly timeZones: FirmTimeZone;
   /** The largest file this store accepts, in bytes — the same config value the
    *  staff upload uses, and the same reason: the whole file is held in memory to
    *  be hashed, so this is what one request can cost the process. */
@@ -116,8 +126,40 @@ export interface RaiseAskInput {
   readonly askKind: string;
   readonly prompt: string;
   readonly documentKind: string | null;
+  /** The day the firm wants it by, `YYYY-MM-DD`, or absent/null for none. A real
+   *  calendar day, not before the firm's today (0385). */
+  readonly dueOn?: string | null;
   readonly actor: Actor;
 }
+
+/**
+ * An ask a REQUEST TEMPLATE raises (F1.3/F1.4). The requests sweep's input.
+ *
+ * No actor: it is always the SYSTEM, because the sweep raises it on the firm's
+ * behalf and no person pressed anything. No client party, for `raise`'s reason.
+ * `dueOn` is required: every template item states a due offset (F1 contract),
+ * so a template ask always has the firm's own day.
+ */
+export interface RaiseFromTemplateInput {
+  readonly tenantId: string;
+  readonly workItemId: string;
+  /** What the client reads — the template item's label. */
+  readonly prompt: string;
+  readonly askKind: string;
+  readonly documentKind: string | null;
+  /** `YYYY-MM-DD`. A real day; one already past IS accepted (see the method). */
+  readonly dueOn: string;
+  readonly template: AskTemplateRef;
+}
+
+/**
+ * What `raiseFromTemplate` did. `created: false` is the sweep's ordinary second
+ * pass over an item it already raised, and carries no ask: nothing was written
+ * and nothing was recorded, which is the whole answer the sweep needs.
+ */
+export type RaiseFromTemplateResult =
+  | { readonly created: true; readonly ask: AskRecord }
+  | { readonly created: false; readonly ask: null };
 
 export interface SettleAskInput {
   readonly tenantId: string;
@@ -175,34 +217,26 @@ export class ClientAskService {
    * filters this row on.
    */
   async raise(input: RaiseAskInput): Promise<AskRecord> {
-    const prompt = input.prompt.trim();
-    if (prompt.length === 0) throw new InvalidAskPrompt();
-    if (!isAskKind(input.askKind)) throw new InvalidAskKind(input.askKind, ASK_KINDS);
+    const { prompt, askKind, documentKind } = this.validAsk(input);
 
-    // Refused here rather than left to 0063's CHECK, because the CHECK's message
-    // names a constraint and this one names the decision. A document kind on an
-    // approval is a field somebody filled in without meaning to; a document ask
-    // without one leaves the filing decision to whatever the upload happens to
-    // default to.
-    const wantsDocument = input.askKind === "document";
-    if (wantsDocument === (input.documentKind === null)) {
-      throw new AskDocumentKindMismatch(input.askKind);
+    // A DUE DAY IS OPTIONAL, AND ONE IS CHECKED AGAINST THE FIRM'S TODAY (0385).
+    // Absent stays the ordinary answer — T6.6's rule that no deadline this
+    // product invents reaches a client still holds; a day here is one a person
+    // TYPED. Refused before anything is written, so a typo costs nothing.
+    const dueOn = input.dueOn ?? null;
+    if (dueOn !== null) {
+      const today = await this.firmToday(input.tenantId);
+      const refusal = dueDayRefusal(dueOn, today);
+      if (refusal !== null) throw new InvalidAskDueDate(dueOn, refusal, today);
     }
-    // CHECKED HERE, so a kind outside the closed set is a 400 with a sentence
-    // rather than a 500 from 0063's CHECK. The route's zod enum already refuses
-    // one over HTTP; this is the same rule for every other caller, and it is
-    // what lets the port carry `DocumentKind` instead of `string` — one cast at
-    // the edge instead of one in each adapter.
-    if (input.documentKind !== null && !isDocumentKind(input.documentKind)) {
-      throw new InvalidAskKind(input.documentKind, DOCUMENT_KINDS);
-    }
-    const documentKind: DocumentKind | null = input.documentKind;
 
     const raisedBy = this.humanOrNull(input.actor);
     if (raisedBy === null) {
-      // The column is NOT NULL and it should be: an ask is a request from a
-      // person to a person, and "the system would like your purchase register"
-      // is not something a client can reply to.
+      // The column may be null since 0385, and ONLY for a template's ask — the
+      // CHECK says "a person or a template". An ask raised through this method
+      // is a request from a person to a person, and "the system would like your
+      // purchase register" is not something a client can reply to; the system's
+      // own asks go through `raiseFromTemplate`, which names the template.
       throw new InvalidAskPrompt();
     }
 
@@ -210,29 +244,74 @@ export class ClientAskService {
       id: this.deps.ids.newId(),
       tenantId: input.tenantId,
       workItemId: input.workItemId,
-      askKind: input.askKind,
+      askKind,
       prompt,
       documentKind,
       raisedBy,
+      dueOn,
     });
     if (record === null) throw new AskWorkItemNotFound(input.workItemId);
 
-    await this.deps.events.recordEvent({
+    await this.recordRaised(input.tenantId, record, input.actor);
+    return record;
+  }
+
+  /**
+   * Raise one item of a request template on one task — at most ONCE (F1.3).
+   *
+   * THE REQUESTS SWEEP'S DOOR, and it is at-least-once like everything the
+   * engine touches (T2.6): pg-boss redelivers, a pass re-reads what it has seen.
+   * So the INSERT is `ON CONFLICT DO NOTHING` against 0385's partial unique
+   * index on (firm, task, template key, item key) and `client_ask.raised` is
+   * recorded ONLY when a row was created — a second call writes nothing, records
+   * nothing, and answers `created: false`. The database decides, never a read
+   * before the write, so two sweeps racing still leave one ask.
+   *
+   * THE ACTOR IS THE SYSTEM, honestly: nobody pressed anything, a cron did, and
+   * the row says so with a null `raised_by` beside the template it names.
+   *
+   * A DUE DAY ALREADY PAST IS ACCEPTED HERE, and that is the difference from
+   * `raise`. The day was not chosen now by somebody who could choose another: it
+   * is the template's offset from the period's end, fixed when the firm
+   * published it. A sweep that runs late — a worker down over a weekend, a firm
+   * switched on mid-month, a template published after its send day — must still
+   * ask for October's records, and asking with the day the firm actually stated
+   * is the truth; refusing would mean the client is never asked at all, and
+   * moving the day would be this product inventing a deadline, which is the one
+   * thing 0385 does not allow. The day must still be a real one.
+   *
+   * Prompt, kind and document kind are validated exactly as `raise` does, and
+   * the client is read from the work item inside the INSERT, never passed in.
+   */
+  async raiseFromTemplate(input: RaiseFromTemplateInput): Promise<RaiseFromTemplateResult> {
+    const { prompt, askKind, documentKind } = this.validAsk(input);
+    if (!isCalendarDay(input.dueOn)) {
+      throw new InvalidAskDueDate(input.dueOn, "not_a_day", null);
+    }
+
+    const result = await this.deps.asks.raiseFromTemplate({
+      id: this.deps.ids.newId(),
       tenantId: input.tenantId,
-      verb: "client_ask.raised",
-      objectId: record.ask.id,
-      actor: input.actor,
-      // Ids and machine facts only. THE PROMPT IS NOT HERE: it is prose about a
-      // client's own business ("send the Kaveri purchase register"), it names
-      // the client as readily as a filename does, and this log cannot be erased.
-      payload: {
-        askKind: record.ask.askKind,
-        workItemId: record.ask.workItemId,
-        clientPartyId: record.ask.clientPartyId,
-        ...(record.ask.documentKind === null ? {} : { documentKind: record.ask.documentKind }),
+      workItemId: input.workItemId,
+      askKind,
+      prompt,
+      documentKind,
+      dueOn: input.dueOn,
+      template: {
+        versionId: input.template.versionId,
+        templateKey: input.template.templateKey,
+        itemKey: input.template.itemKey,
       },
     });
-    return record;
+    switch (result.outcome) {
+      case "no_work_item":
+        throw new AskWorkItemNotFound(input.workItemId);
+      case "already_raised":
+        return { created: false, ask: null };
+      case "created":
+        await this.recordRaised(input.tenantId, result.record, SYSTEM_ACTOR);
+        return { created: true, ask: result.record };
+    }
   }
 
   listForWorkItem(tenantId: string, workItemId: string): Promise<readonly AskRecord[]> {
@@ -520,6 +599,75 @@ export class ClientAskService {
       payload: { ...payload, askKind: ask.askKind },
     });
     return row;
+  }
+
+  /**
+   * The checks every ask meets, however it is raised — a person's or a
+   * template's. One copy, so the two doors cannot come to disagree about what
+   * an ask is.
+   */
+  private validAsk(input: {
+    readonly prompt: string;
+    readonly askKind: string;
+    readonly documentKind: string | null;
+  }): { prompt: string; askKind: AskKind; documentKind: DocumentKind | null } {
+    const prompt = input.prompt.trim();
+    if (prompt.length === 0) throw new InvalidAskPrompt();
+    if (!isAskKind(input.askKind)) throw new InvalidAskKind(input.askKind, ASK_KINDS);
+
+    // Refused here rather than left to 0063's CHECK, because the CHECK's message
+    // names a constraint and this one names the decision. A document kind on an
+    // approval is a field somebody filled in without meaning to; a document ask
+    // without one leaves the filing decision to whatever the upload happens to
+    // default to.
+    const wantsDocument = input.askKind === "document";
+    if (wantsDocument === (input.documentKind === null)) {
+      throw new AskDocumentKindMismatch(input.askKind);
+    }
+    // CHECKED HERE, so a kind outside the closed set is a 400 with a sentence
+    // rather than a 500 from 0063's CHECK. The route's zod enum already refuses
+    // one over HTTP; this is the same rule for every other caller, and it is
+    // what lets the port carry `DocumentKind` instead of `string` — one cast at
+    // the edge instead of one in each adapter.
+    if (input.documentKind !== null && !isDocumentKind(input.documentKind)) {
+      throw new InvalidAskKind(input.documentKind, DOCUMENT_KINDS);
+    }
+    return { prompt, askKind: input.askKind, documentKind: input.documentKind };
+  }
+
+  /** `client_ask.raised`, written once the row has committed. */
+  private async recordRaised(tenantId: string, record: AskRecord, actor: Actor): Promise<void> {
+    const { ask } = record;
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "client_ask.raised",
+      objectId: ask.id,
+      actor,
+      // Ids and machine facts only. THE PROMPT IS NOT HERE: it is prose about a
+      // client's own business ("send the Kaveri purchase register"), it names
+      // the client as readily as a filename does, and this log cannot be erased.
+      // `dueOn` is a day the firm stated (null when none); the template's two
+      // KEYS are the firm's own config handles, never the item's label, which is
+      // the prompt by another name.
+      payload: {
+        askKind: ask.askKind,
+        workItemId: ask.workItemId,
+        clientPartyId: ask.clientPartyId,
+        dueOn: ask.dueOn,
+        ...(ask.documentKind === null ? {} : { documentKind: ask.documentKind }),
+        ...(ask.fromTemplate === null
+          ? {}
+          : { templateKey: ask.fromTemplate.templateKey, itemKey: ask.fromTemplate.itemKey }),
+      },
+    });
+  }
+
+  /** The FIRM's today, in its own zone — T6.14's rule for every "today". */
+  private async firmToday(tenantId: string): Promise<string> {
+    return dayInZone(
+      this.deps.clock.now().toISOString(),
+      await this.deps.timeZones.timeZoneFor(tenantId),
+    );
   }
 
   private humanOrNull(actor: Actor): string | null {

@@ -1131,6 +1131,7 @@ export function wire(cfg: Config, log: Logger): Wired {
     ids: systemIds,
     events: ledger,
     clock: systemClock,
+    timeZones: new PostgresFirmTimeZone(pools.app),
     maxUploadBytes: cfg.storage.maxUploadBytes,
   });
 

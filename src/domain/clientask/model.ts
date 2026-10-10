@@ -17,6 +17,7 @@
 // be waiting on the client for one thing and moving on three others, and a firm
 // that wants the two coupled sets the state itself (migration 0063).
 
+import { isCalendarDay } from "../day";
 import type { DocumentKind } from "../filestore/model";
 
 /**
@@ -82,10 +83,12 @@ export function isAskDecision(v: string): v is AskDecision {
  * foreign key checks the pair — so the denormalisation is a guarantee rather
  * than a hope.
  *
- * THERE IS NO DUE DATE AND THERE MUST NOT BE ONE. The portal's rule: no deadline
- * this product invented reaches a client. The firm has never given its
- * turnaround times, so "by Friday" would be a promise nobody made, quoted back
- * at the firm. `raisedAt` is here and elapsed time is a fact.
+ * A DUE DAY ONLY WHEN THE FIRM STATED ONE (0385, F1.3 — reversing T6.6's "no
+ * due date, anywhere"). The portal's rule still holds: no deadline this product
+ * INVENTED reaches a client. What changed is that a request template is the
+ * firm writing its own day down ("the month's records by the 5th"), and a
+ * person raising an ask by hand may type one. Null is still the ordinary
+ * answer, and `raisedAt` is still what the chaser counts from.
  */
 export interface ClientAsk {
   readonly id: string;
@@ -110,11 +113,39 @@ export interface ClientAsk {
    */
   readonly documentKind: DocumentKind | null;
   readonly status: AskStatus;
-  readonly raisedBy: string;
+  /** The person who raised it. NULL exactly when a request template did (0385):
+   *  the sweep raises those on the firm's behalf, and naming the template's
+   *  publisher or the task's holder would put a person on an act they did not
+   *  perform. A CHECK holds "a person or a template". */
+  readonly raisedBy: string | null;
   readonly raisedAt: string;
   readonly firstAnsweredAt: string | null;
   readonly closedBy: string | null;
   readonly closedAt: string | null;
+  /**
+   * The day the firm wants it by, as `YYYY-MM-DD`, or null when nobody stated
+   * one. A DAY and never an instant: read with `::text` so no `Date` and no
+   * zone is ever involved (CLAUDE.md, "A `date` column is a DAY").
+   */
+  readonly dueOn: string | null;
+  /** The request template this ask was raised from, or null for one a person
+   *  raised by hand. */
+  readonly fromTemplate: AskTemplateRef | null;
+}
+
+/**
+ * Which request template, and which item in it, an ask was raised from (0385).
+ *
+ * `versionId` PINS the config version, the way a job pins its process: what the
+ * template said when this was asked stays answerable after a republish. The two
+ * KEYS are what the sweep's idempotency is keyed on — the version moves on every
+ * republish, the keys do not, so "October's bank statements for this task" is
+ * one ask however often the template is edited.
+ */
+export interface AskTemplateRef {
+  readonly versionId: string;
+  readonly templateKey: string;
+  readonly itemKey: string;
 }
 
 /** One act by the client, appended. `client_ask_response` is append-only by
@@ -241,6 +272,15 @@ export interface PortalAskRow {
   readonly workItemTitle: string;
   readonly raisedAt: string;
   /**
+   * The day the firm wants it by (`YYYY-MM-DD`), or null when it stated none.
+   *
+   * On the client's row because it is the FIRM's stated day — a request
+   * template's, or one a person typed — and never one this product worked out
+   * (0385). Which template raised the ask is deliberately NOT on this row: it is
+   * the firm's own bookkeeping and a client learns nothing from it.
+   */
+  readonly dueOn: string | null;
+  /**
    * When the firm last reminded them about this, or null if it never has.
    *
    * ── A DATE AND NOT A COUNT, AND THAT IS THE DECISION ────────────────────
@@ -295,6 +335,30 @@ export function acceptsClosure(status: AskStatus): boolean {
  */
 export function decisionFits(askKind: AskKind): boolean {
   return askKind === "approval";
+}
+
+/** Why a due day cannot stand, or null when it can. */
+export type DueDayRefusal = "not_a_day" | "before_today";
+
+/**
+ * Whether a due day a PERSON chose can stand (0385): a real calendar day, and
+ * not before the firm's today.
+ *
+ * `firmToday` is the FIRM's day, resolved in its own zone by the caller — never
+ * the server's and never the browser's, the rule every "today" in this product
+ * follows (T6.14). A day already gone would arrive on the client's screen as
+ * overdue the moment they read it, which is a mistake at the moment of asking,
+ * not a decision.
+ *
+ * Comparing the two strings is comparing the days: both are `YYYY-MM-DD`, so
+ * the lexical order IS the calendar order and no `Date` is constructed.
+ *
+ * A TEMPLATE's ask asks only the first half — see `ClientAskService.raiseFromTemplate`.
+ */
+export function dueDayRefusal(dueOn: string, firmToday: string): DueDayRefusal | null {
+  if (!isCalendarDay(dueOn)) return "not_a_day";
+  if (dueOn < firmToday) return "before_today";
+  return null;
 }
 
 /** Split what the client sees into what still wants something from them and what

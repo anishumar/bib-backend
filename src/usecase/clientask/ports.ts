@@ -18,10 +18,12 @@ import type {
   AskKind,
   AskRecord,
   AskStatus,
+  AskTemplateRef,
   PortalAskRow,
   ResponseKind,
 } from "../../domain/clientask/model";
 
+/** An ask a PERSON raised. */
 export interface NewAsk {
   readonly id: string;
   readonly tenantId: string;
@@ -30,6 +32,42 @@ export interface NewAsk {
   readonly prompt: string;
   readonly documentKind: DocumentKind | null;
   readonly raisedBy: string;
+  /** Already checked by the service: a real day, not before the firm's today. */
+  readonly dueOn: string | null;
+}
+
+/**
+ * An ask a REQUEST TEMPLATE raised (0385). No `raisedBy`: the sweep raises it on
+ * the firm's behalf and the row says so with a null, held by 0385's CHECK to
+ * "a person or a template". No client party either, for `NewAsk`'s reason.
+ */
+export interface NewTemplateAsk {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly workItemId: string;
+  readonly askKind: AskKind;
+  readonly prompt: string;
+  readonly documentKind: DocumentKind | null;
+  readonly dueOn: string;
+  readonly template: AskTemplateRef;
+}
+
+/**
+ * What a template's INSERT did. Three outcomes and not a nullable record,
+ * because "already raised" and "no such work item" are different answers that
+ * both write nothing: the first is the sweep's ordinary second pass, the second
+ * is a refusal.
+ */
+export type TemplateAskInsert =
+  | { readonly outcome: "created"; readonly record: AskRecord }
+  | { readonly outcome: "already_raised" }
+  | { readonly outcome: "no_work_item" };
+
+/** Which zone the firm keeps its calendar in (0071). Structural: satisfied by
+ *  `PostgresFirmTimeZone` and `FakeFirmTimeZone`. A due day a person types is
+ *  held to the FIRM's today, never the server's. */
+export interface FirmTimeZone {
+  timeZoneFor(tenantId: string): Promise<string>;
 }
 
 /**
@@ -46,6 +84,16 @@ export interface AskRepository {
   /** Raises the ask, resolving its client from the work item. Null when there
    *  is no such work item at this firm — the one refusal this write can make. */
   raise(ask: NewAsk): Promise<AskRecord | null>;
+
+  /**
+   * Raises a template's ask ONCE per (work item, template key, item key).
+   *
+   * The INSERT is `ON CONFLICT DO NOTHING` against 0385's partial unique index,
+   * so a redelivered sweep, or two sweeps racing, leaves one row — the database
+   * decides, not a read-then-write. The client is read from the work item inside
+   * the INSERT, exactly as `raise` does.
+   */
+  raiseFromTemplate(ask: NewTemplateAsk): Promise<TemplateAskInsert>;
 
   listForWorkItem(tenantId: string, workItemId: string): Promise<readonly AskRecord[]>;
 
