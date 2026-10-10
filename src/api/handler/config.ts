@@ -57,6 +57,7 @@ export const KIND_VALUES = [
   "escalation",
   "chaser",
   "nudge",
+  "request_template",
 ] as const satisfies readonly ConfigKind[];
 
 // ── Response schemas ────────────────────────────────────────────────────────
@@ -118,9 +119,23 @@ const VersionParam = z.object({
 // message naming the field and the valid set. Restating those shapes here would
 // be two validators to keep in step, and the DTO one would be the one people
 // forget — so the wire check is only "it is an object".
-const BodySchema = z
-  .record(z.unknown())
-  .openapi({ description: "The configuration body. Its shape depends on the kind." });
+//
+// What the spec CAN carry without a second validator is words: the frontend
+// generates its client from this spec, so the shapes F1 added (a screen is
+// about to build an editor for them) are described here, field by field.
+const BodySchema = z.record(z.unknown()).openapi({
+  description:
+    "The configuration body. Its shape depends on the kind, and the domain refuses an " +
+    "unknown field with a sentence naming it. " +
+    "`request_template`: `{ label, items: [{ key, label, askKind, documentKind, " +
+    "sendOffsetDays, dueOffsetDays }] }`, 1 to 30 items; `askKind` is document, question or " +
+    "approval; `documentKind` is a document kind when `askKind` is document and null " +
+    "otherwise; both offsets are whole days counted from the period's LAST day, send 0 to " +
+    "90 and due 1 to 120 and later than send. " +
+    "`workflow_template`: each step may carry `requestTemplateKey`, the key of a " +
+    "`request_template` (read live when a job reaches the step), or null or absent for a " +
+    "step that asks the client for nothing.",
+});
 
 const DefineBody = z
   .object({

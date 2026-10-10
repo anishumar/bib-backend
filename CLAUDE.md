@@ -218,11 +218,29 @@ Redacting the JSON was not the whole wall. Since the 2026-10-03 audit (branch `f
 
 The things a firm changes weekly are rows, not deploys: `config.entry` is the thing being
 configured (`tenant × kind × key` — "the GST filing service", "the partner role") and
-`config.version` is what it said at a point in time. Ten kinds ship today — `service`, `role`, `policy`, `clause`, `dunning`, `workflow_template`,
-`confidence_tier`, `verification_policy`, `compliance_policy` and `escalation`; `rule_pack` joins them when T4.3
-actually reads it.
+`config.version` is what it said at a point in time. Thirteen kinds ship today — `service`,
+`role`, `policy`, `clause`, `dunning`, `workflow_template`, `confidence_tier`,
+`verification_policy`, `compliance_policy`, `escalation`, `chaser`, `nudge` and
+`request_template`; `rule_pack` joins them when T4.3 actually reads it.
 Adding a kind is a code change, because each kind needs a body validator in
-`domain/config/model.ts` and a kind without one accepts anything.
+`domain/config/model.ts` and a kind without one accepts anything — and a migration rewriting
+`entry_kind_check` (the newest is 0384), and the API's `KIND_VALUES` (a test holds it to
+`CONFIG_KINDS`, another holds `CONFIG_KINDS` to the newest migration stating the CHECK).
+
+**`request_template` (F1, 0384) is what a firm asks a client for, every period, and when.**
+`{ label, items: [{ key, label, askKind, documentKind, sendOffsetDays, dueOffsetDays }] }`, 1 to
+30 items: `askKind` is the ask's own document / question / approval (restated as
+`RequestAskKind`, held equal to `domain/clientask` by a test, because asks depend on templates
+and not the other way round), `documentKind` is present exactly for a document item (a client's
+books files are `books_input`), and both offsets are whole days counted from the period's LAST
+day — send 0 to 90, due 1 to 120 and later than send — so October with send 1 and due 5 is asked
+on 1 November and due on 5 November (`requestDates`, on the scheduler's `addDays`, no `Date`).
+`readRequestTemplate` is the one reader. A `workflow_template` step names one by KEY
+(`requestTemplateKey`), **read live like `verificationPolicyKey`**: the job pins its PROCESS, the
+list it asks a client for is pinned where it is used, on the ASK, which records the version it was
+raised from. Absent or null means the step asks for nothing, so every process already published
+still reads; the key is checked for shape only. `required` and `finHint` were refused: nothing
+reads them yet. Nothing is seeded.
 
 **Publishing freezes.** A published version's body can never change — enforced by a trigger
 in migration 0005, so it binds the owner role and the psql session too, not just the app.

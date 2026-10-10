@@ -40,6 +40,13 @@ import { PERMISSIONS, ROLE_AUDIENCES, isPermission, isRoleAudience } from "../au
 import type { Amount, Money } from "../money/model";
 import { MAX_AMOUNT_SCALE, isAmount, isCurrencyCode, normalizeCurrency } from "../money/model";
 import { isSac } from "../invoice/gst";
+// And for `request_template` (F1), the same argument twice more: what a
+// document kind IS belongs to `domain/filestore`, and counting days without a
+// `Date` belongs to `domain/scheduler`. A second list of kinds, or a second
+// calendar, would be free to drift from the one the upload and the sweep use.
+import type { DocumentKind } from "../filestore/model";
+import { DOCUMENT_KINDS, isDocumentKind } from "../filestore/model";
+import { addDays } from "../scheduler/model";
 
 /** The configured things this pass knows about. `rule_pack` joins them when
  *  T4.3 actually reads it — designing a body against no consumer is how a
@@ -49,7 +56,10 @@ import { isSac } from "../invoice/gst";
  *
  *  `policy` (0010) is the first NON-CATALOGUE kind — a rule the firm sets for
  *  itself rather than something it sells — which is what makes it the honest
- *  test of whether this spine generalises. */
+ *  test of whether this spine generalises.
+ *
+ *  `request_template` (F1, migration 0384) is the thirteenth: what a firm asks
+ *  a client for each period, and when. Its consumer is the requests sweep. */
 export type ConfigKind =
   | "service"
   | "role"
@@ -62,7 +72,8 @@ export type ConfigKind =
   | "compliance_policy"
   | "escalation"
   | "chaser"
-  | "nudge";
+  | "nudge"
+  | "request_template";
 
 export const CONFIG_KINDS: readonly ConfigKind[] = [
   "service",
@@ -77,6 +88,7 @@ export const CONFIG_KINDS: readonly ConfigKind[] = [
   "escalation",
   "chaser",
   "nudge",
+  "request_template",
 ];
 
 export function isConfigKind(v: string): v is ConfigKind {
@@ -818,6 +830,8 @@ export function validateBody(kind: ConfigKind, body: Record<string, unknown>): s
       return validateChaserBody(body);
     case "nudge":
       return validateNudgeBody(body);
+    case "request_template":
+      return validateRequestTemplateBody(body);
   }
 }
 
@@ -2598,6 +2612,26 @@ export interface WorkflowStep {
    * would freeze a firm's review rule to whenever it last edited its process.
    */
   readonly verificationPolicyKey: string | null;
+  /**
+   * The `request_template` KEY whose items the client is asked for when a job
+   * reaches this step (F1.2), or null when the step asks the client for
+   * nothing — which is what every step of every process published before this
+   * field meant, and why absent reads as null.
+   *
+   * A KEY read LIVE, exactly as `verificationPolicyKey` is, and for the same
+   * reason: the job pins its PROCESS, and what the firm asks a client for is a
+   * list it edits on its own clock. Pinning the request template here would
+   * freeze the firm's monthly list to whenever it last edited the process. The
+   * pin is taken where the question is actually decided: each ask records the
+   * `request_template` VERSION it was raised from, so "what did we ask for in
+   * October" answers with October's list.
+   *
+   * Shape only at the write (a valid config key). Whether the firm has a
+   * published template under that key is the reader's question, at the moment
+   * it raises asks: a body frozen years ago must still parse after the template
+   * it names has been retired, and a firm may write its process before its list.
+   */
+  readonly requestTemplateKey: string | null;
   /** Who is expected to do it — see `StepPerformer`. Null means anybody. */
   readonly performer: StepPerformer | null;
   /**
@@ -2642,6 +2676,7 @@ const WORKFLOW_STEP_FIELDS = [
   "dependsOn",
   "condition",
   "verificationPolicyKey",
+  "requestTemplateKey",
   "performer",
   "checklist",
   "reviewPoints",
@@ -2923,6 +2958,22 @@ function validateWorkflowTemplateBody(body: Record<string, unknown>): string | n
       }
     }
 
+    // Shape only, for `verificationPolicyKey`'s reason just above: the key is
+    // read live when a job reaches this step, and a body must go on parsing
+    // after the template it names is retired. Absent and null both mean "this
+    // step asks the client for nothing".
+    const requestKey = step["requestTemplateKey"];
+    if (requestKey !== undefined && requestKey !== null) {
+      if (typeof requestKey !== "string" || !isValidKey(requestKey)) {
+        return (
+          `${at}.requestTemplateKey must be the key of a request_template, a lowercase handle ` +
+          `like "monthly-close" (letters, digits, "-" or "_", at most ${String(MAX_KEY_LENGTH)} ` +
+          `characters), or null for a step that asks the client for nothing. ` +
+          `Got ${describe(requestKey)}`
+        );
+      }
+    }
+
     const performerProblem = validateStepPerformer(at, step["performer"]);
     if (performerProblem) return performerProblem;
 
@@ -3071,6 +3122,11 @@ export function readWorkflowTemplate(
       // it. "Nobody checks this step" is exactly what those templates meant.
       verificationPolicyKey:
         typeof s["verificationPolicyKey"] === "string" ? s["verificationPolicyKey"] : null,
+      // Absent reads as null for the same reason (F1.2): every template
+      // published before the field existed asks the client for nothing, and it
+      // is frozen, so it must go on reading exactly as it did.
+      requestTemplateKey:
+        typeof s["requestTemplateKey"] === "string" ? s["requestTemplateKey"] : null,
       performer: readStepPerformer(s["performer"]),
       // Absent reads as NO lines, and must: every template published before
       // T6.15 has neither list, a published version is frozen, and a job
@@ -3080,4 +3136,310 @@ export function readWorkflowTemplate(
     }),
   );
   return { label: body["label"] as string, steps };
+}
+
+// ── The request template (F1, migration 0384) ────────────────────────────────
+
+/**
+ * What a request template may ask a client for: the ask's own three kinds.
+ *
+ * RESTATED from `domain/clientask` (`AskKind`), deliberately, and held equal by
+ * `tests/config/request-template.test.ts`. The dependency points from asks TO
+ * templates: whatever raises an ask from a template item reads this file, so
+ * this file importing the ask's domain would make the two a cycle the import
+ * wall refuses. A test is the one place that may read both.
+ */
+export type RequestAskKind = "document" | "question" | "approval";
+
+export const REQUEST_ASK_KINDS: readonly RequestAskKind[] = ["document", "question", "approval"];
+
+export function isRequestAskKind(v: string): v is RequestAskKind {
+  return (REQUEST_ASK_KINDS as readonly string[]).includes(v);
+}
+
+/**
+ * ONE THING A FIRM ASKS A CLIENT FOR, EVERY PERIOD — "purchase invoices for the
+ * month", "bank statements", "confirm there were no cash sales".
+ *
+ * Today a firm asks for these by email at the start of every month, from a
+ * partner's memory, and the template is where that list gets written down once.
+ * A process step names the template (`WorkflowStep.requestTemplateKey`), and the
+ * requests sweep raises one ask per item per period on its send day.
+ *
+ * Six fields and no more (the F1 contract, 2026-10-10). `required` and `finHint`
+ * were in the first draft of the plan and are NOT here: nothing reads them yet,
+ * and a field designed against no consumer is the one a migration later has to
+ * undo. They arrive with whatever reads them.
+ */
+export interface RequestTemplateItem {
+  /**
+   * The item's own handle — `sales`, `bank_statements` — and never a position.
+   * Every ask raised from the item records it, and the sweep's once-per-period
+   * key is (work item, template key, item key): an index would re-key every ask
+   * already raised the day a firm inserts an item, and the sweep would ask the
+   * client a second time for something they already sent.
+   */
+  readonly key: string;
+  /** What the client reads on their action centre. Trimmed. */
+  readonly label: string;
+  readonly askKind: RequestAskKind;
+  /**
+   * What the client's upload is filed as. Present exactly when `askKind` is
+   * `document` (the ask's own CHECK, 0063, pairs them the same way). A client's
+   * books files name `books_input` (0383), which is the one kind fin takes in.
+   */
+  readonly documentKind: DocumentKind | null;
+  /** Whole days after the period's LAST day that the client is asked. 0 asks
+   *  on the last day itself. */
+  readonly sendOffsetDays: number;
+  /** Whole days after the period's LAST day that the answer is due. Always
+   *  later than the send. */
+  readonly dueOffsetDays: number;
+}
+
+export interface RequestTemplateBody {
+  /** What a partner picks the list by on a process step: "Monthly close". */
+  readonly label: string;
+  readonly items: readonly RequestTemplateItem[];
+}
+
+/** At most this many items in one template. The firm's monthly close is four;
+ *  thirty asks landing on a client on one morning is a list nobody answers, and
+ *  past it the answer is two templates on two steps. */
+export const MAX_REQUEST_ITEMS = 30;
+/** An item's label, trimmed, is at most this long. A client reads it. */
+export const MAX_REQUEST_ITEM_LABEL = 500;
+/** The template's own label, trimmed, is at most this long. A partner picks
+ *  it from a list on a process step. */
+export const MAX_REQUEST_TEMPLATE_LABEL = 200;
+/** The latest a client is asked, in days after the period's last day. A
+ *  quarter later is not a monthly request any more. */
+export const MAX_SEND_OFFSET_DAYS = 90;
+/** The latest an answer is due, in days after the period's last day. */
+export const MAX_DUE_OFFSET_DAYS = 120;
+
+const REQUEST_TEMPLATE_FIELDS = ["label", "items"];
+const REQUEST_ITEM_FIELDS = [
+  "key",
+  "label",
+  "askKind",
+  "documentKind",
+  "sendOffsetDays",
+  "dueOffsetDays",
+];
+
+/**
+ * Every refusal names the item by position AND key, the field, the bad value
+ * and what would be accepted, because a partner fixes this on a screen and a
+ * sweep at 3am cannot. All six fields are required on every item: the kind is
+ * new, so there is no frozen body written before a field existed to excuse, and
+ * a `documentKind` left out is a question the writer did not answer.
+ */
+function validateRequestTemplateBody(body: Record<string, unknown>): string | null {
+  const unknown = unknownFields(body, REQUEST_TEMPLATE_FIELDS);
+  if (unknown) return unknown;
+
+  const label = body["label"];
+  if (
+    typeof label !== "string" ||
+    label.trim() === "" ||
+    label.trim().length > MAX_REQUEST_TEMPLATE_LABEL
+  ) {
+    return (
+      `"label" must be 1 to ${String(MAX_REQUEST_TEMPLATE_LABEL)} characters once spaces are ` +
+      `trimmed: it is what a partner picks this list by on a process step, like "Monthly close". ` +
+      `Got ${describe(label)}`
+    );
+  }
+
+  const items = body["items"];
+  if (!Array.isArray(items) || items.length === 0) {
+    return (
+      `"items" must be a non-empty list of what to ask the client for, each { key, label, ` +
+      `askKind, documentKind, sendOffsetDays, dueOffsetDays }: a template that asks for nothing ` +
+      `raises nothing. Got ${describe(items)}`
+    );
+  }
+  if (items.length > MAX_REQUEST_ITEMS) {
+    return (
+      `"items" has ${String(items.length)} items, and one template holds at most ` +
+      `${String(MAX_REQUEST_ITEMS)}. Split it into two templates on two steps: that many asks ` +
+      `landing on a client on one morning is a list nobody answers.`
+    );
+  }
+
+  const keys = new Set<string>();
+  for (const [index, raw] of items.entries()) {
+    const at = `items[${String(index)}]`;
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      return (
+        `${at} must be { key, label, askKind, documentKind, sendOffsetDays, dueOffsetDays }. ` +
+        `Got ${describe(raw)}`
+      );
+    }
+    const item = raw as Record<string, unknown>;
+    const unknownItem = unknownFields(item, REQUEST_ITEM_FIELDS);
+    if (unknownItem) return `${at}: ${unknownItem}`;
+
+    const key = item["key"];
+    if (typeof key !== "string" || !isValidStepKey(key)) {
+      return (
+        `${at}.key must be a lowercase handle (2 to 40 characters: letters, digits, "-" or "_"), ` +
+        `like "sales" or "bank_statements". Every ask raised from this item records it. ` +
+        `Got ${describe(key)}`
+      );
+    }
+    // From here on the item is named by its key as well as its position: the
+    // key is what the person reading this typed.
+    const here = `${at} (${JSON.stringify(key)})`;
+    // The sweep raises one ask per item per period, keyed on the item's key, so
+    // the second of two items sharing one would silently never be asked for.
+    if (keys.has(key)) {
+      return (
+        `${here}.key appears twice in this template. Each item needs its own key: asks are ` +
+        `raised once per item per period, keyed on it, so the second would never be asked for.`
+      );
+    }
+    keys.add(key);
+
+    const itemLabel = item["label"];
+    if (
+      typeof itemLabel !== "string" ||
+      itemLabel.trim() === "" ||
+      itemLabel.trim().length > MAX_REQUEST_ITEM_LABEL
+    ) {
+      return (
+        `${here}.label must be 1 to ${String(MAX_REQUEST_ITEM_LABEL)} characters once spaces are ` +
+        `trimmed: it is the sentence the client reads, like "Purchase invoices for the month". ` +
+        `Got ${describe(itemLabel)}`
+      );
+    }
+
+    const askKind = item["askKind"];
+    if (typeof askKind !== "string" || !isRequestAskKind(askKind)) {
+      return (
+        `${here}.askKind must be one of ${REQUEST_ASK_KINDS.join(", ")}: a file to upload, a ` +
+        `question to answer, or a yes or no. Got ${describe(askKind)}`
+      );
+    }
+
+    // Paired exactly as the ask's own CHECK pairs them (0063): a document item
+    // says what its upload is filed as, and nothing else names a kind at all.
+    const documentKind = item["documentKind"];
+    if (askKind === "document") {
+      if (typeof documentKind !== "string" || !isDocumentKind(documentKind)) {
+        return (
+          `${here}.documentKind must say what the client's upload is filed as, one of ` +
+          `${DOCUMENT_KINDS.join(", ")}. A client's books files (invoices, statements, payroll) ` +
+          `are "books_input". Got ${describe(documentKind)}`
+        );
+      }
+    } else if (documentKind !== null) {
+      return (
+        `${here}.documentKind must be null for a ${askKind} item: only a "document" item asks ` +
+        `for a file, so only it says what the file is filed as. Got ${describe(documentKind)}`
+      );
+    }
+
+    const send = item["sendOffsetDays"];
+    if (
+      typeof send !== "number" ||
+      !Number.isInteger(send) ||
+      send < 0 ||
+      send > MAX_SEND_OFFSET_DAYS
+    ) {
+      return (
+        `${here}.sendOffsetDays must be a whole number of days from 0 to ` +
+        `${String(MAX_SEND_OFFSET_DAYS)}, counted from the period's LAST day: 0 asks on the last ` +
+        `day itself, 1 on the day after. Got ${describe(send)}`
+      );
+    }
+    const due = item["dueOffsetDays"];
+    if (
+      typeof due !== "number" ||
+      !Number.isInteger(due) ||
+      due < 1 ||
+      due > MAX_DUE_OFFSET_DAYS
+    ) {
+      return (
+        `${here}.dueOffsetDays must be a whole number of days from 1 to ` +
+        `${String(MAX_DUE_OFFSET_DAYS)}, counted from the period's LAST day: 5 is due on the 5th ` +
+        `of the next month. Got ${describe(due)}`
+      );
+    }
+    if (due <= send) {
+      return (
+        `${here}.dueOffsetDays is ${String(due)} and sendOffsetDays is ${String(send)}: the answer ` +
+        `must be due AFTER the day the client is asked, so dueOffsetDays must be at least ` +
+        `${String(send + 1)}. Both count from the period's last day.`
+      );
+    }
+  }
+  return null;
+}
+
+/**
+ * A stored request template, read back — the ONE reader for
+ * `kind='request_template'`.
+ *
+ * Null rather than a throw when the body is not one, for `readWorkflowTemplate`'s
+ * reason: an ask's PINNED version is history, and history that no longer parses
+ * is a fact about the past, not an exception to raise at whoever asked. Labels
+ * are trimmed on the way out, so an ask copies what the screen shows.
+ */
+export function readRequestTemplate(body: Record<string, unknown>): RequestTemplateBody | null {
+  if (validateRequestTemplateBody(body) !== null) return null;
+  const items = (body["items"] as Record<string, unknown>[]).map(
+    (i): RequestTemplateItem => {
+      const askKind = i["askKind"] as RequestAskKind;
+      return {
+        key: i["key"] as string,
+        label: (i["label"] as string).trim(),
+        askKind,
+        documentKind: askKind === "document" ? (i["documentKind"] as DocumentKind) : null,
+        sendOffsetDays: i["sendOffsetDays"] as number,
+        dueOffsetDays: i["dueOffsetDays"] as number,
+      };
+    },
+  );
+  return { label: (body["label"] as string).trim(), items };
+}
+
+/** The two days an item's ask carries for one period. */
+export interface RequestDates {
+  /** The day the client is asked, on or after which the sweep raises it. */
+  readonly sendOn: string;
+  /** The day the answer is due. */
+  readonly dueOn: string;
+}
+
+/**
+ * WHEN ONE ITEM IS ASKED FOR, AND DUE, FOR ONE PERIOD.
+ *
+ * Both offsets count from the period's LAST day, never its first: a month's
+ * papers exist only once the month is over, and "send 1, due 5" is how a firm
+ * already says "on the 1st, back by the 5th". October, period end 2025-10-31,
+ * send 1 and due 5: asked on 2025-11-01, due 2025-11-05. A quarter ending
+ * 2025-12-31 with send 1 is asked on 2026-01-01.
+ *
+ * Pure, and with no `Date` arithmetic of its own: `addDays` is the scheduler's,
+ * on ISO days, so a month end, a year end and a leap February come out the way
+ * the calendar says. The period end must be a real day; anything else is a
+ * caller's bug and is refused rather than rolled into some other month, which
+ * would put a plausible wrong date on a client's request.
+ */
+export function requestDates(
+  periodEnd: string,
+  item: Pick<RequestTemplateItem, "sendOffsetDays" | "dueOffsetDays">,
+): RequestDates {
+  if (!isCalendarDay(periodEnd)) {
+    throw new RangeError(
+      `requestDates: periodEnd must be the period's last day as YYYY-MM-DD, a day that exists ` +
+        `(like "2025-10-31"). Got ${JSON.stringify(periodEnd)}`,
+    );
+  }
+  return {
+    sendOn: addDays(periodEnd, item.sendOffsetDays),
+    dueOn: addDays(periodEnd, item.dueOffsetDays),
+  };
 }
