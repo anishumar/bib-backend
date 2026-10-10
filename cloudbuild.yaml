@@ -59,7 +59,7 @@
 # The FRONTEND is not built here either, and that is structural: `bib-frontend`
 # is a separate git repository, so its source is not in the tarball
 # `gcloud builds submit` uploads from this one. It deploys from its own
-# workflow; `docs/deploy/runbook.md` has the exact build and deploy commands,
+# workflow; `bib-docs/backend/deploy/runbook.md` has the exact build and deploy commands,
 # including the build arg that must be right before `next build` runs.
 
 substitutions:

@@ -15,7 +15,7 @@ numbered `.sql` files sitting next to `migrations/` reads as one.
 superuser — the default user is a member of `cloudsqlsuperuser` and holds CREATEROLE,
 CREATEDB and LOGIN and nothing else — so two statements the migrator issues need privileges
 that platform cannot hand out. The bootstrap closes what can be closed from SQL; the rest is
-two changes to `migrate.ts`, written out in full in `docs/deploy/database.md`.
+two changes to `migrate.ts`, written out in full in `bib-docs/backend/deploy/database.md`.
 
 **Why `verify_wall.sql` exists on top of `src/db/boot-check.ts`.** Two reasons. It asks the
 same questions with no image, no revision and no crash loop involved, which matters because
@@ -28,5 +28,5 @@ in that state and the tenant wall is open.
 The `0000` prefix means "before `migrations/0001`". It is not a version number and nothing
 sorts against it.
 
-Read `docs/deploy/database.md` before running either. It carries the order, the URLs, the
+Read `bib-docs/backend/deploy/database.md` before running either. It carries the order, the URLs, the
 role model and the argument behind each of them.

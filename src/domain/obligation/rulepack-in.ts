@@ -2,7 +2,7 @@
 //
 // ── WHAT THIS IS READING ───────────────────────────────────────────────────
 //
-// `docs/India_Compliance_Calendar_Applicability_Business_in_a_Box.xlsx`, sent by
+// `bib-docs/backend/India_Compliance_Calendar_Applicability_Business_in_a_Box.xlsx`, sent by
 // the firm's founder on 2026-08-30: FIFTY-FIVE obligations across twelve
 // modules — Income Tax, TDS, GST, Payroll, MCA, Transfer Pricing, FEMA/RBI,
 // Payments, POSH, Labour, Data Privacy and industry licences.
@@ -99,7 +99,7 @@ export interface SeedRule {
   readonly unresolvedReason: string | null;
   /** What the sheet's `Applicability Threshold / Trigger` column said. Carried
    *  verbatim because nothing in this schema can yet TEST it — see the note on
-   *  thresholds in `docs/MERGE_BUILD-PLAN.md` — and dropping it would lose the
+   *  thresholds in `bib-docs/backend/MERGE_BUILD-PLAN.md` — and dropping it would lose the
    *  firm's own statement of who each rule reaches. */
   readonly applicabilityNote: string;
   readonly exceptions?: readonly SeedException[];

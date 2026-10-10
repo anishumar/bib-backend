@@ -41,7 +41,7 @@ PASSWORD=${BIB_DEMO_PASSWORD:-'10x Global demo 2026'}
 # ── THE ONE THING THIS SCRIPT MUST NEVER DO ─────────────────────────────────
 #
 # It seeds FIXED logins with a FIXED password. That is exactly what makes the
-# demo usable — `siddharth@10xglobal.in` is written in DEMO.md and typed by
+# demo usable — `siddharth@10xglobal.in` is written in bib-docs/backend/DEMO.md and typed by
 # whoever is presenting — and it is also a set of published credentials. Run
 # against anything but a throwaway local database, it puts them there.
 #

@@ -31,7 +31,7 @@
 -- dissuper)` at line 762 and `if (dbypassRLS && !has_bypassrls_privilege(
 -- currentUserId))` at line 812 — both operands are DefElem POINTERS). No grant
 -- issued from this file changes that, because no role in a Cloud SQL instance
--- holds either attribute to lend. `docs/deploy/database.md` carries the two-line
+-- holds either attribute to lend. `bib-docs/backend/deploy/database.md` carries the two-line
 -- change to `src/cmd/migrate.ts` that fixes it, and the whole point of the change
 -- is that it ASSERTS the two attributes rather than setting them — which is
 -- strictly as strong, because NOBYPASSRLS is the CREATE ROLE default and a cluster
@@ -327,7 +327,7 @@ BEGIN
   RAISE NOTICE '  ledger      tenancy.schema_migrations, owned by bib_owner';
   RAISE NOTICE '';
   RAISE NOTICE 'next: run the migrate job, then infra/sql/verify_wall.sql as bib_app,';
-  RAISE NOTICE 'then deploy the server and the worker. docs/deploy/database.md has the';
+  RAISE NOTICE 'then deploy the server and the worker. bib-docs/backend/deploy/database.md has the';
   RAISE NOTICE 'whole order and what each step proves.';
   RAISE NOTICE '';
 END $$;
