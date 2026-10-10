@@ -74,8 +74,16 @@ Each one names the tasks it blocks.
 - [x] **F0.7 Permissions: `books:read`.** Add it to `domain/authz/model.ts` and `DEFAULT_ROLES` (Partner, Manager, Associate), with a migration that gives it to every role carrying `work:write`.
   ✔ `tests/config/seed-parity.test.ts` passes.
   *Done 2026-10-10 as `0382_books_read_permission`, using 0364's method. The other three land with the routes that first check them, because this codebase forbids a permission nothing checks ("a lie on a screen"): `books:write` with F2.8 (staging commit), `compliance:determine` with F6.1, and `compliance:approve` with F7.4.*
-- [ ] **F0.8 Frontend shell.** Add `bib-frontend/src/app/fin/` with a layout and the app's **first** `error.tsx` boundary. The nav entry is hidden when fin is off.
+- [x] **F0.8 Frontend shell.** Add `bib-frontend/src/app/fin/` with a layout and the app's **first** `error.tsx` boundary. The nav entry is hidden when fin is off.
   ✔ With fin forced to throw, only the fin panel shows the error. Frontend `npm run check` passes.
+  *Done 2026-10-11 (backend `738d612`, frontend `b05f46d`).*
+  - *Backend: `GET /api/v1/fin/status`, and the intake list gains client and reader filters, whole-set counts and an id cursor.*
+  - *Frontend:*
+    - *"Files received" at `/fin/intake`: six count tiles that filter the list, with "Needs a person" in amber; a callout when files wait for a person; filters kept in the URL; "Show more"; downloads of the exact version fin took in.*
+    - *The nav entry appears only when the status answers 200.*
+    - *`src/app/fin/error.tsx` is the app's first error boundary.*
+  - *Walked by an agent with Playwright, 36/36 checks: 1,169 = 841/222/101/0/5; the boundary with a working nav; the off state on a 404; the unreachable state on a 503.*
+  - *Not walked: a role without `books:read` or `party:read`, because the sandbox has only a partner login.*
 - [ ] **F0.9 Infra.** In `infra/terraform/`, add:
   - `run_fin.tf`: a Cloud Run **Job**, modelled on `run_migrate.tf`
   - a Cloud Scheduler trigger every 10 minutes (no scheduler exists in Terraform yet)
@@ -416,3 +424,4 @@ India pack (GST and TDS evaluators, Tally intake); GSTR-2B and IRAS register che
 | 2026-10-10 | decision | (this commit) | Document kind for books files: option B. `0383_books_input_kind`; fin takes only `books_input`. Frontend `feat/fin` adds the labels and regenerated API types. Checked against the real API: a `books_input` upload is taken in and an `other` upload is left alone. The 1,168 sandbox files were loaded as `other` before this, so their intake items stand; a fresh `fin:pack` files as `books_input`. `check` 3575 and `test:integration` 1131 pass. |
 | 2026-10-10 | F1.1–F1.3 | 7d34df0, c3770cb | Built by two agents in parallel worktrees against the F1 contract, then merged without conflicts. Merged gates: `check` 3637 and `test:integration` 1153 on Node 22. |
 | 2026-10-10 | F1.4, F1.5 (staff), F1.7 | merge of 2194438, 924364e (frontend) | Phase 2 ran as two parallel agents: the sweep (backend) and the screens (frontend). Merged gates: `check` 3677 and `test:integration` 1161. **Local DB note:** the sweep agent ran `worker:once` (mail to the log) once, so every sweep caught up on the dev DB: about 511 jobs and 294 period jobs spawned, 56 advance bills, 14 tasks and so on. The sandbox walk left a published "Monthly close" template, a draft process and one test task. |
+| 2026-10-11 | F0.8 | 738d612, b05f46d (frontend) | The fin screen. Fin now has a UI for what it does today, the intake list; reading what is inside the files is F2. |
