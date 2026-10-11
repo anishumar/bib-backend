@@ -37,6 +37,31 @@ export function errorResponse(description: string): {
   };
 }
 
+/** The `Retry-After` header a 503 carries, in seconds (`errorHeaders`). */
+const RetryAfterHeaders = z.object({
+  "Retry-After": z.string().openapi({
+    description: "How many seconds to wait before asking again.",
+    example: "30",
+  }),
+});
+
+/**
+ * A 503 entry: the error envelope, code `UNAVAILABLE`, plus `Retry-After`. For a
+ * route whose stage of the product can stop answering while the rest works
+ * (FinCompliance, F0.6), so the generated client knows the status exists.
+ */
+export function unavailableResponse(description: string): {
+  description: string;
+  headers: typeof RetryAfterHeaders;
+  content: { "application/json": { schema: typeof ErrorEnvelopeSchema } };
+} {
+  return {
+    description,
+    headers: RetryAfterHeaders,
+    content: { "application/json": { schema: ErrorEnvelopeSchema } },
+  };
+}
+
 /**
  * The app factory. Its `defaultHook` is the whole reason validation stays
  * honest: when the framework rejects a request against a route's schema, the

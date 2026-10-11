@@ -16,14 +16,7 @@ import type {
   NewIntakeItem,
 } from "../../usecase/fin/ports";
 import { isoInstant } from "../postgres/instant";
-
-/**
- * How long one fin read may take on the API's pool. Fin's screens read through
- * the same pool as every core request, so a slow fin query is capped here,
- * well below the pool's own limit, rather than allowed to hold a connection
- * core needs.
- */
-const FIN_READ_TIMEOUT_MS = 5_000;
+import { finUnavailableOnFailure, withFinRead } from "./unavailable";
 
 export class PostgresFinFirms implements FinFirms {
   constructor(private readonly app: Db) {}
@@ -40,12 +33,16 @@ export class PostgresFinFirms implements FinFirms {
   }
 
   async enabledSince(tenantId: string): Promise<string | null> {
-    const [row] = await this.app<{ since: string | null }[]>`
-      SELECT CASE WHEN status = 'active'
-                  THEN ${this.app.unsafe(isoInstant("fin_enabled_since"))} END AS since
-        FROM tenancy.tenant WHERE id = ${tenantId}
-    `;
-    return row?.since ?? null;
+    // Every fin route asks this first, so a database that does not answer
+    // must reach the screen as fin's 503 here too (F0.6), not as a 500.
+    return finUnavailableOnFailure("whether fin is on for this firm", async () => {
+      const [row] = await this.app<{ since: string | null }[]>`
+        SELECT CASE WHEN status = 'active'
+                    THEN ${this.app.unsafe(isoInstant("fin_enabled_since"))} END AS since
+          FROM tenancy.tenant WHERE id = ${tenantId}
+      `;
+      return row?.since ?? null;
+    });
   }
 }
 
@@ -135,8 +132,7 @@ export class PostgresIntakeRepository implements IntakeRepository {
   }
 
   async summary(tenantId: string, clientPartyId: string | null): Promise<IntakeSummary> {
-    return withTenant(this.app, tenantId, async (db) => {
-      await db`SELECT set_config('statement_timeout', ${String(FIN_READ_TIMEOUT_MS)}, true)`;
+    return withFinRead(this.app, tenantId, "the intake counts", async (db) => {
       const rows = await db<{ route: IntakeRoute; n: number }[]>`
         SELECT route, count(*)::int AS n
           FROM fin.intake_item
@@ -150,8 +146,7 @@ export class PostgresIntakeRepository implements IntakeRepository {
   }
 
   async list(tenantId: string, filter: IntakeFilter): Promise<readonly IntakeItemView[]> {
-    return withTenant(this.app, tenantId, async (db) => {
-      await db`SELECT set_config('statement_timeout', ${String(FIN_READ_TIMEOUT_MS)}, true)`;
+    return withFinRead(this.app, tenantId, "the intake list", async (db) => {
       const rows = await db<ItemRow[]>`
         SELECT i.id,
                v.document_id,

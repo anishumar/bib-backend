@@ -2,11 +2,15 @@
 //
 // Registered only when BIB_FIN_ENABLED is on (see `setup/fin.ts`); off, every
 // /api/v1/fin path is a 404 because nothing is there. A firm without its own
-// switch gets 404 too (`FIN_NOT_ENABLED`), from the service.
+// switch gets 404 too (`FIN_NOT_ENABLED`), from the service. A fin read that
+// times out or cannot reach the database answers 503 (`UNAVAILABLE`, reason
+// `FIN_UNAVAILABLE`, with `Retry-After`), translated in fin's adapters by
+// `infrastructure/fin/unavailable.ts`, so the fin screen shows "unreachable"
+// and nothing else in BiB notices.
 import { createRoute } from "@hono/zod-openapi";
 import type { OpenAPIHono } from "@hono/zod-openapi";
 import type { AppEnv } from "../guards";
-import { z, errorResponse } from "../openapi";
+import { z, errorResponse, unavailableResponse } from "../openapi";
 import { scopeOf } from "../scope";
 import type { FinIntakeService } from "../../usecase/fin/intake";
 import type { IntakeItemView } from "../../usecase/fin/ports";
@@ -18,6 +22,12 @@ export interface FinDeps {
 }
 
 const MAX_INTAKE_LIMIT = 500;
+
+/** Every fin route documents its 503 with this sentence (F0.6). */
+const FIN_UNAVAILABLE_DESCRIPTION =
+  "FinCompliance's database did not answer in time or could not be reached (code UNAVAILABLE, " +
+  "reason FIN_UNAVAILABLE). Nothing is wrong with the request and the rest of BiB is working: " +
+  "show fin as unreachable and ask again after `Retry-After` seconds.";
 
 const RouteEnum = z.enum(INTAKE_ROUTES as unknown as [string, ...string[]]);
 
@@ -86,6 +96,7 @@ const statusRoute = createRoute({
     401: errorResponse("No authenticated session"),
     403: errorResponse("No org chosen, or the role may not read the books"),
     404: errorResponse("FinCompliance is not switched on for this firm (FIN_NOT_ENABLED)"),
+    503: unavailableResponse(FIN_UNAVAILABLE_DESCRIPTION),
   },
 });
 
@@ -138,6 +149,7 @@ const intakeRoute = createRoute({
     401: errorResponse("No authenticated session"),
     403: errorResponse("No org chosen, or the role may not read the books"),
     404: errorResponse("FinCompliance is not switched on for this firm (FIN_NOT_ENABLED)"),
+    503: unavailableResponse(FIN_UNAVAILABLE_DESCRIPTION),
   },
 });
 

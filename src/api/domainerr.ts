@@ -66,19 +66,32 @@ export const ERROR_CODES = [
   // anybody woken up at night needs to know.
   "PAYLOAD_TOO_LARGE",
   "UPSTREAM_FAILURE",
+  // 503, added with FinCompliance's unreachable state (F0.6). Not
+  // UPSTREAM_FAILURE: that one is a system behind this one losing something
+  // it should have had (a blob gone from storage), and it does not pass by
+  // waiting. This one is a stage of the product that did not answer in time
+  // and is expected to: the caller is told to try again (`Retry-After`), and a
+  // screen shows that stage as unreachable while the rest keeps working. Which
+  // stage is in `reason` (`FIN_UNAVAILABLE`), never in a code of its own: no
+  // service adds to this set.
+  "UNAVAILABLE",
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];
 
 /** The HTTP statuses this system emits — a closed set, so it is assignable to
  *  the transport's status type without a cast. */
-export type HttpStatus = 400 | 401 | 403 | 404 | 409 | 413 | 429 | 500 | 501 | 502;
+export type HttpStatus = 400 | 401 | 403 | 404 | 409 | 413 | 429 | 500 | 501 | 502 | 503;
 
 export interface MappedError {
   readonly status: HttpStatus;
   readonly code: ErrorCode;
   readonly message: string;
   readonly reason?: string;
+  /** Seconds the caller should wait before asking again, sent as the
+   *  `Retry-After` header (`errorHeaders` in httpresp.ts). Only an answer that
+   *  will pass by waiting carries one; the envelope's body never does. */
+  readonly retryAfterSeconds?: number;
 }
 
 /**
@@ -100,6 +113,9 @@ export interface MappedError {
  * It still returns 500 at runtime rather than throwing, because a mapper that
  * crashes turns a mislabelled error into no response at all.
  */
+/** How long a caller told fin is unavailable should wait (`Retry-After`). */
+export const FIN_RETRY_AFTER_SECONDS = 30;
+
 function unmapped(code: never): MappedError {
   return { status: 500, code: "INTERNAL", message: "internal error", reason: String(code) };
 }
@@ -1133,6 +1149,19 @@ export function mapError(err: unknown): MappedError {
       // send somebody looking for a permission no role change can grant.
       case "FIN_NOT_ENABLED":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      // Fin's database did not answer (a read hit fin's statement timeout, or
+      // could not connect). 503 and never 500: nothing is wrong with the request
+      // or the code, the screen shows fin as unreachable, and the rest of BiB
+      // carries on (ground rule 4). Thirty seconds is long enough for a slow
+      // query to clear and short enough that "Try again" is honest.
+      case "FIN_UNAVAILABLE":
+        return {
+          status: 503,
+          code: "UNAVAILABLE",
+          message: err.message,
+          reason: err.code,
+          retryAfterSeconds: FIN_RETRY_AFTER_SECONDS,
+        };
       default:
         return unmapped(err.code);
     }

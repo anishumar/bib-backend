@@ -111,7 +111,7 @@ import type { DocumentDeps } from "./handler/document";
 import { registerAuthRoutes } from "./handler/auth";
 import type { AuthDeps } from "./handler/auth";
 import { mapError } from "./domainerr";
-import { toEnvelope } from "./httpresp";
+import { errorHeaders, toEnvelope } from "./httpresp";
 
 /**
  * The largest JSON body this API will read, in bytes.
@@ -269,8 +269,13 @@ export function buildRouter(
     const m = mapError(err);
     if (m.code === "INTERNAL") {
       log.error({ err, path: c.req.path, method: c.req.method }, "unhandled error");
+    } else if (m.code === "UNAVAILABLE") {
+      // Not a bug and not the caller's fault, but an operator wants to know a
+      // stage of the product stopped answering (F0.6). The cause rides on the
+      // error; the caller is told only to try again.
+      log.warn({ err, path: c.req.path, method: c.req.method, reason: m.reason }, "unavailable");
     }
-    return c.json(toEnvelope(m), m.status);
+    return c.json(toEnvelope(m), m.status, errorHeaders(m));
   });
 
   // An unknown path, in the SAME envelope as every other refusal.
