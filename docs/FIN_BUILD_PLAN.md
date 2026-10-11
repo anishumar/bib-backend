@@ -224,6 +224,34 @@ Estimate: 4–5 days, plus 6–10 days of readers, plus scan tuning. This is v3.
 - [ ] **F2.12 POS and customs.** Read company C's daily POS CSVs and company B's customs permit advices.
   ✔ Totals match `documents_manifest.csv`.
 
+### Wave 3 contract (fixed 2026-10-11, before the work was split)
+
+Six agents build against these shapes in parallel worktrees, each on its own database (`bib_fin_<letter>`), and the plan owner merges. A change to a shared shape goes through the plan owner, not into one branch.
+
+**Shared types, written before the split (do not change without the owner):**
+- `src/domain/fin/lines.ts`: `DocKind`, `Reader` (`sheet` | `pdf_text` | `vision`), the three line drafts (`DocumentLineDraft`, `StatementLineDraft`, `PayrollLineDraft`), `ReadControl`, `ReadDraft`, `ReadProblem`, and `PdfText`. Money is a decimal string; a statement line is signed (in +, out −).
+- `src/domain/fin/finding.ts`: `FindingDraft` (lane `rule` | `pattern`, `checkKey`, client, period, `lineIds`, `facts`, `dedupeKey`).
+- `src/usecase/fin/reading.ts`: the ports `DocumentReader` (returns `read` | `not_mine` | `needs_person`), `PdfTextReader`, `ImageNormaliser`, `ArchiveReader` with `ArchiveLimits`.
+- The new dependencies are installed once on `feat/fin` (pinned): `pdfjs-dist@6.3.289`, `sharp@0.35.4`, `@anthropic-ai/sdk@0.128.0`. No agent adds a dependency.
+- The arch rule treats `api/handler/fin-*.ts` and `testfakes/fin-*.ts` as fin.
+
+| Agent | Tasks | Migration | Owns |
+|---|---|---|---|
+| **L** lines and sheets | F2.5, F2.6, the CSV half of F2.9, F2.11 (sheet side), the read sweep | `0386` | `fin.read`, `fin.transaction_line`, `fin.source_format`; `domain/fin/{read,control,sheet*}.ts`; `usecase/fin/read*.ts`; `infrastructure/fin/{postgres-read*,sheet*,version-bytes}.ts`; `api/handler/fin-reads.ts`; `testfakes/fin-reads.ts` |
+| **R** readers | F2.3, F2.7, the PDF half of F2.9 | none | `infrastructure/fin/{pdf-text,zip-archive,image}*.ts`; `domain/fin/statement-pdf*.ts`; `testfakes/fin-readers.ts` |
+| **X** AI extractor | F2.4 (fake + Claude adapter; no live call without a key) | `0389` | `fin.extraction_usage`; `domain/fin/extraction*.ts`; `usecase/fin/extract*.ts`; `infrastructure/fin/claude*.ts`; `testfakes/fin-extract.ts`; the `BIB_FIN_AI_*` config keys |
+| **C** findings and rules | F4.1, F4.2, F4.3 and F4.5 as pure checks, and `books:write` | `0387`, `0388` (role seed) | `fin.rule_parameter`, `fin.finding`, `fin.finding_decision`; `domain/fin/{parameters,checks*}.ts`; `usecase/fin/finding*.ts`; `api/handler/fin-findings.ts`; `testfakes/fin-findings.ts` |
+| **M** patterns | F5.1 (the arithmetic), F5.2–F5.5 as pure functions, F5.6 on answer-key lines | none | `domain/fin/pattern*.ts`; `scripts/fin-backtest.ts` |
+| **D** core gaps | F0.6 (503 `FIN_UNAVAILABLE`), F1.6 (multi-file, on behalf), backend and frontend | `0390` if needed | client ask files in core, the ask screens in the frontend |
+
+**Rules for every agent:**
+- Shared files may be edited only by appending: `src/setup/fin.ts`, `src/cmd/fin-once.ts`, `src/api/router.ts` (`ROUTE_PERMISSIONS`), `src/api/domainerr.ts`, `src/domain/fin/errors.ts`, `src/domain/ledger/model.ts` with `docs/EVENT-CONTRACT.md`. The owner resolves the merge.
+- Nobody edits `CLAUDE.md` or this file. Each agent reports what it decided, and the owner writes it up.
+- No test may read `99_Ground_Truth` as an INPUT to a reader. A test or a backtest may read it as the EXPECTED answer. Tests that need the training pack skip when the pack folder is absent.
+- `npm run check` and `npm run test:integration` pass on Node 22, against the agent's own database.
+
+**Reading flow (L wires it, R and X plug in):** `fin:once` runs the intake sweep, then the read sweep. The read sweep takes intake items with no `fin.read` row (an anti-join, at-least-once), fetches the version's bytes, and offers them to the readers in order. The first answer that is not `not_mine` is stored in one transaction: one `fin.read` row (`staged`, `needs_person` or `failed`), its `fin.transaction_line` rows with `proposed` frozen, and one ledger event, written only when the read was created. The control figures are checked for every read, whoever read it; a mismatch makes the read `needs_person` with `control_mismatch`.
+
 ## F3: Coding and books
 
 Estimate: 10–15 days. This is v3.2 §14, and its scope depends on the "is BiB the books" decision.
