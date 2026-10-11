@@ -1133,6 +1133,12 @@ export function mapError(err: unknown): MappedError {
       // send somebody looking for a permission no role change can grant.
       case "FIN_NOT_ENABLED":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      // A file the client sent cannot be read: raised in the fin job and turned
+      // into "needs a person" there, so reaching HTTP means a route handed one
+      // over. The file is the problem, never the request or the server.
+      case "FIN_PDF_UNREADABLE":
+      case "FIN_IMAGE_UNREADABLE":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
     }
