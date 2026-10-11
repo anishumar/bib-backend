@@ -24,6 +24,18 @@ import { LedgerService } from "../usecase/ledger/service";
 import type { EventSink } from "../usecase/ledger/ports";
 import { FinIntakeService } from "../usecase/fin/intake";
 import type { FinDeps } from "../api/handler/fin";
+import { DEFAULT_ARCHIVE_LIMITS } from "../domain/fin/archive";
+import { PdfJsTextReader } from "../infrastructure/fin/pdf-text";
+import { SharpImageNormaliser } from "../infrastructure/fin/image-normaliser";
+import { NodeZipArchiveReader } from "../infrastructure/fin/zip-archive";
+import type {
+  ArchiveLimits,
+  ArchiveReader,
+  DocumentReader,
+  ImageNormaliser,
+  PdfTextReader,
+} from "../usecase/fin/reading";
+import { pdfStatementReader } from "../usecase/fin/statement-pdf-reader";
 
 export interface WiredFinJob {
   readonly intake: FinIntakeService;
@@ -51,4 +63,32 @@ export function wireFinJob(cfg: Config): WiredFinJob {
 export function finApiDeps(cfg: Config, app: Db, events: EventSink): FinDeps | undefined {
   if (!cfg.fin.enabled) return undefined;
   return { intake: intakeService(app, events) };
+}
+
+// ── The file readers (F2.3, F2.7, F2.9 PDF half, F2.10) ─────────────────────
+//
+// The adapters behind `usecase/fin/reading.ts` and the PDF statement reader
+// built on them. The read sweep (F2.5/F2.6) takes `statementPdf` into its
+// ordered reader list (sheet, pdf_text, vision); the AI reader takes `images`
+// and `pdfText`; archive intake takes `archives` with `archiveLimits`. Built
+// here and not in `wireFinJob` so the sweep's wiring is one line wherever it
+// lands. Each adapter loads its library (pdf.js, sharp) on first use, so
+// importing this file, as the API's composition root does, loads neither.
+export interface FinFileReaders {
+  readonly pdfText: PdfTextReader;
+  readonly images: ImageNormaliser;
+  readonly archives: ArchiveReader;
+  readonly archiveLimits: ArchiveLimits;
+  readonly statementPdf: DocumentReader;
+}
+
+export function finFileReaders(): FinFileReaders {
+  const pdfText = new PdfJsTextReader();
+  return {
+    pdfText,
+    images: new SharpImageNormaliser(),
+    archives: new NodeZipArchiveReader(),
+    archiveLimits: DEFAULT_ARCHIVE_LIMITS,
+    statementPdf: pdfStatementReader(pdfText),
+  };
 }
