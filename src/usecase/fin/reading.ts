@@ -26,7 +26,20 @@ export type ReadOutcome =
   /** Not a file this reader handles; offer it to the next one. */
   | { readonly kind: "not_mine" }
   /** This reader is the right one and could not read it: a person must. */
-  | { readonly kind: "needs_person"; readonly reader: Reader; readonly problem: ReadProblem };
+  | { readonly kind: "needs_person"; readonly reader: Reader; readonly problem: ReadProblem }
+  /**
+   * This reader is the right one and cannot read it NOW: the AI reader is not
+   * configured, unreachable, past this run's cap or past the month's budget.
+   * Nothing is written, so the item stays unread and the next run offers it
+   * again. Answering `needs_person` instead would park every scan with a
+   * person for good the day the provider had an outage, because a read row is
+   * never re-read.
+   */
+  | {
+      readonly kind: "later";
+      readonly reader: Reader;
+      readonly reason: Extract<ReadProblem, "ai_unavailable" | "ai_budget_reached">;
+    };
 
 export interface DocumentReader {
   readonly name: Reader;
