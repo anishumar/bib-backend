@@ -50,7 +50,9 @@ import {
   ASK_KINDS,
   decisionFits,
   dueDayRefusal,
+  fileCountFits,
   isAskKind,
+  MAX_FILES_PER_UPLOAD,
   splitByAwaiting,
 } from "../../domain/clientask/model";
 import {
@@ -58,6 +60,7 @@ import {
   AskAnswerEmpty,
   AskDecisionNotWanted,
   AskDocumentKindMismatch,
+  AskFileCount,
   AskNotFound,
   AskWorkItemNotFound,
   InvalidAskDueDate,
@@ -74,12 +77,14 @@ import type { DocumentKind } from "../../domain/filestore/model";
 import {
   DOCUMENT_KINDS,
   isDocumentKind,
+  isPortalUploadable,
   normaliseMediaType,
   safeFilename,
 } from "../../domain/filestore/model";
 import type { BlobStore, ContentDigest } from "../filestore/ports";
 import type {
   AskRepository,
+  DocumentResponse,
   FirmTimeZone,
   PortalAskRepository,
   PortalScopeSource,
@@ -186,15 +191,50 @@ export interface DecideInput {
   readonly actor: Actor;
 }
 
+/** One file of an upload, as the transport read it. */
+export interface UploadFile {
+  readonly filename: string;
+  readonly mediaType: string;
+  readonly bytes: Uint8Array;
+}
+
+/** A client's upload: one file or several, each its own response (F1.6). */
 export interface UploadInput {
   readonly tenantId: string;
   readonly userId: string;
   readonly askId: string;
+  readonly files: readonly UploadFile[];
+  /** What the client wrote beside the files. Once per upload, so it rides on
+   *  the FIRST file's response and is not repeated on every one. */
+  readonly note: string | null;
+  readonly actor: Actor;
+}
+
+/**
+ * A colleague uploading files the client sent another way (by email), on the
+ * client's behalf (0390, F1.6). No `userId` for a portal scope: this is the
+ * firm's side, under `withTenant`. The actor is the colleague, and the rows and
+ * the ledger say so.
+ */
+export interface UploadOnBehalfInput {
+  readonly tenantId: string;
+  readonly askId: string;
+  readonly files: readonly UploadFile[];
+  readonly note: string | null;
+  readonly actor: Actor;
+}
+
+/** A file that passed every check, normalised, before anything is stored. */
+interface CheckedFile {
   readonly filename: string;
   readonly mediaType: string;
   readonly bytes: Uint8Array;
-  readonly note: string | null;
-  readonly actor: Actor;
+}
+
+/** A checked file whose bytes are in the blob store. */
+interface StoredFile extends CheckedFile {
+  readonly contentHash: string;
+  readonly storageKey: string;
 }
 
 /** What the action centre renders. Split here rather than in the query, so the
@@ -422,7 +462,10 @@ export class ClientAskService {
   }
 
   /**
-   * A file, against the ask that wanted it.
+   * A file, against the ask that wanted it — or several (F1.6): each its own
+   * document, version, link and response, all in ONE transaction, so a batch
+   * lands whole or not at all. At most `MAX_FILES_PER_UPLOAD`, each held to the
+   * firm's upload limit as a single file always was.
    *
    * ── ORDER: BYTES FIRST, ROWS SECOND ─────────────────────────────────────
    *
@@ -450,16 +493,9 @@ export class ClientAskService {
    * clients. When a scanner arrives it arrives with a consumer.
    */
   async upload(input: UploadInput): Promise<PortalAskRow> {
-    const filename = safeFilename(input.filename);
-    if (filename === null) throw new InvalidFilename(input.filename);
-
-    const mediaType = normaliseMediaType(input.mediaType);
-    if (mediaType === null) throw new UnsupportedMediaType(input.mediaType);
-
-    if (input.bytes.byteLength === 0) throw new EmptyContent(filename);
-    if (input.bytes.byteLength > this.deps.maxUploadBytes) {
-      throw new ContentTooLarge(input.bytes.byteLength, this.deps.maxUploadBytes);
-    }
+    // EVERY file is checked before ANY is stored: one bad file in a batch
+    // refuses the batch, and nothing of it lands (F1.6).
+    const files = this.checkedFiles(input.files);
 
     const { parties, ask } = await this.reachableAsk(input.tenantId, input.userId, input.askId);
 
@@ -472,73 +508,199 @@ export class ClientAskService {
     // filing for a file nobody asked for by kind.
     const documentKind = ask.documentKind ?? "correspondence";
 
-    const contentHash = this.deps.digest.ofBytes(input.bytes);
-    const { storageKey } = await this.deps.blobs.put({
-      tenantId: input.tenantId,
-      contentHash,
-      bytes: input.bytes,
-    });
+    const respondedBy = this.requireHuman(input.actor);
+    const stored = await this.storeBytes(input.tenantId, files);
+    const batch = this.documentResponses(
+      input.tenantId, ask.askId, respondedBy, stored, input.note, documentKind,
+    );
+    const row = await this.deps.portal.respondWithDocuments(input.tenantId, parties, batch);
+    // Null means the ask stopped being reachable or answerable between the read
+    // and the write — the firm closed it in the meantime — and nothing was
+    // written. Refused with the same sentence, because the caller's situation is
+    // the same.
+    if (row === null) throw new AskAlreadySettled(ask.askId, ask.status);
 
-    const note = input.note?.trim() ?? "";
-    const documentId = this.deps.ids.newId();
-    const row = await this.deps.portal.respondWithDocument(
-      input.tenantId,
-      parties,
-      {
+    await this.recordDocuments(
+      input.tenantId, ask.askId, ask.askKind, documentKind, batch, input.actor, false,
+    );
+    return row;
+  }
+
+  /**
+   * Files the client sent ANOTHER way — by email, on a USB stick at a meeting —
+   * uploaded by a colleague on the ask, on the client's behalf (0390, F1.6).
+   *
+   * STORED EXACTLY AS THE CLIENT'S UPLOAD WOULD BE, because it IS the client's
+   * file: the kind the firm chose when it asked, `origin = 'uploaded'`, the
+   * ask's client as the document's party (read inside the INSERT, as the portal
+   * adapter does), filed against the work item, one response per file, the ask
+   * turned answered. So FinCompliance takes a `books_input` upload in whichever
+   * door it came through (its intake reads origin and kind, nothing else), and
+   * the chaser stops reminding a client who has already sent everything.
+   *
+   * WHAT IS NOT THE SAME IS WHO. `responded_by` is the colleague and the row is
+   * `on_behalf`; `client_ask.answered` and `document.stored` record the
+   * colleague as the actor, and the answered event carries `onBehalf: true`.
+   * Naming the client's contact would put a person on an act they did not
+   * perform.
+   *
+   * CLIENT-VISIBLE, as the portal upload is (T6.7: what a client sends, a client
+   * sees). It is the client's own file; the same file through the portal would be
+   * visible; and the response sits on their action centre either way, where an
+   * invisible document would make it a reply about nothing. The firm can still
+   * take it off the portal with the document's own switch.
+   *
+   * The same kinds of file the portal accepts, and only those: the file came
+   * from outside the firm, unscanned, whoever carried it in.
+   */
+  async uploadOnBehalf(input: UploadOnBehalfInput): Promise<AskRecord> {
+    const files = this.checkedFiles(input.files);
+    const colleague = this.requireHuman(input.actor);
+
+    const existing = await this.deps.asks.findById(input.tenantId, input.askId);
+    if (existing === null) throw new AskNotFound(input.askId);
+    if (!acceptsResponse(existing.ask.status)) {
+      throw new AskAlreadySettled(input.askId, existing.ask.status);
+    }
+    const documentKind = existing.ask.documentKind ?? "correspondence";
+
+    const stored = await this.storeBytes(input.tenantId, files);
+    const batch = this.documentResponses(
+      input.tenantId, existing.ask.id, colleague, stored, input.note, documentKind,
+    );
+    const record = await this.deps.asks.respondOnBehalf(input.tenantId, existing.ask.id, batch);
+    // Null: the ask was closed or withdrawn between the read and the write, and
+    // nothing was written.
+    if (record === null) throw new AskAlreadySettled(input.askId, existing.ask.status);
+
+    await this.recordDocuments(
+      input.tenantId, existing.ask.id, existing.ask.askKind, documentKind, batch, input.actor, true,
+    );
+    return record;
+  }
+
+  /**
+   * Every file of an upload, checked and normalised BEFORE anything is stored.
+   *
+   * The count, then each file: a usable filename, a media type that is a type,
+   * one of the kinds a client may send (`isPortalUploadable`: the portal route
+   * also checks it at its door, and this is the same rule for every other
+   * caller, the on-behalf upload included), not empty, not over the firm's
+   * limit. One failure refuses the whole upload. Nothing here scans: see
+   * `upload` for why there is no scanner and no port for one.
+   */
+  private checkedFiles(files: readonly UploadFile[]): CheckedFile[] {
+    if (!fileCountFits(files.length)) throw new AskFileCount(files.length, MAX_FILES_PER_UPLOAD);
+    return files.map((file) => {
+      const filename = safeFilename(file.filename);
+      if (filename === null) throw new InvalidFilename(file.filename);
+
+      const mediaType = normaliseMediaType(file.mediaType);
+      if (mediaType === null || !isPortalUploadable(mediaType)) {
+        throw new UnsupportedMediaType(file.mediaType === "" ? "none" : file.mediaType);
+      }
+
+      if (file.bytes.byteLength === 0) throw new EmptyContent(filename);
+      if (file.bytes.byteLength > this.deps.maxUploadBytes) {
+        throw new ContentTooLarge(file.bytes.byteLength, this.deps.maxUploadBytes);
+      }
+      return { filename, mediaType, bytes: file.bytes };
+    });
+  }
+
+  /** Every file's bytes, before any row (bytes first: see `upload`). One at a
+   *  time, so a batch never holds more than the request already does. */
+  private async storeBytes(tenantId: string, files: readonly CheckedFile[]): Promise<StoredFile[]> {
+    const stored: StoredFile[] = [];
+    for (const file of files) {
+      const contentHash = this.deps.digest.ofBytes(file.bytes);
+      const { storageKey } = await this.deps.blobs.put({ tenantId, contentHash, bytes: file.bytes });
+      stored.push({ ...file, contentHash, storageKey });
+    }
+    return stored;
+  }
+
+  /** One response per file, each pointing at its own new document. The note
+   *  is the client's (or colleague's) one sentence about the whole upload, so
+   *  it rides on the first file only. */
+  private documentResponses(
+    tenantId: string,
+    askId: string,
+    respondedBy: string,
+    files: readonly StoredFile[],
+    note: string | null,
+    documentKind: DocumentKind,
+  ): DocumentResponse[] {
+    const trimmed = note?.trim() ?? "";
+    return files.map((file, i) => ({
+      response: {
         id: this.deps.ids.newId(),
-        tenantId: input.tenantId,
-        askId: ask.askId,
+        tenantId,
+        askId,
         responseKind: "document",
-        answerText: note.length === 0 ? null : note,
+        answerText: i === 0 && trimmed.length > 0 ? trimmed : null,
         decision: null,
-        respondedBy: this.requireHuman(input.actor),
+        respondedBy,
       },
-      {
-        documentId,
+      upload: {
+        documentId: this.deps.ids.newId(),
         versionId: this.deps.ids.newId(),
         linkId: this.deps.ids.newId(),
-        // The TITLE is the filename the client sent. A title the product
+        // The TITLE is the filename that was sent. A title the product
         // invented ("Response to ask 9f8b…") would be the one thing on the
         // firm's document list that nobody can search for.
-        title: filename,
+        title: file.filename,
         documentKind,
-        contentHash,
-        byteSize: input.bytes.byteLength,
-        mediaType,
-        filename,
-        storageKey,
+        contentHash: file.contentHash,
+        byteSize: file.bytes.byteLength,
+        mediaType: file.mediaType,
+        filename: file.filename,
+        storageKey: file.storageKey,
       },
-    );
+    }));
+  }
 
-    const record = await this.recordAnswered(input.tenantId, ask, row, input.actor, {
-      responseKind: "document",
-      documentId,
-      contentHash,
-      byteSize: input.bytes.byteLength,
-      mediaType,
-      documentKind,
-    });
-
-    // A second event, because a document being STORED is a fact about the
-    // document store and is asked about there — "what has this firm taken in,
-    // and how big was it" is answered from `document.stored` across every
-    // origin, and an upload that only wrote `client_ask.answered` would be
-    // missing from it.
-    await this.deps.events.recordEvent({
-      tenantId: input.tenantId,
-      verb: "document.stored",
-      objectId: documentId,
-      actor: input.actor,
-      payload: {
-        kind: documentKind,
-        origin: "uploaded",
-        versionNo: 1,
-        contentHash,
-        byteSize: input.bytes.byteLength,
-        mediaType,
-      },
-    });
-    return record;
+  /**
+   * Two events per file, written once the batch has committed:
+   * `client_ask.answered` (PER RESPONSE, as every answer is) and
+   * `document.stored`, because a document being stored is a fact about the
+   * document store and is asked about there — "what has this firm taken in, and
+   * how big was it" is answered from `document.stored` across every origin, and
+   * an upload that only wrote `client_ask.answered` would be missing from it.
+   */
+  private async recordDocuments(
+    tenantId: string,
+    askId: string,
+    askKind: AskKind,
+    documentKind: DocumentKind,
+    batch: readonly DocumentResponse[],
+    actor: Actor,
+    onBehalf: boolean,
+  ): Promise<void> {
+    for (const { upload } of batch) {
+      await this.recordResponse(tenantId, askId, askKind, actor, onBehalf, {
+        responseKind: "document",
+        documentId: upload.documentId,
+        contentHash: upload.contentHash,
+        byteSize: upload.byteSize,
+        mediaType: upload.mediaType,
+        documentKind,
+      });
+      await this.deps.events.recordEvent({
+        tenantId,
+        verb: "document.stored",
+        objectId: upload.documentId,
+        actor,
+        payload: {
+          kind: documentKind,
+          origin: "uploaded",
+          versionNo: 1,
+          contentHash: upload.contentHash,
+          byteSize: upload.byteSize,
+          mediaType: upload.mediaType,
+        },
+      });
+    }
   }
 
   // ── shared ────────────────────────────────────────────────────────────────
@@ -585,20 +747,33 @@ export class ClientAskService {
     // and the write — the firm closed it in the meantime. Refused with the same
     // sentence, because the caller's situation is the same.
     if (row === null) throw new AskAlreadySettled(ask.askId, ask.status);
+    await this.recordResponse(tenantId, ask.askId, ask.askKind, actor, false, payload);
+    return row;
+  }
+
+  /** `client_ask.answered`, one per response. */
+  private async recordResponse(
+    tenantId: string,
+    askId: string,
+    askKind: AskKind,
+    actor: Actor,
+    onBehalf: boolean,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
     await this.deps.events.recordEvent({
       tenantId,
       verb: "client_ask.answered",
-      objectId: ask.askId,
+      objectId: askId,
       // THE ACTOR IS A CLIENT CONTACT — the first verb in this registry whose
       // human actor is routinely somebody outside the firm. Nothing about the
       // sink changes; it is worth saying because a reader of this trail will
-      // otherwise assume every `human` in it works at the firm.
+      // otherwise assume every `human` in it works at the firm. ON THE CLIENT'S
+      // BEHALF (0390) it is the colleague who uploaded, and `onBehalf` says so.
       actor,
       // Never `answerText` and never the note. Both are the client's own words
       // about their own affairs, and this log cannot be erased (§3.4).
-      payload: { ...payload, askKind: ask.askKind },
+      payload: { ...payload, askKind, onBehalf },
     });
-    return row;
   }
 
   /**

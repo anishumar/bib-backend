@@ -26,8 +26,9 @@ import { z, errorResponse } from "../openapi";
 import { scopeOf } from "../scope";
 import type { ClientAskService } from "../../usecase/clientask/service";
 import type { AskRecord } from "../../domain/clientask/model";
-import { ASK_KINDS } from "../../domain/clientask/model";
-import { DOCUMENT_KINDS } from "../../domain/filestore/model";
+import { ASK_KINDS, MAX_FILES_PER_UPLOAD } from "../../domain/clientask/model";
+import { DOCUMENT_KINDS, isPortalUploadable, normaliseMediaType } from "../../domain/filestore/model";
+import { UnsupportedMediaType } from "../../domain/filestore/errors";
 
 export interface ClientAskDeps {
   readonly service: ClientAskService;
@@ -45,8 +46,15 @@ const ResponseSchema = z
     decision: z.enum(["approved", "declined"]).nullable(),
     respondedByName: z.string().nullable().openapi({
       description:
-        "The CLIENT's own person who replied. Null when their account has been erased — a " +
-        "real answer, the same shape the ledger's actor join has.",
+        "The CLIENT's own person who replied, or, when `onBehalf` is true, the colleague who " +
+        "added it for them. Null when the account has been erased — a real answer, the same " +
+        "shape the ledger's actor join has.",
+    }),
+    onBehalf: z.boolean().openapi({
+      description:
+        "True when somebody at the firm added this for the client: files the client sent " +
+        "another way (by email), uploaded on the ask (0390). The client sees that the firm " +
+        "added it and is never told who.",
     }),
     respondedAt: z.string(),
     document: z
@@ -265,6 +273,61 @@ const withdrawRoute = createRoute({
   },
 });
 
+// The same multipart shape as the client's own upload (F1.6). `z.any()` for the
+// file part for the reason `portalask.ts` gives; repeated parts arrive as an
+// array.
+const OnBehalfForm = z
+  .object({
+    file: z.any().openapi({
+      description:
+        `One file, or several: repeat the \`file\` part, at most ${String(MAX_FILES_PER_UPLOAD)} ` +
+        "in one request.",
+    }),
+    note: z.string().optional().openapi({
+      description:
+        "Anything to say about what arrived, e.g. how it was sent. Once per upload. The client " +
+        "sees it beside the files.",
+    }),
+  })
+  .openapi("ClientAskOnBehalfForm");
+
+const onBehalfRoute = createRoute({
+  method: "post",
+  path: "/api/v1/asks/{askId}/documents",
+  tags: ["client-asks"],
+  summary: "Upload files the client sent another way, on their behalf",
+  description:
+    "For files the client emailed (or handed over) instead of using the portal. Each file is " +
+    "stored exactly as the client's own upload would be: filed under the document kind chosen " +
+    "when the ask was raised, as the CLIENT's document, against the task, one reply per file, " +
+    "and the ask turns answered, so reminders stop. FinCompliance takes a client's books files " +
+    "(`books_input`) in whichever way they arrived. What differs is who: the replies are " +
+    "recorded as yours, marked `onBehalf`, and the client sees that the firm added them. The " +
+    "files are client-visible, as their own upload is; the document's own switch can change " +
+    `that. Repeat the \`file\` part for several, at most ${String(MAX_FILES_PER_UPLOAD)}; they ` +
+    "land together or not at all. The same kinds of file the portal accepts, and only those: " +
+    "the file came from outside the firm and is not scanned for viruses.",
+  request: {
+    params: AskParam,
+    body: { content: { "multipart/form-data": { schema: OnBehalfForm } }, required: true },
+  },
+  responses: {
+    200: {
+      description: "Added, and the ask is answered",
+      content: { "application/json": { schema: AskSchema } },
+    },
+    400: errorResponse(
+      "Empty file, an unusable filename, a kind of file the portal does not accept, or more " +
+        `than ${String(MAX_FILES_PER_UPLOAD)} files at once (ASK_FILE_COUNT)`,
+    ),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("No org chosen, or the role may not write work"),
+    404: errorResponse("No such ask at this firm"),
+    409: errorResponse("The ask is already closed or withdrawn"),
+    413: errorResponse("A file, or the whole request, is larger than this firm's upload limit"),
+  },
+});
+
 export function registerClientAskRoutes(app: OpenAPIHono<AppEnv>, deps: ClientAskDeps): void {
   app.openapi(listRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
@@ -306,6 +369,52 @@ export function registerClientAskRoutes(app: OpenAPIHono<AppEnv>, deps: ClientAs
     const record = await deps.service.withdraw({ tenantId: s.tenantId, askId, actor: s.actor });
     return c.json(toWire(record), 200);
   });
+
+  app.openapi(onBehalfRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { askId } = c.req.valid("param");
+    const form = c.req.valid("form");
+    const files = await onBehalfFiles(c);
+    const record = await deps.service.uploadOnBehalf({
+      tenantId: s.tenantId,
+      askId,
+      files,
+      note: typeof form.note === "string" && form.note.length > 0 ? form.note : null,
+      actor: s.actor,
+    });
+    return c.json(toWire(record), 200);
+  });
+}
+
+/**
+ * The files a colleague uploads for the client, as bytes (F1.6).
+ *
+ * A second copy of the portal's reader and deliberately not a shared helper
+ * (`portalask.ts` says why: a change made for one surface must not silently
+ * change the other). It holds the same ALLOWLIST as the portal, though the
+ * staff document route has none: these files came from outside the firm, and
+ * carrying an email attachment in by hand does not make it a file the firm made.
+ */
+async function onBehalfFiles(
+  c: { req: { parseBody: (options: { all: true }) => Promise<Record<string, unknown>> } },
+): Promise<{ bytes: Uint8Array; filename: string; mediaType: string }[]> {
+  const body = await c.req.parseBody({ all: true });
+  const raw = body["file"];
+  const parts: unknown[] = raw === undefined ? [] : Array.isArray(raw) ? raw : [raw];
+  if (parts.length === 0) throw new UnsupportedMediaType("none");
+  const files: { bytes: Uint8Array; filename: string; mediaType: string }[] = [];
+  for (const part of parts) {
+    if (!(part instanceof File)) {
+      throw new UnsupportedMediaType(typeof part === "string" ? "text/plain" : "none");
+    }
+    const normalised = normaliseMediaType(part.type);
+    if (normalised === null || !isPortalUploadable(normalised)) {
+      throw new UnsupportedMediaType(part.type === "" ? "none" : part.type);
+    }
+    files.push({ bytes: new Uint8Array(await part.arrayBuffer()), filename: part.name, mediaType: part.type });
+  }
+  return files;
 }
 
 /** Field by field, never the domain object: zod-openapi documents a response
@@ -339,6 +448,7 @@ export function toWire(r: AskRecord): z.infer<typeof AskSchema> {
       answerText: x.response.answerText,
       decision: x.response.decision,
       respondedByName: x.respondedByName,
+      onBehalf: x.response.onBehalf,
       respondedAt: x.response.respondedAt,
       document: x.document,
     })),

@@ -111,6 +111,24 @@ export interface AskRepository {
     readonly status: Extract<AskStatus, "closed" | "withdrawn">;
     readonly closedBy: string;
   }): Promise<AskRecord | null>;
+
+  /**
+   * Files the client sent another way, uploaded by a colleague ON the ask
+   * (0390, F1.6): each one a document, its first version, a link to the work
+   * item and a response, marked `on_behalf`, and the ask turned answered, ALL
+   * in one transaction. Stored exactly as the client's own upload would be (the
+   * document's party and the response's client are read from the ask inside
+   * the INSERT, never supplied), except WHO: `respondedBy` is the colleague.
+   *
+   * Null when the ask is gone or already closed or withdrawn, and then NOTHING
+   * was written: a batch lands whole or not at all. The bytes are already
+   * stored, bytes first as everywhere in this store.
+   */
+  respondOnBehalf(
+    tenantId: string,
+    askId: string,
+    files: readonly DocumentResponse[],
+  ): Promise<AskRecord | null>;
 }
 
 /**
@@ -157,6 +175,13 @@ export interface UploadedBytes {
   readonly mediaType: string;
   readonly filename: string;
   readonly storageKey: string;
+}
+
+/** One file of an upload and the response row it becomes (F1.6): several
+ *  files on one ask are several responses, each pointing at its own document. */
+export interface DocumentResponse {
+  readonly response: NewResponse;
+  readonly upload: UploadedBytes;
 }
 
 /**
@@ -218,21 +243,23 @@ export interface PortalAskRepository {
   ): Promise<PortalAskRow | null>;
 
   /**
-   * The same, plus the document the response points at.
+   * The same, for one or more files: each its own document, first version, link
+   * to the work item and response (F1.6).
    *
-   * The document, its first version, its link to the work item and the response
-   * are one transaction for the reason `DocumentStoreRepository.create` gives: a
+   * The documents, their versions, their links and the responses are ONE
+   * transaction for the reason `DocumentStoreRepository.create` gives: a
    * document row with no version is a file that appears in a list and cannot be
-   * opened. Here there is a fourth row and the same argument covers all of them.
+   * opened. Several files make it a batch, and the argument covers the batch: a
+   * client who sent three statements and sees two arrive will assume the third
+   * did too. Null means nothing at all was written.
    *
    * The BYTES are already stored when this is called — bytes first, row second,
    * so an interruption costs an orphaned blob rather than a document the product
    * offers and cannot open.
    */
-  respondWithDocument(
+  respondWithDocuments(
     tenantId: string,
     clientPartyIds: readonly string[],
-    response: NewResponse,
-    upload: UploadedBytes,
+    files: readonly DocumentResponse[],
   ): Promise<PortalAskRow | null>;
 }

@@ -28,6 +28,7 @@ import type {
 } from "../domain/clientask/model";
 import type {
   AskRepository,
+  DocumentResponse,
   NewAsk,
   NewResponse,
   NewTemplateAsk,
@@ -46,6 +47,19 @@ interface StoredResponse {
   readonly decision: AskDecision | null;
   readonly respondedAt: string;
   readonly filename: string | null;
+  readonly respondedBy: string;
+  /** 0390: the firm recorded it for the client. */
+  readonly onBehalf: boolean;
+}
+
+/** A document an upload created, as the adapters write it: its kind, whose
+ *  act it was, and whether the client can see it. */
+export interface StoredUpload {
+  readonly askId: string;
+  readonly upload: UploadedBytes;
+  readonly createdBy: string;
+  readonly onBehalf: boolean;
+  readonly isClientVisible: boolean;
 }
 
 /**
@@ -59,6 +73,8 @@ interface StoredResponse {
 export class FakeAskStore {
   readonly asks: ClientAsk[] = [];
   readonly responses: StoredResponse[] = [];
+  /** Every document an upload created, in order. */
+  readonly uploads: StoredUpload[] = [];
   /** Which client each work item belongs to — the fact `raise` reads out of
    *  `delivery.work_item` in the real adapter. */
   readonly workItems = new Map<string, { clientPartyId: string; title: string }>();
@@ -206,6 +222,34 @@ export class FakeAskRepo implements AskRepository {
     return Promise.resolve(this.record(next));
   }
 
+  /** 0390: the batch lands whole or not at all, as the locked transaction
+   *  does; null when the ask is gone or settled, with nothing written. */
+  respondOnBehalf(
+    tenantId: string,
+    askId: string,
+    files: readonly DocumentResponse[],
+  ): Promise<AskRecord | null> {
+    const i = this.store.asks.findIndex((a) => a.tenantId === tenantId && a.id === askId);
+    const ask = this.store.asks[i];
+    if (i < 0 || !ask || (ask.status !== "open" && ask.status !== "answered")) {
+      return Promise.resolve(null);
+    }
+    const at = this.store.now();
+    for (const { response, upload } of files) {
+      this.store.uploads.push({
+        askId,
+        upload,
+        createdBy: response.respondedBy,
+        onBehalf: true,
+        isClientVisible: true,
+      });
+      this.store.responses.push(storedResponse(response, upload, at, true));
+    }
+    this.store.asks[i] = { ...ask, status: "answered", firstAnsweredAt: ask.firstAnsweredAt ?? at };
+    const updated = this.store.asks[i];
+    return Promise.resolve(updated ? this.record(updated) : null);
+  }
+
   private record(ask: ClientAsk): AskRecord {
     return {
       ask,
@@ -214,7 +258,7 @@ export class FakeAskRepo implements AskRepository {
       closedByName: ask.closedBy === null ? null : "Aarav Menon",
       responses: this.store.responses
         .filter((r) => r.askId === ask.id)
-        .map((r) => toResponse(r)),
+        .map((r) => toResponse(r, "firm")),
       // EVERY RUNG, oldest first. The firm's half of the chase reader.
       chases: [...(this.store.chases.get(ask.id) ?? [])].sort((a, b) =>
         a.chasedAt < b.chasedAt ? -1 : 1,
@@ -244,27 +288,37 @@ export class FakePortalAskRepo implements PortalAskRepository {
     clientPartyIds: readonly string[],
     response: NewResponse,
   ): Promise<PortalAskRow | null> {
-    return Promise.resolve(this.write(tenantId, clientPartyIds, response, null));
+    return Promise.resolve(
+      this.write(tenantId, clientPartyIds, response.askId, [{ response, upload: null }]),
+    );
   }
 
-  respondWithDocument(
+  /** Several files, ONE batch: all of them or none, as the locked transaction
+   *  in the real adapter. */
+  respondWithDocuments(
     tenantId: string,
     clientPartyIds: readonly string[],
-    response: NewResponse,
-    upload: UploadedBytes,
+    files: readonly DocumentResponse[],
   ): Promise<PortalAskRow | null> {
-    return Promise.resolve(this.write(tenantId, clientPartyIds, response, upload));
+    const first = files[0];
+    if (first === undefined) return Promise.resolve(null);
+    return Promise.resolve(
+      this.write(
+        tenantId,
+        clientPartyIds,
+        first.response.askId,
+        files.map((f) => ({ response: f.response, upload: f.upload })),
+      ),
+    );
   }
 
   private write(
     tenantId: string,
     clientPartyIds: readonly string[],
-    response: NewResponse,
-    upload: UploadedBytes | null,
+    askId: string,
+    batch: readonly { response: NewResponse; upload: UploadedBytes | null }[],
   ): PortalAskRow | null {
-    const i = this.store.asks.findIndex(
-      (a) => a.tenantId === tenantId && a.id === response.askId,
-    );
+    const i = this.store.asks.findIndex((a) => a.tenantId === tenantId && a.id === askId);
     const ask = this.store.asks[i];
     if (i < 0 || !ask) return null;
     // The scope check, and the note at the top applies: in Postgres this is a
@@ -272,20 +326,22 @@ export class FakePortalAskRepo implements PortalAskRepository {
     if (!clientPartyIds.includes(ask.clientPartyId)) return null;
     if (ask.status !== "open" && ask.status !== "answered") return null;
 
-    // ONE instant for the response and for `first_answered_at`, because the real
-    // write is one transaction — two ticks would put the ask's first-answer
+    // ONE instant for the responses and for `first_answered_at`, because the
+    // real write is one transaction — two ticks would put the ask's first-answer
     // stamp a minute after the response it names.
     const at = this.store.now();
-    this.store.responses.push({
-      id: response.id,
-      askId: response.askId,
-      responseKind: response.responseKind,
-      answerText: response.answerText,
-      documentId: upload?.documentId ?? null,
-      decision: (response.decision as AskDecision | null) ?? null,
-      respondedAt: at,
-      filename: upload?.filename ?? null,
-    });
+    for (const { response, upload } of batch) {
+      if (upload !== null) {
+        this.store.uploads.push({
+          askId,
+          upload,
+          createdBy: response.respondedBy,
+          onBehalf: false,
+          isClientVisible: true,
+        });
+      }
+      this.store.responses.push(storedResponse(response, upload, at, false));
+    }
     // `coalesce(first_answered_at, now())` — the FIRST reply stays the first.
     this.store.asks[i] = {
       ...ask,
@@ -327,7 +383,7 @@ export class FakePortalAskRepo implements PortalAskRepository {
         ),
       responses: this.store.responses
         .filter((r) => r.askId === ask.id)
-        .map((r) => toResponse(r)),
+        .map((r) => toResponse(r, "portal")),
     };
   }
 }
@@ -355,7 +411,30 @@ export class FakeAskScope implements PortalScopeSource {
   }
 }
 
-function toResponse(r: StoredResponse) {
+function storedResponse(
+  response: NewResponse,
+  upload: UploadedBytes | null,
+  at: string,
+  onBehalf: boolean,
+): StoredResponse {
+  return {
+    id: response.id,
+    askId: response.askId,
+    responseKind: response.responseKind,
+    answerText: response.answerText,
+    documentId: upload?.documentId ?? null,
+    decision: (response.decision as AskDecision | null) ?? null,
+    respondedAt: at,
+    filename: upload?.filename ?? null,
+    respondedBy: response.respondedBy,
+    onBehalf,
+  };
+}
+
+/** The firm's read names whoever responded, the colleague included; the
+ *  client's never names anybody at the firm (T6.5), so an on-behalf response
+ *  names nobody there. */
+function toResponse(r: StoredResponse, surface: "firm" | "portal") {
   const response: AskResponse = {
     id: r.id,
     askId: r.askId,
@@ -364,10 +443,11 @@ function toResponse(r: StoredResponse) {
     documentId: r.documentId,
     decision: r.decision,
     respondedAt: r.respondedAt,
+    onBehalf: r.onBehalf,
   };
   return {
     response,
-    respondedByName: "Meera Iyer",
+    respondedByName: r.onBehalf ? (surface === "firm" ? "Aarav Menon" : null) : "Meera Iyer",
     document:
       r.documentId !== null && r.filename !== null
         ? {

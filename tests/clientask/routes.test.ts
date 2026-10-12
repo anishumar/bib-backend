@@ -90,7 +90,32 @@ function world() {
       json: (await res.json()) as { awaitingYou: Record<string, unknown>[] },
     };
   };
-  return { service, raise, list, centre };
+  /** A multipart upload: `who` decides the route (the client's own, or a
+   *  colleague's on their behalf), each file its own repeated `file` part. */
+  const upload = async (
+    who: Who,
+    askId: string,
+    files: readonly { name: string; type: string; bytes: number[] }[],
+    note?: string,
+  ) => {
+    as.who = who;
+    const form = new FormData();
+    for (const f of files) form.append("file", new File([new Uint8Array(f.bytes)], f.name, { type: f.type }));
+    if (note !== undefined) form.set("note", note);
+    const path = who === "client" ? `/api/v1/portal/asks/${askId}/documents` : `/api/v1/asks/${askId}/documents`;
+    const res = await app.request(path, { method: "POST", body: form });
+    return { status: res.status, json: (await res.json()) as Record<string, unknown> };
+  };
+  return { service, raise, list, centre, upload };
+}
+
+const PDF = [37, 80, 68, 70, 45];
+const pdfs = (n: number) =>
+  Array.from({ length: n }, (_, i) => ({ name: `statement-${String(i + 1)}.pdf`, type: "application/pdf", bytes: [...PDF, i] }));
+
+async function booksAsk(w: ReturnType<typeof world>): Promise<string> {
+  const res = await w.raise({ askKind: "document", prompt: "October bank statements", documentKind: "books_input" });
+  return String(res.json["askId"]);
 }
 
 describe("the staff raise takes a due day", () => {
@@ -176,5 +201,89 @@ describe("both wires carry the day", () => {
     expect(row?.["dueOn"]).toBe("2026-11-05");
     // A template raised it, so no PERSON is named.
     expect(row?.["raisedByName"]).toBeNull();
+  });
+});
+
+describe("several files on one ask, over HTTP (F1.6)", () => {
+  it("takes repeated file parts from the client: one response per file", async () => {
+    const w = world();
+    const askId = await booksAsk(w);
+    const res = await w.upload("client", askId, pdfs(3), "All three accounts.");
+    expect(res.status).toBe(200);
+    const responses = res.json["responses"] as Record<string, unknown>[];
+    expect(responses).toHaveLength(3);
+    expect(responses.map((r) => (r["document"] as { filename: string }).filename)).toEqual([
+      "statement-1.pdf",
+      "statement-2.pdf",
+      "statement-3.pdf",
+    ]);
+    expect(responses.every((r) => r["onBehalf"] === false)).toBe(true);
+    expect(res.json["status"]).toBe("answered");
+  });
+
+  it("still takes a single file part exactly as before", async () => {
+    const w = world();
+    const askId = await booksAsk(w);
+    const res = await w.upload("client", askId, pdfs(1));
+    expect(res.status).toBe(200);
+    expect(res.json["responses"]).toHaveLength(1);
+  });
+
+  it("refuses too many files with 400 ASK_FILE_COUNT, and a request with none", async () => {
+    const w = world();
+    const askId = await booksAsk(w);
+    const many = await w.upload("client", askId, pdfs(21));
+    expect(many.status).toBe(400);
+    expect(many.json["error"]).toMatchObject({ code: "VALIDATION", reason: "ASK_FILE_COUNT" });
+    const none = await w.upload("client", askId, []);
+    expect(none.status).toBe(400);
+  });
+
+  it("refuses the whole upload when one part is a kind a client may not send", async () => {
+    const w = world();
+    const askId = await booksAsk(w);
+    const res = await w.upload("client", askId, [...pdfs(1), { name: "page.html", type: "text/html", bytes: [60] }]);
+    expect(res.status).toBe(400);
+    const after = await w.list();
+    expect((after.json[0]?.["responses"] as unknown[]).length).toBe(0);
+  });
+});
+
+describe("a colleague uploading on the client's behalf, over HTTP (F1.6)", () => {
+  it("answers the ask with the files marked onBehalf and names the colleague on the firm's wire", async () => {
+    const w = world();
+    const askId = await booksAsk(w);
+    const res = await w.upload("staff", askId, pdfs(2), "Emailed on 3 Nov.");
+    expect(res.status).toBe(200);
+    expect(res.json["status"]).toBe("answered");
+    const responses = res.json["responses"] as Record<string, unknown>[];
+    expect(responses).toHaveLength(2);
+    expect(responses.every((r) => r["onBehalf"] === true && r["respondedByName"] === "Aarav Menon")).toBe(true);
+  });
+
+  it("shows the client the firm added it, and names nobody at the firm", async () => {
+    const w = world();
+    const askId = await booksAsk(w);
+    await w.upload("staff", askId, pdfs(1));
+    const res = await w.centre();
+    const centre = res.json as unknown as { withTheFirm: { responses: Record<string, unknown>[] }[] };
+    const sent = centre.withTheFirm[0]?.responses[0];
+    expect(sent?.["onBehalf"]).toBe(true);
+    expect(sent?.["respondedByName"]).toBeNull();
+  });
+
+  it("holds the client's allowlist: an executable is refused even when a colleague carries it in", async () => {
+    const w = world();
+    const askId = await booksAsk(w);
+    const res = await w.upload("staff", askId, [{ name: "setup.exe", type: "application/x-msdownload", bytes: [77, 90] }]);
+    expect(res.status).toBe(400);
+  });
+
+  it("refuses an ask the firm has already closed with 409", async () => {
+    const w = world();
+    const askId = await booksAsk(w);
+    await w.service.close({ tenantId: TENANT, askId, actor: { type: "human", id: PARTNER } });
+    const res = await w.upload("staff", askId, pdfs(1));
+    expect(res.status).toBe(409);
   });
 });

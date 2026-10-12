@@ -212,6 +212,10 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("POST", "/api/v1/work-items/{workItemId}/asks"), "work:write" as const],
   [routeKey("POST", "/api/v1/asks/{askId}/close"), "work:write" as const],
   [routeKey("POST", "/api/v1/asks/{askId}/withdraw"), "work:write" as const],
+  // Files the client sent another way, uploaded on the ask on their behalf
+  // (F1.6, 0390). `work:write`, like raising and closing an ask: it answers the
+  // firm's own request and files evidence against the task.
+  [routeKey("POST", "/api/v1/asks/{askId}/documents"), "work:write" as const],
 
   // ── WHAT CLIENTS HAVE ASKED THE FIRM FOR (T6.8) ───────────────────────
   //

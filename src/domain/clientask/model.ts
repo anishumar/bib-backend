@@ -162,6 +162,14 @@ export interface AskResponse {
   readonly documentId: string | null;
   readonly decision: AskDecision | null;
   readonly respondedAt: string;
+  /**
+   * Somebody at the FIRM recorded this for the client (0390, F1.6): files the
+   * client sent another way, by email, uploaded on the ask. The response is
+   * then the colleague's act and `responded_by` names them, so the client's own
+   * surface names nobody (T6.5's rule) and says the firm added it. False for
+   * every response the client gave themselves.
+   */
+  readonly onBehalf: boolean;
 }
 
 /**
@@ -307,6 +315,21 @@ export interface PortalAskRow {
 }
 
 // ── Pure rules ───────────────────────────────────────────────────────────────
+
+/**
+ * How many files one upload may carry (F1.6). A month's records arrive as
+ * several files at once (sales, purchases, two bank statements), and twenty is
+ * more than any ask needs while keeping one request's work bounded. The SIZE is
+ * bounded separately: each file by the firm's upload limit, and the whole
+ * request by the same limit at the edge, so a large batch goes in more than one
+ * request.
+ */
+export const MAX_FILES_PER_UPLOAD = 20;
+
+/** Whether one upload may carry this many files: at least one, at most the cap. */
+export function fileCountFits(count: number): boolean {
+  return Number.isInteger(count) && count >= 1 && count <= MAX_FILES_PER_UPLOAD;
+}
 
 /** Whether a client may still act on this ask. `answered` stays actionable: a
  *  client who sent the wrong file should be able to send the right one without

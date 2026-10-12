@@ -29,7 +29,8 @@ export type ClientAskErrorCode =
   | "ASK_ALREADY_SETTLED"
   | "ASK_DECISION_NOT_WANTED"
   | "ASK_ANSWER_EMPTY"
-  | "INVALID_DUE_DATE";
+  | "INVALID_DUE_DATE"
+  | "ASK_FILE_COUNT";
 
 export class AskNotFound extends ClientAskError {
   readonly askId: string;
@@ -142,5 +143,25 @@ export class AskAnswerEmpty extends ClientAskError {
       `An answer with no words in it is not an answer. It would turn the ask "answered" and ` +
         `tell the firm nothing, which is worse than leaving it open.`,
     );
+  }
+}
+
+/**
+ * An upload with no file in it, or more than one request may carry (F1.6). One
+ * code for both, because the answer to the caller is the same: send between one
+ * and the cap. Refused before anything is stored, so nothing of a batch lands.
+ */
+export class AskFileCount extends ClientAskError {
+  readonly count: number;
+
+  constructor(count: number, max: number) {
+    super(
+      "ASK_FILE_COUNT",
+      count < 1
+        ? "Choose at least one file to send."
+        : `Send at most ${String(max)} files at once. This upload had ${String(count)}: send the ` +
+            `rest in another upload.`,
+    );
+    this.count = count;
   }
 }

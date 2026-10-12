@@ -39,6 +39,7 @@ import type {
 import type { DocumentKind } from "../../domain/filestore/model";
 import type {
   AskRepository,
+  DocumentResponse,
   NewAsk,
   NewTemplateAsk,
   TemplateAskInsert,
@@ -88,6 +89,8 @@ export interface RawResponse {
   document_id: string | null;
   decision: string | null;
   responded_at: string;
+  /** 0390: the firm recorded it for the client. */
+  on_behalf: boolean;
   responded_by_name: string | null;
   filename: string | null;
   byte_size: string | number | null;
@@ -228,6 +231,106 @@ export class PostgresClientAskRepository implements AskRepository {
     });
   }
 
+  /**
+   * Files the client sent another way, on the ask, on their behalf (0390, F1.6).
+   *
+   * ── THE ASK IS LOCKED FIRST, SO A BATCH LANDS WHOLE OR NOT AT ALL ──────
+   *
+   * `FOR NO KEY UPDATE`, the lock the closing UPDATE takes itself, in its own
+   * statement before anything is written. Without it a colleague closing the
+   * ask between the first file's INSERT and the last file's would leave half a
+   * batch filed against an ask that refuses the rest; with it the close waits
+   * for this transaction and then finds the ask answered. Any statement that
+   * still writes nothing after the lock is a contradiction, and throwing rolls
+   * the whole batch back rather than committing part of it.
+   *
+   * ── STORED AS THE CLIENT'S UPLOAD IS, EXCEPT WHO ────────────────────────
+   *
+   * The same four rows `PostgresPortalAskRepository.respondWithDocuments`
+   * writes, with the same values taken from the ask inside each INSERT (the
+   * document's party, the response's client, the work item the link files it
+   * against), and `origin = 'uploaded'` so FinCompliance's intake takes a
+   * `books_input` file whichever door it came through. Two columns differ:
+   * `created_by` / `responded_by` are the colleague, and `on_behalf` is TRUE.
+   * Written here rather than through the portal adapter because this is the
+   * firm's side, under `withTenant`, and 0390's policy refuses `on_behalf` to a
+   * portal session anyway.
+   */
+  async respondOnBehalf(
+    tenantId: string,
+    askId: string,
+    files: readonly DocumentResponse[],
+  ): Promise<AskRecord | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [held] = await db<{ id: string }[]>`
+        SELECT id FROM delivery.client_ask
+         WHERE id = ${askId} AND tenant_id = ${tenantId} AND status IN ('open', 'answered')
+           FOR NO KEY UPDATE
+      `;
+      if (!held) return null;
+
+      for (const { response, upload } of files) {
+        const [doc] = await db<{ id: string }[]>`
+          INSERT INTO files.document
+            (id, tenant_id, title, origin, kind, party_id, is_client_visible, created_by)
+          SELECT ${upload.documentId}, ${tenantId}, ${upload.title}, 'uploaded',
+                 ${upload.documentKind}, a.client_party_id,
+                 -- CLIENT-VISIBLE, as the portal upload is: the client's own file,
+                 -- sent another way (0390's header and the service's comment).
+                 true,
+                 ${response.respondedBy}
+            FROM delivery.client_ask a
+           WHERE a.id = ${askId} AND a.tenant_id = ${tenantId}
+          RETURNING id
+        `;
+        if (!doc) throw unwritable(askId, "document");
+
+        await db`
+          INSERT INTO files.document_version
+            (id, tenant_id, document_id, version_no, content_hash, byte_size,
+             media_type, filename, storage_key, created_by)
+          VALUES (${upload.versionId}, ${tenantId}, ${upload.documentId}, 1,
+                  ${upload.contentHash}, ${upload.byteSize}, ${upload.mediaType},
+                  ${upload.filename}, ${upload.storageKey}, ${response.respondedBy})
+        `;
+
+        await db`
+          INSERT INTO files.document_link
+            (id, tenant_id, document_id, subject_kind, subject_ref, role, created_by)
+          SELECT ${upload.linkId}, ${tenantId}, ${upload.documentId}, 'work_item',
+                 a.work_item_id, 'client_response', ${response.respondedBy}
+            FROM delivery.client_ask a
+           WHERE a.id = ${askId} AND a.tenant_id = ${tenantId}
+        `;
+
+        const [resp] = await db<{ id: string }[]>`
+          INSERT INTO delivery.client_ask_response
+            (id, tenant_id, ask_id, client_party_id, response_kind, answer_text,
+             document_id, decision, responded_by, on_behalf)
+          SELECT ${response.id}, ${tenantId}, a.id, a.client_party_id,
+                 ${response.responseKind}, ${response.answerText}, ${upload.documentId},
+                 ${response.decision}, ${response.respondedBy}, true
+            FROM delivery.client_ask a
+           WHERE a.id = ${askId} AND a.tenant_id = ${tenantId}
+          RETURNING id
+        `;
+        if (!resp) throw unwritable(askId, "response");
+      }
+
+      // `open → answered`, and `first_answered_at` only ever set once: the
+      // client did answer, through the firm.
+      await db`
+        UPDATE delivery.client_ask
+           SET status = 'answered',
+               first_answered_at = coalesce(first_answered_at, now())
+         WHERE id = ${askId} AND tenant_id = ${tenantId}
+      `;
+      const record = await this.read(db, tenantId, askId);
+      if (record === null) throw unwritable(askId, "read back");
+      return record;
+    });
+  }
+
   private async read(db: Db, tenantId: string, askId: string): Promise<AskRecord | null> {
     const rows = await this.select(db, tenantId, { askId });
     const row = rows[0];
@@ -274,7 +377,10 @@ export class PostgresClientAskRepository implements AskRepository {
              closer.display_name AS closed_by_name,
              (
                SELECT coalesce(
-                        jsonb_agg(r ORDER BY r.responded_at),
+                        -- Files sent together share one instant (one transaction,
+                        -- F1.6), so the filename and then the id order them the
+                        -- same way on every read.
+                        jsonb_agg(r ORDER BY r.responded_at, r.filename, r.id),
                         '[]'::jsonb
                       )
                  FROM (
@@ -284,6 +390,9 @@ export class PostgresClientAskRepository implements AskRepository {
                           resp.document_id,
                           resp.decision,
                           ${db.unsafe(isoInstant("resp.responded_at", "responded_at"))},
+                          resp.on_behalf,
+                          -- The colleague who added it, when the firm did (0390):
+                          -- on the FIRM's screen that is exactly who it should name.
                           responder.display_name  AS responded_by_name,
                           dv.filename,
                           dv.byte_size,
@@ -354,6 +463,7 @@ export function toResponseRecord(r: RawResponse, askId: string): AskResponseReco
       documentId: r.document_id,
       decision: r.decision as AskDecision | null,
       respondedAt: r.responded_at,
+      onBehalf: r.on_behalf,
     },
     respondedByName: r.responded_by_name,
     // The filename comes from `files.document_version`, which is where the
@@ -422,4 +532,13 @@ function toChaseRecord(c: RawChase): AskChaseRecord {
     daysOpen: Number(c.days_open),
     chasedAt: c.chased_at,
   };
+}
+
+/** A statement after the ask's lock wrote nothing: a contradiction, thrown so
+ *  the transaction rolls the whole batch back rather than keep part of it. */
+function unwritable(askId: string, what: string): Error {
+  return new Error(
+    `client_ask ${askId} was locked for an upload and its ${what} could not be written in the ` +
+      `same transaction; nothing was kept`,
+  );
 }

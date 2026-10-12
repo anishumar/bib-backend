@@ -473,6 +473,9 @@ export function mapError(err: unknown): MappedError {
       case "ASK_DECISION_NOT_WANTED":
       case "ASK_ANSWER_EMPTY":
       case "INVALID_DUE_DATE":
+      // Too many files (or none) in one upload (F1.6): the request is what is
+      // wrong, not its size, so it is not PAYLOAD_TOO_LARGE.
+      case "ASK_FILE_COUNT":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       // 404 AND NOT 403 FOR AN ASK THIS SESSION MAY NOT REACH. The row was
       // filtered by gate 4 in the database, so the service genuinely cannot tell

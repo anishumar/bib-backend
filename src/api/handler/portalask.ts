@@ -37,7 +37,7 @@ import { toEnvelope } from "../httpresp";
 import { scopeOf } from "../scope";
 import type { ClientAskService } from "../../usecase/clientask/service";
 import type { PortalAskRow } from "../../domain/clientask/model";
-import { ASK_KINDS } from "../../domain/clientask/model";
+import { ASK_KINDS, MAX_FILES_PER_UPLOAD } from "../../domain/clientask/model";
 import { isPortalUploadable, normaliseMediaType } from "../../domain/filestore/model";
 import { UnsupportedMediaType } from "../../domain/filestore/errors";
 
@@ -56,7 +56,13 @@ const ResponseSchema = z
     respondedByName: z.string().nullable().openapi({
       description:
         "Which of YOUR people replied. A company with two directors needs to know which of " +
-        "them sent it. Nobody at the firm is named anywhere on this surface.",
+        "them sent it. Nobody at the firm is named anywhere on this surface, so this is null " +
+        "when `onBehalf` is true.",
+    }),
+    onBehalf: z.boolean().openapi({
+      description:
+        "True when the firm added this for you: files you sent them another way (by email), " +
+        "which they put on this request so it shows as sent. The firm's person is not named.",
     }),
     respondedAt: z.string(),
     document: z
@@ -151,9 +157,19 @@ const DecisionRequest = z
 
 // `z.any()` for the file part: the body is not JSON and there is nothing for a
 // schema to describe beyond its media type. The check that it IS a file happens
-// in the handler, which is the one place that knows.
+// in the handler, which is the one place that knows. Repeated `file` parts
+// arrive as an array (F1.6), which `z.any()` also passes through.
 const UploadForm = z
-  .object({ file: z.any(), note: z.string().optional() })
+  .object({
+    file: z.any().openapi({
+      description:
+        `One file, or several: repeat the \`file\` part, at most ${String(MAX_FILES_PER_UPLOAD)} ` +
+        "in one request. Each becomes its own document and its own reply on the request.",
+    }),
+    note: z.string().optional().openapi({
+      description: "Anything to say about what you sent. Once per upload, however many files.",
+    }),
+  })
   .openapi("PortalUploadForm");
 
 const listRoute = createRoute({
@@ -222,27 +238,34 @@ const uploadRoute = createRoute({
   method: "post",
   path: "/api/v1/portal/asks/{askId}/documents",
   tags: ["portal"],
-  summary: "Send the file the firm asked for",
+  summary: "Send the file (or files) the firm asked for",
   description:
-    "Multipart, because base64 in a JSON body inflates a scanned PDF by a third. The file is " +
+    "Multipart, because base64 in a JSON body inflates a scanned PDF by a third. Repeat the " +
+    `\`file\` part to send several at once, at most ${String(MAX_FILES_PER_UPLOAD)}; each is ` +
+    "its own document and its own reply, and they arrive together or not at all. Each file is " +
+    "held to the firm's upload limit, and so is the whole request: send a large batch in more " +
+    "than one go. Every file is " +
     "filed against the task the ask was raised from, under the document kind the FIRM chose " +
     "when it asked — you do not choose where in their store it lands. It is stored exactly as " +
     "it arrives: there is no virus scanner in this product today, so the KINDS of file this " +
     "route accepts are an allowlist — PDFs, photographs and scans, spreadsheets, Word and " +
     "OpenDocument files, plain text and CSV. Anything else is refused rather than filed for " +
-    "a colleague to open.",
+    "a colleague to open, and one refused file refuses the whole upload.",
   request: {
     params: AskParam,
     body: { content: { "multipart/form-data": { schema: UploadForm } }, required: true },
   },
   responses: {
     200: { description: "Sent", content: { "application/json": { schema: AskSchema } } },
-    400: errorResponse("Empty file, an unusable filename, or a kind of file this route does not accept"),
+    400: errorResponse(
+      "Empty file, an unusable filename, a kind of file this route does not accept, or more " +
+        `than ${String(MAX_FILES_PER_UPLOAD)} files at once (ASK_FILE_COUNT)`,
+    ),
     401: errorResponse("No authenticated session"),
     403: errorResponse("Not a client-portal session, or this contact may only look"),
     404: errorResponse("No such ask you can reach"),
     409: errorResponse("The firm has already finished with this ask"),
-    413: errorResponse("The file is larger than this firm's upload limit"),
+    413: errorResponse("A file, or the whole request, is larger than this firm's upload limit"),
   },
 });
 
@@ -306,14 +329,12 @@ export function registerPortalAskRoutes(app: OpenAPIHono<AppEnv>, deps: PortalAs
     if (staff) return c.json(staff, 403);
     const { askId } = c.req.valid("param");
     const form = c.req.valid("form");
-    const file = await filePart(c);
+    const files = await fileParts(c);
     const row = await deps.service.upload({
       tenantId: s.tenantId,
       userId: s.userId,
       askId,
-      filename: file.filename,
-      mediaType: file.mediaType,
-      bytes: file.bytes,
+      files,
       note: typeof form.note === "string" && form.note.length > 0 ? form.note : null,
       actor: s.actor,
     });
@@ -334,20 +355,36 @@ function refuseStaff(audience: string | null | undefined) {
 }
 
 /**
- * The uploaded part, as bytes.
+ * The uploaded parts, as bytes: one `file` part or several (F1.6).
  *
  * `parseBody` rather than the validated form value, because zod cannot describe
  * a File and `z.any()` therefore passes whatever arrived through untouched — so
- * the check that it IS a file has to happen here. The same shape the staff
- * upload uses, and deliberately a second copy rather than a shared helper: this
- * one is on the surface a client reaches, and a change made for the staff route
- * should not silently change what a client may send.
+ * the check that each IS a file has to happen here. `all: true` so a repeated
+ * part arrives as an array rather than as its last value; one part is a list of
+ * one, which is the single-file request exactly as it was. The same shape the
+ * staff upload uses, and deliberately a second copy rather than a shared helper:
+ * this one is on the surface a client reaches, and a change made for the staff
+ * route should not silently change what a client may send.
+ *
+ * HOW MANY is the service's rule (`MAX_FILES_PER_UPLOAD`), not this reader's:
+ * the body limit has already bounded what one request can hold.
  */
+async function fileParts(
+  c: { req: { parseBody: (options: { all: true }) => Promise<Record<string, unknown>> } },
+): Promise<{ bytes: Uint8Array; filename: string; mediaType: string }[]> {
+  const body = await c.req.parseBody({ all: true });
+  const raw = body["file"];
+  const parts: unknown[] = raw === undefined ? [] : Array.isArray(raw) ? raw : [raw];
+  if (parts.length === 0) throw new UnsupportedMediaType("none");
+  const files: { bytes: Uint8Array; filename: string; mediaType: string }[] = [];
+  for (const part of parts) files.push(await filePart(part));
+  return files;
+}
+
+/** One part, checked to be a file of a kind a client may send. */
 async function filePart(
-  c: { req: { parseBody: () => Promise<Record<string, unknown>> } },
+  part: unknown,
 ): Promise<{ bytes: Uint8Array; filename: string; mediaType: string }> {
-  const body = await c.req.parseBody();
-  const part = body["file"];
   if (typeof part === "string" || part === undefined || !(part instanceof File)) {
     throw new UnsupportedMediaType(typeof part === "string" ? "text/plain" : "none");
   }
@@ -398,6 +435,7 @@ function toWire(r: PortalAskRow): z.infer<typeof AskSchema> {
       answerText: x.response.answerText,
       decision: x.response.decision,
       respondedByName: x.respondedByName,
+      onBehalf: x.response.onBehalf,
       respondedAt: x.response.respondedAt,
       document: x.document,
     })),

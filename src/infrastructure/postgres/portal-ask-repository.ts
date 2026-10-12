@@ -48,9 +48,9 @@ import { withPortal } from "../../db/tenant";
 import type { AskKind, AskStatus, PortalAskRow } from "../../domain/clientask/model";
 import type { DocumentKind } from "../../domain/filestore/model";
 import type {
+  DocumentResponse,
   NewResponse,
   PortalAskRepository,
-  UploadedBytes,
 } from "../../usecase/clientask/ports";
 import type { RawResponse } from "./client-ask-repository";
 import { toResponseRecord } from "./client-ask-repository";
@@ -110,89 +110,124 @@ export class PostgresPortalAskRepository implements PortalAskRepository {
     });
   }
 
-  async respondWithDocument(
+  async respondWithDocuments(
     tenantId: string,
     clientPartyIds: readonly string[],
-    response: NewResponse,
-    upload: UploadedBytes,
+    files: readonly DocumentResponse[],
   ): Promise<PortalAskRow | null> {
-    return withPortal(this.app, tenantId, clientPartyIds, async (db) => {
-      // ── the document, and WHOSE it is ───────────────────────────────────
-      //
-      // `party_id` is taken from the ask, in the statement, exactly as the
-      // firm's own `raise` takes `client_party_id` from the work item. A client
-      // does not get to say whose document their upload becomes — and because
-      // the SELECT reads `delivery.client_ask` under the portal scope, an ask
-      // this session may not reach produces no row and the whole thing writes
-      // nothing.
-      const [doc] = await db<{ id: string }[]>`
-        INSERT INTO files.document
-          (id, tenant_id, title, origin, kind, party_id, is_client_visible, created_by)
-        SELECT ${upload.documentId},
-               ${tenantId},
-               ${upload.title},
-               'uploaded',
-               ${upload.documentKind},
-               a.client_party_id,
-               -- ── TRUE, AND IT IS THE ONE LITERAL IN THIS FILE THAT IS NOT
-               --    TAKEN FROM A ROW ─────────────────────────────────────
-               --
-               -- 0066 narrowed document_portal_scope to require this flag, and
-               -- the column defaults FALSE. Leaving it to the default here
-               -- would not have leaked anything — it would have made this
-               -- INSERT fail the policy's own WITH CHECK, because a portal
-               -- session cannot write a row it could not then read. Which is
-               -- the wall telling the truth: what a client sends, a client sees.
-               --
-               -- Hiding a client's own upload from them is not a defensible
-               -- state in either direction. The firm's default-by-kind mapping
-               -- does not apply, and must not: the kind here was chosen by the
-               -- FIRM when it raised the ask, and a client who sent a file
-               -- filed as working_paper would lose sight of the thing they
-               -- sent because of a filing decision they never saw.
-               true,
-               ${response.respondedBy}
-          FROM delivery.client_ask a
-         WHERE a.id = ${response.askId}
-           AND a.tenant_id = ${tenantId}
-           AND a.status IN ('open', 'answered')
-        RETURNING id
-      `;
-      if (!doc) return null;
+    try {
+      return await withPortal(this.app, tenantId, clientPartyIds, async (db) => {
+        // ── THE ASK IS LOCKED FIRST, SO A BATCH LANDS WHOLE OR NOT AT ALL ──
+        //
+        // Several files (F1.6) are several statements, and the firm closing
+        // the ask between the first and the last would otherwise leave half a
+        // batch filed against an ask that refused the rest. `FOR NO KEY
+        // UPDATE OF a`, the lock the closing UPDATE takes, read under the
+        // portal scope and through the work item exactly as `select` reads it
+        // (0062's visibility policy on the join), so an ask this session cannot
+        // reach locks nothing and writes nothing. Every "nothing written" after
+        // that is a contradiction and rolls the whole batch back (`Unwritten`),
+        // never a `return null` that would commit the rows before it.
+        const [held] = await db<{ id: string }[]>`
+          SELECT a.id
+            FROM delivery.client_ask a
+            JOIN delivery.work_item wi
+              ON wi.id = a.work_item_id AND wi.tenant_id = a.tenant_id
+           WHERE a.id = ${files[0]?.response.askId ?? null}::uuid
+             AND a.tenant_id = ${tenantId}
+             AND a.status IN ('open', 'answered')
+             FOR NO KEY UPDATE OF a
+        `;
+        if (!held) throw new Unwritten();
 
-      await db`
-        INSERT INTO files.document_version
-          (id, tenant_id, document_id, version_no, content_hash, byte_size,
-           media_type, filename, storage_key, created_by)
-        VALUES (${upload.versionId}, ${tenantId}, ${upload.documentId}, 1,
-                ${upload.contentHash}, ${upload.byteSize}, ${upload.mediaType},
-                ${upload.filename}, ${upload.storageKey}, ${response.respondedBy})
-      `;
+        for (const { response, upload } of files) {
+          // ── the document, and WHOSE it is ─────────────────────────────────
+          //
+          // `party_id` is taken from the ask, in the statement, exactly as the
+          // firm's own `raise` takes `client_party_id` from the work item. A
+          // client does not get to say whose document their upload becomes —
+          // and because the SELECT reads `delivery.client_ask` under the portal
+          // scope, an ask this session may not reach produces no row and the
+          // whole thing writes nothing.
+          const [doc] = await db<{ id: string }[]>`
+            INSERT INTO files.document
+              (id, tenant_id, title, origin, kind, party_id, is_client_visible, created_by)
+            SELECT ${upload.documentId},
+                   ${tenantId},
+                   ${upload.title},
+                   'uploaded',
+                   ${upload.documentKind},
+                   a.client_party_id,
+                   -- ── TRUE, AND IT IS THE ONE LITERAL IN THIS FILE THAT IS NOT
+                   --    TAKEN FROM A ROW ───────────────────────────────────
+                   --
+                   -- 0066 narrowed document_portal_scope to require this flag,
+                   -- and the column defaults FALSE. Leaving it to the default
+                   -- here would not have leaked anything — it would have made
+                   -- this INSERT fail the policy's own WITH CHECK, because a
+                   -- portal session cannot write a row it could not then read.
+                   -- Which is the wall telling the truth: what a client sends, a
+                   -- client sees.
+                   --
+                   -- Hiding a client's own upload from them is not a defensible
+                   -- state in either direction. The firm's default-by-kind
+                   -- mapping does not apply, and must not: the kind here was
+                   -- chosen by the FIRM when it raised the ask, and a client who
+                   -- sent a file filed as working_paper would lose sight of the
+                   -- thing they sent because of a filing decision they never saw.
+                   true,
+                   ${response.respondedBy}
+              FROM delivery.client_ask a
+             WHERE a.id = ${response.askId}
+               AND a.tenant_id = ${tenantId}
+               AND a.status IN ('open', 'answered')
+            RETURNING id
+          `;
+          if (!doc) throw new Unwritten();
 
-      // ── AND THE ACCEPTANCE LINE: it files itself against the job ────────
-      //
-      // `subject_kind = 'work_item'` is 0063's addition to that vocabulary, and
-      // this is why it was added: the person who raised the ask is looking at the
-      // work item, and a file reachable only through the ask would not arrive
-      // where they are looking. The work item comes from the ask rather than
-      // from the request, so a client cannot attach a file to a task nobody
-      // asked them about.
-      await db`
-        INSERT INTO files.document_link
-          (id, tenant_id, document_id, subject_kind, subject_ref, role, created_by)
-        SELECT ${upload.linkId}, ${tenantId}, ${upload.documentId}, 'work_item',
-               a.work_item_id, 'client_response', ${response.respondedBy}
-          FROM delivery.client_ask a
-         WHERE a.id = ${response.askId}
-           AND a.tenant_id = ${tenantId}
-      `;
+          await db`
+            INSERT INTO files.document_version
+              (id, tenant_id, document_id, version_no, content_hash, byte_size,
+               media_type, filename, storage_key, created_by)
+            VALUES (${upload.versionId}, ${tenantId}, ${upload.documentId}, 1,
+                    ${upload.contentHash}, ${upload.byteSize}, ${upload.mediaType},
+                    ${upload.filename}, ${upload.storageKey}, ${response.respondedBy})
+          `;
 
-      if (!(await this.insertResponse(db, tenantId, response, upload.documentId))) return null;
-      if (!(await this.markAnswered(db, tenantId, response.askId))) return null;
-      const rows = await this.select(db, tenantId, response.askId);
-      const row = rows[0];
-      return row ? toPortalRow(row) : null;
-    });
+          // ── AND THE ACCEPTANCE LINE: it files itself against the job ──────
+          //
+          // `subject_kind = 'work_item'` is 0063's addition to that vocabulary,
+          // and this is why it was added: the person who raised the ask is
+          // looking at the work item, and a file reachable only through the ask
+          // would not arrive where they are looking. The work item comes from
+          // the ask rather than from the request, so a client cannot attach a
+          // file to a task nobody asked them about.
+          await db`
+            INSERT INTO files.document_link
+              (id, tenant_id, document_id, subject_kind, subject_ref, role, created_by)
+            SELECT ${upload.linkId}, ${tenantId}, ${upload.documentId}, 'work_item',
+                   a.work_item_id, 'client_response', ${response.respondedBy}
+              FROM delivery.client_ask a
+             WHERE a.id = ${response.askId}
+               AND a.tenant_id = ${tenantId}
+          `;
+
+          if (!(await this.insertResponse(db, tenantId, response, upload.documentId))) {
+            throw new Unwritten();
+          }
+        }
+        if (!(await this.markAnswered(db, tenantId, files[0]?.response.askId ?? ""))) {
+          throw new Unwritten();
+        }
+        const rows = await this.select(db, tenantId, files[0]?.response.askId ?? null);
+        const row = rows[0];
+        if (!row) throw new Unwritten();
+        return toPortalRow(row);
+      });
+    } catch (err) {
+      if (err instanceof Unwritten) return null;
+      throw err;
+    }
   }
 
   /**
@@ -290,7 +325,10 @@ export class PostgresPortalAskRepository implements PortalAskRepository {
                   AND c.tenant_id = a.tenant_id
              ) AS last_reminded_at,
              (
-               SELECT coalesce(jsonb_agg(r ORDER BY r.responded_at), '[]'::jsonb)
+               -- Files sent together share one instant (one transaction,
+               -- F1.6): the filename and the id order them the same way on
+               -- every read.
+               SELECT coalesce(jsonb_agg(r ORDER BY r.responded_at, r.filename, r.id), '[]'::jsonb)
                  FROM (
                    SELECT resp.id,
                           resp.response_kind,
@@ -298,12 +336,17 @@ export class PostgresPortalAskRepository implements PortalAskRepository {
                           resp.document_id,
                           resp.decision,
                           ${db.unsafe(isoInstant("resp.responded_at", "responded_at"))},
+                          resp.on_behalf,
                           -- The client's OWN people, by name. This is their own
                           -- company's side of the conversation, and a household
                           -- with two directors needs to know which of them
                           -- replied. Nobody at the FIRM is named anywhere on
-                          -- this read — T6.5's rule.
-                          responder.display_name AS responded_by_name,
+                          -- this read — T6.5's rule — so a response the firm
+                          -- added on the client's behalf (0390) names NOBODY:
+                          -- responded_by is then a colleague, and the client
+                          -- is told the firm added it, never by whom.
+                          CASE WHEN resp.on_behalf THEN NULL
+                               ELSE responder.display_name END AS responded_by_name,
                           dv.filename,
                           dv.byte_size,
                           dv.media_type
@@ -353,4 +396,14 @@ function toPortalRow(r: Row): PortalAskRow {
     lastRemindedAt: r.last_reminded_at,
     responses: (r.responses ?? []).map((x) => toResponseRecord(x, r.id)),
   };
+}
+
+/** Thrown inside the upload's transaction when a statement after the ask's
+ *  lock wrote nothing, so the WHOLE batch rolls back; caught outside it and
+ *  answered as null ("unreachable or settled"), which is what the port says. */
+class Unwritten extends Error {
+  constructor() {
+    super("the ask could not take this upload; nothing was written");
+    this.name = "Unwritten";
+  }
 }

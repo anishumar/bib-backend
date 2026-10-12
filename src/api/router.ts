@@ -140,6 +140,8 @@ const UPLOAD_PATHS = [
   /^\/api\/v1\/documents$/,
   /^\/api\/v1\/documents\/[^/]+\/versions$/,
   /^\/api\/v1\/portal\/asks\/[^/]+\/documents$/,
+  // A colleague uploading files the client sent another way (F1.6).
+  /^\/api\/v1\/asks\/[^/]+\/documents$/,
   // The client import: three spreadsheets in one multipart body.
   /^\/api\/v1\/client-imports$/,
 ] as const;
@@ -418,7 +420,11 @@ export function buildRouter(
         toEnvelope({
           status: 413,
           code: "PAYLOAD_TOO_LARGE",
-          message: `the upload is larger than the ${String(opts.maxUploadBytes)} bytes this store accepts`,
+          // The WHOLE request, since an ask's upload may carry several files
+          // (F1.6): each file and the request are held to the same limit.
+          message:
+            `This upload is larger than ${String(opts.maxUploadBytes)} bytes, the most one ` +
+            `request may carry. Send large files in separate uploads.`,
         }),
         413,
       ),
