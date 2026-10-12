@@ -1133,6 +1133,11 @@ export function mapError(err: unknown): MappedError {
       // send somebody looking for a permission no role change can grant.
       case "FIN_NOT_ENABLED":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      case "FIN_READ_NOT_FOUND":
+      case "FIN_FORMAT_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      case "FIN_FORMAT_INVALID":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
     }

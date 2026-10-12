@@ -12,8 +12,11 @@ import type { FinIntakeService } from "../../usecase/fin/intake";
 import type { IntakeItemView } from "../../usecase/fin/ports";
 import { INTAKE_ROUTES } from "../../domain/fin/intake";
 import type { IntakeRoute } from "../../domain/fin/intake";
+import type { FinReadsDeps } from "./fin-reads";
 
-export interface FinDeps {
+/** Everything fin's routes need. Each fin handler file names its own part, so
+ *  a new one is a type added here and a register call in the router. */
+export interface FinDeps extends FinReadsDeps {
   readonly intake: FinIntakeService;
 }
 

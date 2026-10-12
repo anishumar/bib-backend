@@ -18,6 +18,8 @@ import { describe, expect, it } from "vitest";
 import { buildRouter } from "../../src/api/router";
 import { FinIntakeService } from "../../src/usecase/fin/intake";
 import { FakeFinFirms, FakeFinIntakeStore } from "../../src/testfakes/fin";
+import { FinReadQueries } from "../../src/usecase/fin/read-queries";
+import { FakeReadStore } from "../../src/testfakes/fin-reads";
 import { InMemoryRateLimiter } from "../../src/platform/ratelimit";
 import { CAPABILITIES } from "../../src/api/capabilities";
 import { AuthzService } from "../../src/usecase/authz/service";
@@ -566,6 +568,10 @@ function deps(): RouterDeps {
         items: new FakeFinIntakeStore(),
         events: new RecordingEventSink(),
         ids: new FakeIds(),
+      }),
+      reads: new FinReadQueries({
+        firms: new FakeFinFirms(),
+        reads: new FakeReadStore(new FakeFinIntakeStore()),
       }),
     },
     clientMail: {

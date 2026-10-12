@@ -436,6 +436,8 @@ version is exactly what gets asked about afterwards.
 | Verb | object_type | Meaning |
 |---|---|---|
 | `fin.intake_routed` | intake_item | The fin job took in a file a client supplied and sent it to a reader: `sheet`, `pdf`, `image`, `archive`, or `manual` (a person reads it). **Per FILE and only when the row was created**, so a second run of the job writes nothing. Actor is the SYSTEM. Payload: `documentVersionId`, `route`, `routeBasis`, `mediaType`, `byteSize`; never the filename or title, which routinely name a client. |
+| `fin.document_read` | read | The fin job read a file it took in: `staged` (its lines wait for a person to commit them), `needs_person` with a `problem` code (`no_reader`, `unrecognised_layout`, `control_mismatch` with the lines kept, or a reader's own), or `failed` (a reader threw). **One per intake item, written only when the read row was created.** Actor is the SYSTEM. Payload: `readId`, `intakeItemId`, `documentVersionId`, `reader`, `docKind`, `status`, `problem`, `lineCount`, `controlOk`; never a filename, a name or a figure (payroll lines name employees; those stay in the erasable rows). |
+| `fin.format_confirmed` | source_format | A person confirmed how a sheet layout is read: the map fin learnt, or one they set or corrected. Always a new row; the learnt one stays. Payload: `formatId`, `basedOnFormatId` (the learnt row confirmed or corrected, else null), `docKind`. |
 
 > **One rename from the build plan.** T2.4 describes its trigger as a `contract.active`
 > event. Registered here as **`contract.activated`** — every verb is past tense, and a

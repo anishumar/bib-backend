@@ -100,6 +100,7 @@ import type { ClientMailDeps } from "./handler/clientmail";
 import { registerFxRoutes } from "./handler/fx";
 import type { FxDeps } from "./handler/fx";
 import { registerFinRoutes } from "./handler/fin";
+import { registerFinReadRoutes } from "./handler/fin-reads";
 import type { FinDeps } from "./handler/fin";
 import type { ReadinessDeps } from "./handler/readiness";
 import type { FileStoreDeps } from "./handler/filestore";
@@ -511,6 +512,7 @@ export function buildRouter(
   registerClientMailRoutes(app, deps.clientMail);
   registerFxRoutes(app, deps.fx);
   if (deps.fin !== undefined) registerFinRoutes(app, deps.fin);
+  if (deps.fin !== undefined) registerFinReadRoutes(app, deps.fin);
 
   // Docs are generated FROM the routes above, so this must come after them.
   if (opts.docsEnabled) {

@@ -67,6 +67,51 @@ async function main(): Promise<void> {
     if (already > 0) console.log(`  ${String(already)} file(s) were taken in by another run first`);
     if (backlog > 0) console.log(`  ${String(backlog)} firm(s) have more files waiting for the next run`);
     console.log();
+
+    // READING (F2.5): every file taken in, offered to the readers. After the
+    // intake, so a file taken in on this run is read on it.
+    const reads = await wired.reads.sweep();
+    for (const r of reads.filter((x) => x.failure !== undefined)) {
+      console.log(`  !! firm ${r.tenantId}: reading FAILED — ${r.failure ?? ""}`);
+    }
+    // Per item, after the firms: a fault an operator fixes (bytes missing from
+    // the store) leaves the file unread; a reader that threw parks it as
+    // `failed`. Either way, somebody has to look.
+    for (const r of reads) {
+      for (const f of r.failures) {
+        const what = f.reader === null ? "left unread" : `failed in the ${f.reader} reader`;
+        console.log(`  !! firm ${r.tenantId}: intake item ${f.intakeItemId} ${what} — ${f.error}`);
+      }
+    }
+    const read = reads.reduce((n, r) => n + r.read, 0);
+    const staged = reads.reduce((n, r) => n + r.staged, 0);
+    const toPerson = reads.reduce((n, r) => n + r.needsPerson, 0);
+    const failed = reads.reduce((n, r) => n + r.failed, 0);
+    const lines = reads.reduce((n, r) => n + r.lines, 0);
+    const later = reads.reduce((n, r) => n + r.later, 0);
+    const alreadyRead = reads.reduce((n, r) => n + r.alreadyRead, 0);
+    const readBacklog = reads.filter((r) => r.more).length;
+    const why = new Map<string, number>();
+    for (const r of reads) {
+      for (const [problem, n] of Object.entries(r.byProblem)) why.set(problem, (why.get(problem) ?? 0) + (n ?? 0));
+    }
+    if (reads.length > 0) {
+      console.log(
+        read === 0
+          ? "  nothing to read — every file taken in that a reader takes has been read."
+          : `  read ${String(read)} file(s): ${String(staged)} staged for a person to commit (${String(lines)} line(s)), ` +
+              `${String(toPerson)} for a person to read, ${String(failed)} failed`,
+      );
+    }
+    if (why.size > 0) {
+      console.log(`  for a person because: ${[...why].map(([problem, n]) => `${problem} ${String(n)}`).join(", ")}`);
+    }
+    // The AI reader answers `later` while it has no key or budget: those files
+    // are offered again next run, not lost.
+    if (later > 0) console.log(`  ${String(later)} file(s) left for a later run (a reader is not available now)`);
+    if (alreadyRead > 0) console.log(`  ${String(alreadyRead)} file(s) were read by another run first`);
+    if (readBacklog > 0) console.log(`  ${String(readBacklog)} firm(s) have more files to read on the next run`);
+    console.log();
   } finally {
     await wired.pools.close();
   }
