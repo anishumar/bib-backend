@@ -30,7 +30,15 @@
 
 Each one names the tasks it blocks.
 
-- [ ] **10x:** in production, is BiB the books, or does it post journals into Xero or QuickBooks? Blocks the scope of F3.4–F3.9 and decides whether F3.10 is needed.
+- [x] **10x:** in production, is BiB the books, or does it post journals into the client's books software? **Answered 2026-10-12 (10x): BiB posts journals into the client's own software (Tally, Zoho Books, Xero, QuickBooks).** BiB is not the books: the client's software stays the system of record. So F3.10 is required, and F3 is re-scoped below. The next item lists the questions this answer leaves open.
+- [ ] **10x (follow-up to the books answer):** blocks F3.1, F3.5, F3.10 and F3.11.
+  - Which software do which clients use, and which one comes first for the Singapore pilot?
+  - Proper vouchers (purchase bill, sales invoice, payment, receipt, each with its GST), or plain journal vouchers? Plain journals skip the software's own GST reports and vendor ageing.
+  - Which documents does BiB post? A client that raises its sales invoices in its own software already has them in its books, and BiB must not post them again.
+  - Pushed automatically through the software's API (Zoho Books, Xero, QuickBooks), or a file a person imports (Tally usually runs on a desktop)?
+  - Bank reconciliation: in BiB, or in the software against its own bank feed?
+  - When a vendor or an account is new, does BiB create it in the software, or does a person?
+  - The client's real trial balance and GST return now come from its software. Does BiB only check them against its own figures?
 - [ ] **10x:** confirm the monthly list taken from the Retainer Workflow tab. Blocks the F1.7 seed.
 - [ ] **10x:** who confirms rules and later changes (two people, one a partner); the materiality amount; who sees flagged items. Blocks F4.6, F5.2 and F7.4.
 - [ ] **10x:** should "patterns against history" show beside the exceptions? Blocks the placement in F5.5.
@@ -252,36 +260,53 @@ Six agents build against these shapes in parallel worktrees, each on its own dat
 
 **Reading flow (L wires it, R and X plug in):** `fin:once` runs the intake sweep, then the read sweep. The read sweep takes intake items with no `fin.read` row (an anti-join, at-least-once) whose route has at least one registered reader, fetches the version's bytes, and offers them to the readers in order (sheet, pdf_text, vision). An answer of `later` writes nothing, so the item is offered again next run (the AI reader answers `later` while no key is configured). If every reader answers `not_mine`, the read is `needs_person` with `no_reader`. The first answer that is not `not_mine` is stored in one transaction: one `fin.read` row (`staged`, `needs_person` or `failed`), its `fin.transaction_line` rows with `proposed` frozen, and one ledger event, written only when the read was created. The control figures are checked for every read, whoever read it; a mismatch makes the read `needs_person` with `control_mismatch`.
 
-## F3: Coding and books
+## F3: Coding, and journals into the client's books software
 
-Estimate: 10–15 days. This is v3.2 §14, and its scope depends on the "is BiB the books" decision.
+Estimate: 10–15 days, to be re-estimated once the follow-up questions are answered. This is v3.2 §14.
 
-- [ ] **F3.1 Masters import.** Import the chart of accounts, GST codes, the vendor, customer and employee masters, and the opening trial balance.
-  ✔ All 5 companies load, and the opening trial balance totals zero.
+**Decided 2026-10-12 (10x): BiB is not the books.** The client's own software (Tally, Zoho Books, Xero or QuickBooks) stays the system of record. BiB codes the committed lines, builds balanced journals, a person approves them, and BiB posts them into that software. BiB keeps its own record of every journal it built and where it went:
+- for the checks (F4, F5)
+- for the GST draft (F6.7)
+- for the scorecard
+- so that nothing is ever posted twice.
+
+BiB's trial balance and F5 figures are proofs over BiB's own journals. They are not the client's real books, because the client's people can also post directly in their own software.
+
+- [ ] **F3.1 Masters import, from the client's software.** Import its chart of accounts (ledgers in Tally), tax codes, the vendor, customer and employee masters, and the opening trial balance. Keep a map from BiB's account, tax code and counterparty to the software's own id or name: a journal naming an account the software does not have is refused there.
+  ✔ All 5 companies load, the opening trial balance totals zero, and every account BiB codes to maps to one in the target.
 - [ ] **F3.2 Counterparty key.** Match on UEN, then GST registration number, then normalised name. An unknown counterparty goes to a person, never a guess.
   ✔ Every pack counterparty resolves, and an unknown one goes to the desk.
 - [ ] **F3.3 Coding.** The master gives the GL account, GST code, claimable flag and withholding rate. Company E's purchase GST is not claimable.
   ✔ GL, GST code and claimable flag match `documents_manifest.csv`.
-- [ ] **F3.4 Posting.**
+- [ ] **F3.4 Journals.**
   - Double-entry templates for purchase, sales, credit note, customs import GST, retention and cut-off accrual.
-  - Amounts are SQL `numeric`, and every entry balances (enforced by a check).
-  - Duplicates and prior-year invoices are never posted.
-  ✔ Posting matches `ledger_truth.csv` line for line, for the document-driven entries.
-- [ ] **F3.5 Bank reconciliation.** Matching runs in three passes:
+  - Amounts are SQL `numeric`, and every journal balances (enforced by a check).
+  - Duplicates and prior-year invoices never get a journal.
+  - Each journal carries a stable reference derived from its source, and the target is sent that reference, so a resend can never post it twice.
+  ✔ The journals match `ledger_truth.csv` line for line, for the document-driven entries.
+- [ ] **F3.5 Bank reconciliation** (whether it runs in BiB or in the software is a follow-up question). Matching runs in three passes:
   1. exact amount and reference
   2. combined payments (a bounded subset-sum)
   3. part payments, with the remainder going to F4.
   ✔ At least 95% of bank lines match the correct documents (`bank_transactions_truth.csv` → `matched_doc_ids`).
 - [ ] **F3.6 Card matching.**
   ✔ Matches `card_transactions_truth.csv`, and spends with no document are flagged.
-- [ ] **F3.7 Settlement postings** follow the bank and card matches.
-  ✔ Ledger cash equals each statement's closing balance.
-- [ ] **F3.8 Trial balance and proofs.** The trial balance totals zero, and each statement's running balance continues from the previous month.
+- [ ] **F3.7 Settlement journals** follow the bank and card matches.
+  ✔ Cash in BiB's journals equals each statement's closing balance.
+- [ ] **F3.8 Trial balance and proofs, over BiB's own journals** plus the opening balances. The trial balance totals zero, and each statement's running balance continues from the previous month. The client's real trial balance is in its software.
   ✔ It matches `trial_balance_truth.xlsx` account by account, **to the cent**.
-- [ ] **F3.9 GST F5 from the ledger.**
+- [ ] **F3.9 GST F5 from BiB's journals** (the draft F6.7 attaches).
   ✔ Boxes 6, 7 and 8 per quarter match exactly for A–D.
-- [ ] **F3.10 Journal CSV export** (only if BiB is not the books). Use the books software's import format.
-  ✔ The file imports into the target format's validator.
+- [ ] **F3.10 Posting into the client's software.** Required since 2026-10-12. It was "Journal CSV export, only if BiB is not the books".
+  - A port in `usecase/fin/ports.ts`, with one adapter per software in `infrastructure/fin/`. Vendor types never cross the port, and every adapter has a fake in `testfakes/`.
+  - The first target is the follow-up's answer. The adapters follow it, one at a time.
+  - Each target's own format: Tally's XML vouchers; Zoho Books, Xero and QuickBooks through their APIs or their import files. Whether BiB sends a file a person imports or pushes through the API is a follow-up question.
+  ✔ The first target accepts a month's journals for a pack company (its import validator, or a sandbox organisation), and sending the same journal twice is refused or ignored.
+- [ ] **F3.11 Approval and the posting log.**
+  - A person approves a month's journals before they leave BiB (ground rule 2). The permission is decided with the route.
+  - Each journal records its state: built, approved, sent, accepted, or refused with the software's own message.
+  - A refused journal goes to a person's desk, and nothing is retried silently.
+  ✔ A refused journal shows the software's message on the desk, and an accepted one is never sent again.
 
 ## F4: Rule exceptions and findings (T4.10)
 
@@ -427,7 +452,7 @@ The dates are v3.2's, which assumed two people. With one person, expect about tw
 - [ ] `npm run check` passes, the flow is walked in a browser, and with the flag off the CRM is untouched.
 
 ### M2: ready for 10x, on QA (v3.2: Sat 31 Oct)
-- [ ] The scorecard covers all four stages, 47 of 47 exceptions with extras listed, and the trial balance and F5 come from the ledger.
+- [ ] The scorecard covers all four stages, 47 of 47 exceptions with extras listed, and the trial balance and F5 come from BiB's journals.
 - [ ] The vendor-pattern panel works on the pack (F5, pulled forward).
 - [ ] Law updates work both ways with second-person approval, and withholding tax works for company D.
 - [ ] The isolation drill passes, fin is deployed to QA in a test firm, and it has been walked through with 10x.
@@ -435,7 +460,7 @@ The dates are v3.2's, which assumed two people. With one person, expect about tw
 **If M2 runs late, drop in this order** (from v3.2 §7): law-desk screens first (keep the email and desk items), then withholding tax, then payroll templates beyond the first three, then combined-payment matching.
 
 ### Phase 1b (v3.2: 16 Nov – 11 Dec)
-- [ ] Form C-S evaluator; card-to-receipt matching; FX gains and losses; payroll postings; journal export; AI law summaries; Done gates; a dedicated database role.
+- [ ] Form C-S evaluator; card-to-receipt matching; FX gains and losses; payroll postings; AI law summaries; Done gates; a dedicated database role. (Journal export left this list on 2026-10-12: it is F3.10 now, and required.)
 
 ## Later (not tracked yet)
 India pack (GST and TDS evaluators, Tally intake); GSTR-2B and IRAS register checks; InvoiceNow (Peppol) intake; more watchers (India, UAE, US); client reports.
@@ -454,3 +479,4 @@ India pack (GST and TDS evaluators, Tally intake); GSTR-2B and IRAS register che
 | 2026-10-10 | F1.4, F1.5 (staff), F1.7 | merge of 2194438, 924364e (frontend) | Phase 2 ran as two parallel agents: the sweep (backend) and the screens (frontend). Merged gates: `check` 3677 and `test:integration` 1161. **Local DB note:** the sweep agent ran `worker:once` (mail to the log) once, so every sweep caught up on the dev DB: about 511 jobs and 294 period jobs spawned, 56 advance bills, 14 tasks and so on. The sandbox walk left a published "Monthly close" template, a draft process and one test task. |
 | 2026-10-11 | F0.8 | 738d612, b05f46d (frontend) | The fin screen. Fin now has a UI for what it does today, the intake list; reading what is inside the files is F2. |
 | 2026-10-12 | wave 3 | 01c4316, 16d8399 + branches `feat/fin-w3-*` | Six agents built F2.3–F2.7, F2.9–F2.11, F2.4, F4.1–F4.3, F4.5, F5.1–F5.6, F0.6 and F1.6 on separate branches and were stopped by an API session limit. Work saved as WIP commits, every branch typechecks; gates, merge and wiring are in `FIN_HANDOFF.md`. Handed to Shrestha. |
+| 2026-10-12 | decision | — | 10x: BiB posts journals into the client's own software (Tally, Zoho Books, Xero, QuickBooks), so BiB is not the books. F3 re-scoped: journals instead of a ledger of record, F3.10 required, F3.11 added (approval and the posting log). The follow-up questions are under Open decisions. `FIN_FLOW.md` and `FIN_HANDOFF.md` updated to match. |

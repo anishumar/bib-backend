@@ -2,7 +2,8 @@
 
 **What this is:** the whole FinCompliance flow in plain words, following one example company from the first request to the filed return. It is written for developers who are new to accounting.
 **Companion:** [`FIN_BUILD_PLAN.md`](FIN_BUILD_PLAN.md) is the tracker (task ids, checks, open decisions). Task ids such as F1.4 point there.
-**As of:** 2026-10-11. Each phase ends with a **Status** line saying what is built today and what is still planned.
+**As of:** 2026-10-12. Each phase ends with a **Status** line saying what is built today and what is still planned.
+**Decided 2026-10-12 (10x): BiB is not the books.** The client's own software (Tally, Zoho Books, Xero or QuickBooks) holds the books, and BiB posts journals into it. Phases E and G below are written for that.
 
 ## Contents
 
@@ -14,7 +15,7 @@
 6. [Phase D · Review](#phase-d--review)
 7. [Phase E · Books](#phase-e--books)
 8. [Phase F · Check](#phase-f--check)
-9. [Phase G · Prepare](#phase-g--prepare)
+9. [Phase G · Post and prepare](#phase-g--post-and-prepare)
 10. [Phase H · Verify and file](#phase-h--verify-and-file)
 11. [Phase I · Close](#phase-i--close)
 12. [Always on · Law watch](#always-on--law-watch)
@@ -36,9 +37,9 @@ Every month a client sends its "books files": invoices, bank statements, expense
 | **B · Collect** | The client uploads. If they don't, reminders go out, and late work escalates inside the firm. |
 | **C · Read** | Each file is taken in and routed to the right reader. Every document becomes a standard transaction line. |
 | **D · Review** | Confident lines pass as a batch. A person checks only the doubtful fields, then commits. |
-| **E · Books** | Committed lines become double-entry accounting, the bank is reconciled, and a trial balance proves it all adds up. |
+| **E · Books** | Committed lines become balanced double-entry journals, the bank is reconciled, and BiB proves its own figures add up. |
 | **F · Check** | Fixed rules and comparisons with history flag problems. A person decides each one. |
-| **G · Prepare** | Returns are calculated from the books. The system may also send hints (signals) to the Key Manager. |
+| **G · Post and prepare** | A person approves the month's journals, and BiB posts them into the client's own software. Returns are drafted from the same journals, and the system may send hints (signals) to the Key Manager. |
 | **H · Verify and file** | A second person checks the work. A person files on the government portal. |
 | **I · Close** | The client sees it filed, the period is billed, and the next month starts. |
 | **Law watch** (always on) | Law changes are spotted daily and become rule changes only after a second partner approves. |
@@ -79,7 +80,7 @@ The diagram uses four colours, and this document uses the same four words:
 | GST registered | Yes, at 9% |
 | Employees | 5 |
 | Financial year end | 31 December |
-| Books kept in | BiB (an assumption for this example; see [open decisions](#open-decisions-that-change-this-flow)) |
+| Books kept in | Zoho Books, the client's own software. BiB posts journals into it (the example could equally be Tally, Xero or QuickBooks). |
 | Opening position | S$50,000 in the bank, put in by the owner as capital |
 | Month | **October 2025** |
 
@@ -275,7 +276,13 @@ Provenance means every number in the books can be traced back to the exact place
 
 ## Phase E · Books
 
-**Goal:** turn committed lines into proper accounting, prove the accounting is right, and produce the numbers every return and report needs.
+**Goal:** turn committed lines into balanced journals ready for the client's books, prove BiB's own figures are right, and produce the numbers every check and return draft needs.
+
+> **Where the books live (decided 2026-10-12, 10x).** The client's **real** books stay in its own software: Tally, Zoho Books, Xero or QuickBooks. That software is the system of record and produces the official trial balance and reports.
+>
+> BiB does everything in this phase **to prepare the entries**. It keeps its own copy of every journal it builds, and checks its own trial balance over them. In Phase G, a person approves the month's journals and BiB posts them into the client's software (see [E4](#e4-decided-the-books-stay-in-the-clients-software)).
+>
+> The ideas below (accounts, debit and credit, journals, trial balance) are the same whichever software holds the books.
 
 This is the biggest phase and the one with the most new ideas for a developer, so it starts from zero.
 
@@ -508,7 +515,7 @@ SELECT account, SUM(amount) AS balance FROM journal_line GROUP BY account;
 
 The last row is the **trial balance**. It is not a "balance" of anything; it is the checksum that proves the ledger is consistent.
 
-Fin checks three proofs every month:
+Fin checks three proofs every month, over **its own journals** plus the opening balances. The client's official trial balance is the one in its software, which may also hold entries the client's people posted there directly.
 
 1. **The trial balance totals zero**, to the cent.
 2. **The books' bank balance equals the bank statement's closing balance** (59,795 = 59,795). Two independent sources agree, so no transaction was missed.
@@ -519,7 +526,9 @@ The same check written the accountant's way: what the company holds or spent equ
 > Bank 59,795 + GST Input 90 + Cleaning 1,000 + Bank Charges 15 = **60,900**
 > Capital 50,000 + Sales 10,000 + GST Output 900 = **60,900** ✓
 
-#### Step 7: Reports come straight out of the ledger
+#### Step 7: The reports these journals produce
+
+The client's official P&L and balance sheet come from its own software, once BiB's journals are posted there. BiB works out the same figures from its own journals, to check its work and for the scorecard. For Company A's October:
 
 **Profit and loss for October** (signs flipped for display):
 
@@ -538,24 +547,49 @@ The same check written the accountant's way: what the company holds or spent equ
 | | | October's profit | 8,985 |
 | **Total** | **59,885** | **Total** | **59,885** ✓ |
 
-The GST return in Phase G reads from the same ledger.
+The GST draft in Phase G reads from the same journals.
 
-### E4. The open decision: is BiB the books?
+### E4. Decided: the books stay in the client's software
 
-- **BiB is the books:** BiB is the system of record. The ledger above lives in BiB's database, and BiB produces the trial balance, the reports and the GST F5.
-- **The books stay in Xero or QuickBooks:** BiB builds the entries and hands them over as a **journal CSV export** (F3.10), which is imported into the client's accounting software. That software then holds the ledger and produces the reports.
+10x answered on 2026-10-12: **BiB posts journals into the client's own software (Tally, Zoho Books, Xero, QuickBooks).**
 
-10x must answer this one. It decides how much of F3.4–F3.9 is built, and whether F3.10 is needed.
+| | BiB | The client's software |
+|---|---|---|
+| Reads the documents, codes them, builds the journals | ✔ | |
+| Keeps its own copy of every journal it built, with the source it came from | ✔ | |
+| Checks (Phase F) and the GST draft (Phase G) | ✔, over its own journals | |
+| The official books: ledger, trial balance, P&L, balance sheet | | ✔ |
+| Masters: chart of accounts, vendors, customers, tax codes | Reads them **from** the software | ✔, the source |
+
+What this changes for a developer:
+
+- **Masters come from the software (F3.1).** A journal naming an account the software does not have is refused there. So BiB imports the software's chart of accounts, contacts and tax codes, and keeps a map from its own codes to the software's ids or names.
+- **Posting is a port with one adapter per software (F3.10).** Each software has its own format: Tally takes XML vouchers, while Zoho Books, Xero and QuickBooks have APIs and import files. The port keeps every vendor's types out of the use case, exactly like the other ports.
+- **Nothing is posted twice.** Each journal carries a stable reference derived from its source, and BiB records what each software answered (F3.11). A resend is refused or ignored.
+- **A person approves before anything leaves BiB** (ground rule 2). A journal the software refuses goes to a person's desk with the software's own message.
+
+**Still to ask 10x** (listed in the tracker's open decisions):
+
+1. Which software do which clients use, and which comes first for the Singapore pilot?
+2. Proper vouchers (purchase bill, sales invoice, payment, receipt, each with GST), or plain journals? Plain journals skip the software's own GST reports and vendor ageing.
+3. Which documents does BiB post? If a client raises its sales invoices in its own software, they are already in its books.
+4. An automatic push through the API, or a file a person imports? Tally usually runs on a desktop.
+5. Does bank reconciliation run in BiB, or in the software against its bank feed?
+6. Who creates a new vendor or account in the software: BiB, or a person?
 
 ### E5. Developer sketch (not decided)
 
 The plan does not name the F3 tables yet. This sketch is only here to show the shape:
 
 ```
-fin.account        (id, tenant_id, code, name, type: asset|liability|equity|income|expense)
-fin.journal_entry  (id, tenant_id, date, kind, source: document version + page + row)
+fin.account        (id, tenant_id, code, name, type: asset|liability|equity|income|expense,
+                    target_ref)                      -- the software's own id or name
+fin.journal_entry  (id, tenant_id, date, kind, source: document version + page + row,
+                    reference)                       -- stable; sent to the software
 fin.journal_line   (id, tenant_id, entry_id, account_id, party_id, amount numeric)
                    -- debit = +, credit = −; per entry SUM(amount) = 0 (deferred check)
+fin.journal_post   (id, tenant_id, entry_id, target, state: approved|sent|accepted|refused,
+                    target_ref, message)             -- the posting log (F3.11)
 
 balance per account = SELECT account_id, SUM(amount) FROM fin.journal_line GROUP BY account_id
 trial balance holds = SELECT SUM(amount) FROM fin.journal_line   -- must be 0
@@ -563,7 +597,7 @@ trial balance holds = SELECT SUM(amount) FROM fin.journal_line   -- must be 0
 
 Some systems keep two non-negative columns, `debit` and `credit`, instead of one signed amount. Both work. A signed amount makes the zero-sum check one `SUM`. The choice belongs to F3's design.
 
-**Status:** **planned** (F3.1–F3.10). The scope depends on the open decision above.
+**Status:** **planned** (F3.1–F3.9). Posting into the software is F3.10–F3.11, in Phase G.
 
 ---
 
@@ -649,19 +683,34 @@ This lane compares a client against **its own past**.
 
 ---
 
-## Phase G · Prepare
+## Phase G · Post and prepare
 
-**Goal:** calculate the returns from the books, and spot changes in the client's situation.
+**Goal:** put the month's checked journals into the client's own books, draft the returns from the same journals, and spot changes in the client's situation.
 
-### G1. Returns are calculated from the ledger, never retyped
+### G0. Approve, then post into the client's software (F3.10, F3.11)
+
+- **When:** once the month's findings are settled. Posting before then would mean reversing entries inside the client's software every time a finding is corrected. This order is our proposal: 10x has not said when journals should go.
+- **Approve:** a person approves the month's journals before anything leaves BiB (ground rule 2).
+- **Post:** BiB sends each approved journal to the client's software through that software's adapter: Tally's XML vouchers, or the Zoho Books, Xero or QuickBooks API or import file. Whether it is pushed or imported by a person is still a question for 10x.
+- **Every journal is sent once.** It carries a stable reference, and BiB records each one's state: approved, sent, accepted, or refused.
+- **A refusal goes to a person.** For example, an account that does not exist in the software. The software's own message goes to a person's desk, like a finding, and nothing is retried silently.
+
+**Example.** The owner approves Company A's five October journals (JE-1 to JE-5) and BiB posts them into Company A's Zoho Books:
+- Four are accepted.
+- JE-5 is refused, because Zoho has no "Bank Charges" account yet. The refusal lands on the owner's desk.
+- Someone at the firm adds the account in Zoho. JE-5 is sent again under the same reference, and it is accepted.
+
+### G1. Returns are drafted from BiB's journals, never retyped
 
 - **GST F5:** a draft of boxes 1–8 is attached as a working paper to the F5 filing task (F6.7). Boxes 6, 7 and 8 must match the answer key exactly for Companies A–D (F3.9).
-- **Withholding tax:** when the ledger shows a payment to a non-resident, a withholding-tax filing is due by the **15th of the second month after the payment**, at the rate for that type of payment (F6.8; Company D in the pack).
+  - The client's software produces its own GST report from the books it holds.
+  - Whether BiB's draft is checked against that report is still a question for 10x.
+- **Withholding tax:** when BiB's journals show a payment to a non-resident, a withholding-tax filing is due by the **15th of the second month after the payment**, at the rate for that type of payment (F6.8; Company D in the pack).
 - **CPF:** from payroll, due by the 14th of the following month.
 
 **Example: October's share of Company A's Oct–Dec GST F5**
 
-| Box | Meaning | From the ledger | S$ |
+| Box | Meaning | From the journals | S$ |
 |---|---|---|---|
 | 1 | Standard-rated sales | Sales | 10,000 |
 | 5 | Taxable purchases | Cleaning (TX) | 1,000 |
@@ -673,14 +722,14 @@ November and December add to these figures for the full quarter. When the return
 
 ### G2. Signals for the Key Manager
 
-- Some evaluators watch the ledger for **changes in the client's situation**. The main one is the **GST registration threshold**: a running total of taxable sales against S$1,000,000 (F6.6). When it is crossed, the system suggests a profile change (Company E in the pack).
+- Some evaluators watch BiB's journals for **changes in the client's situation**. The main one is the **GST registration threshold**: a running total of taxable sales against S$1,000,000 (F6.6). When it is crossed, the system suggests a profile change (Company E in the pack).
 - A signal is **indicative only**:
   - It appears on the Key Manager's desk.
   - It **never** changes the profile or a filing by itself.
   - It **never** reaches the client's portal (a test proves no portal route can read one).
 - If the partner agrees, they update the profile, and the calendar (Phase A) gains the new filings.
 
-**Status:** **planned** (F6). The calendar check, that generated dates match 10x's Year Planner, is F6.5.
+**Status:** **planned**: posting is F3.10–F3.11, and the drafts and signals are F6. The calendar check, that generated dates match 10x's Year Planner, is F6.5.
 
 ---
 
@@ -767,7 +816,7 @@ November and December add to these figures for the full quarter. When the return
 |---|---|---|
 | 1. Extraction | Fields read correctly | Digital ≥ 98%, scanned ≥ 90%, photo ≥ 85% |
 | 2. Bank reconciliation | Bank lines matched to the right documents | ≥ 95% |
-| 3. Ledger | Trial balance per account, F5 boxes 6/7/8 per quarter | Exact, to the cent |
+| 3. Journals | Trial balance per account and F5 boxes 6/7/8 per quarter, over BiB's journals | Exact, to the cent |
 | 4. Exceptions | Planted mistakes caught | 47 of 47, extras listed and explained |
 | Calendar | Generated dates | Equal to 10x's Year Planner |
 | Patterns | Backtest | Reported separately, not counted in stage 4 |
@@ -784,9 +833,9 @@ For a developer: the answer key is a set of **golden files** (`ledger_truth.csv`
 | B · Collect | Chaser, nudge, escalation, missed-deadline decisions; due date on staff screens | Portal walk with a real client (F1.5); multi-file and on-behalf upload (F1.6); reminder email (decision) |
 | C · Read | Intake, router, Files received screen (F2.1, F2.2, F0.8) | Readers, AI extraction, transaction lines (F2.3–F2.12) |
 | D · Review | None | Staging, review by exception, commit (F2.8) |
-| E · Books | None | Masters, coding, posting, reconciliation, trial balance, F5 from the ledger, export (F3) |
+| E · Books | None | Masters from the client's software, coding, journals, reconciliation, proofs and F5 over BiB's journals (F3.1–F3.9) |
 | F · Check | None | Rule checks and findings (F4), patterns against history (F5) |
-| G · Prepare | None | Evaluators, signals (F6) |
+| G · Post and prepare | None | Approval and posting into the client's software (F3.10–F3.11); evaluators, signals (F6) |
 | H · Verify and file | Maker ≠ checker, review rules, sub-steps, review points, filing day, period filings | F5 working paper from fin (F6.7) |
 | I · Close | Portal "Recently filed", library, billing | None |
 | Law watch | Rule supersede and calendar re-dating | Watcher, desk, two-person approval (F7) |
@@ -800,7 +849,8 @@ From [`FIN_BUILD_PLAN.md`](FIN_BUILD_PLAN.md#open-decisions):
 
 | Decision | Who | Phase it changes |
 |---|---|---|
-| Is BiB the books, or does it post journals into Xero or QuickBooks? | 10x | E (scope of F3.4–F3.10) |
+| ~~Is BiB the books, or does it post journals into the client's software?~~ **Answered 2026-10-12: it posts journals into the client's software (Tally, Zoho Books, Xero, QuickBooks).** | 10x | E, G |
+| The follow-up: which software first; proper vouchers or plain journals; which documents BiB posts; API push or an imported file; where bank reconciliation runs; who creates a new vendor or account in the software | 10x | E, G (F3.1, F3.5, F3.10, F3.11) |
 | Confirm the monthly list of what to ask for | 10x | A |
 | Who confirms rules and later changes (two people, one a partner); the materiality amount; who sees flagged items | 10x | F, Law watch |
 | Should "patterns against history" show beside the exceptions? | 10x | F (placement) |
@@ -827,6 +877,9 @@ From [`FIN_BUILD_PLAN.md`](FIN_BUILD_PLAN.md#open-decisions):
 | Trial balance | All balances listed; total must be zero | A checksum |
 | Bank reconciliation | Matching our records to the bank's statement | A diff / anti-join |
 | Settlement | The posting when money actually moves | |
+| System of record | Where the official books live: the client's software, not BiB | The primary database the others sync from |
+| Voucher | Tally's word for one entry: purchase, sales, payment, receipt or journal | A typed transaction |
+| Posting into the software | Sending BiB's approved journals into Tally, Zoho Books, Xero or QuickBooks | An outbound integration with an idempotency key |
 | P&L | Income minus expenses over a period | A query over income and expense accounts |
 | Balance sheet | What the company has, and whose it is, on a day | A query over asset, liability and equity accounts |
 | UEN | Singapore company registration number | A natural primary key |
@@ -926,17 +979,15 @@ flowchart TD
         WHO{"Counterparty<br/>known?"}
         PICK["<b>A person matches or adds it</b><br/><small>Matched on UEN → GST no. → name; never guessed</small>"]
         CODE["<b>Coded from the masters</b><br/><small>GL account · GST code · claimable · withholding tax</small>"]
-        POST["<b>Double-entry posting</b><br/><small>Every entry balances · duplicates never posted</small>"]
+        POST["<b>Double-entry journals</b><br/><small>Every journal balances · duplicates never built</small>"]
         RECON["<b>Bank & card reconciliation</b><br/><small>Exact match → combined payments → part payments</small>"]
-        TB["<b>Trial balance + proofs</b><br/><small>To the cent · balances carried month to month</small>"]
-        EXPORT["<b>Journal export to Xero / QuickBooks</b><br/><small>Only if BiB is not the books (10x to confirm)</small>"]
+        TB["<b>Trial balance + proofs, over BiB's journals</b><br/><small>To the cent · balances carried month to month</small>"]
     end
 
     COMMIT --> WHO
     WHO -->|"no"| PICK --> CODE
     WHO -->|"yes"| CODE
     CODE --> POST --> RECON --> TB
-    TB -.-> EXPORT
 
     subgraph PF["PHASE F · CHECK"]
         RULES["<b>Rule checks</b><br/><small>Duplicate invoice · wrong GST rate · no GST no. · cut-off<br/>short payment · unidentified receipt · CPF ceiling · SDL</small>"]
@@ -953,14 +1004,18 @@ flowchart TD
     DECIDE -->|"ask client"| QUERY
     QUERY -->|"answer or new file"| INTAKE
     DECIDE -->|"correct"| POST
-    DECIDE -->|"dismiss · reason code"| PREP
-    FOUND -->|"no · clean"| PREP
+    DECIDE -->|"dismiss · reason code"| APPRJ
+    FOUND -->|"no · clean"| APPRJ
 
-    subgraph PG["PHASE G · PREPARE"]
-        PREP["<b>Return prepared from the ledger</b><br/><small>GST F5 boxes 1–8 · withholding tax · CPF</small>"]
+    subgraph PG["PHASE G · POST & PREPARE"]
+        APPRJ["<b>A person approves the month's journals</b>"]
+        SENDJ["<b>Posted into the client's software</b><br/><small>Tally · Zoho Books · Xero · QuickBooks<br/>each journal sent once</small>"]
+        PREP["<b>Return drafted from BiB's journals</b><br/><small>GST F5 boxes 1–8 · withholding tax · CPF</small>"]
         SIGNAL["<b>Signal for the Key Manager, indicative</b><br/><small>e.g. GST S$1M registration threshold crossed</small>"]
     end
 
+    APPRJ --> SENDJ --> PREP
+    SENDJ -.->|"refused by the software"| DESK
     TB -.-> SIGNAL
     SIGNAL -.->|"partner updates the client's profile"| CAL
 
@@ -1018,9 +1073,9 @@ flowchart TD
     classDef q fill:#f4f8ee,stroke:#5a8a2f,color:#2d5418
     classDef dot fill:#222,stroke:#222,color:#fff
 
-    class CAL,JOB,INTAKE,SHEET,ZIP,LINE,BATCH,CODE,POST,RECON,TB,EXPORT,RULES,PATT,PREP,WATCH,LIVE,K1 sys
+    class CAL,JOB,INTAKE,SHEET,ZIP,LINE,BATCH,CODE,POST,RECON,TB,SENDJ,RULES,PATT,PREP,WATCH,LIVE,K1 sys
     class AI,K2 ai
-    class MAN,FIX,COMMIT,PICK,DESK,ESC,LATE,OBO,SIGNAL,REVIEW,REWORK,FILE,PROPOSE,NOCHG,K3 person
+    class MAN,FIX,COMMIT,PICK,DESK,ESC,LATE,OBO,APPRJ,SIGNAL,REVIEW,REWORK,FILE,PROPOSE,NOCHG,K3 person
     class ASK,CHASE,QUERY,DONE,K4 client
     class FDAY,BILL,K5 done
     class GOT,RISK,KIND,SURE,WHO,FOUND,DECIDE,OKAY,AGAIN,MATTERS,APPROVE q

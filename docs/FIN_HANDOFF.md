@@ -35,7 +35,7 @@
    - Regenerate the frontend's `schema.d.ts` against the merged backend.
 4. **Gates on the merged branch**, then `npm run migrate` on the local `bib` DB (0386–0391) and `npm run fin:once` against the sandbox firm (`fin-sandbox`, about 1,169 files already taken in). The sheets and digital statements should be read; PDFs and photos wait for the AI key.
 5. **Write it up**: tick the tasks in `FIN_BUILD_PLAN.md` with done-notes and commit shas, add a Log row, and add the fin sections to `CLAUDE.md` (reads and lines, readers, the AI reader, findings, patterns).
-6. **Then the next phase**: F2.8 staging (review by exception, commit gated on `books:write`), F3 (masters, counterparty key, coding, posting, bank reconciliation, trial balance, GST F5), F4.4 bank checks, F4.6–F4.7 findings on the desk, F5 profile table, the scorecard (S), F6, F7, F9. The order and checks are in the tracker.
+6. **Then the next phase**: F2.8 staging (review by exception, commit gated on `books:write`), F3 (masters from the client's software, counterparty key, coding, journals, bank reconciliation, proofs and the GST F5 draft over BiB's journals, then approval and posting into the client's software: BiB is not the books, see the open decisions), F4.4 bank checks, F4.6–F4.7 findings on the desk, F5 profile table, the scorecard (S), F6, F7, F9. The order and checks are in the tracker.
 
 ## How to work safely here
 
@@ -49,7 +49,8 @@
 
 ## Open decisions (from the tracker; they block the tasks named there)
 
-- 10x: is BiB the books, or does it post journals to Xero/QuickBooks? (F3 scope)
+- **Answered 2026-10-12, 10x:** BiB is **not** the books. It posts journals into the client's own software (Tally, Zoho Books, Xero, QuickBooks). F3 is re-scoped in the tracker: F3.10 posting is required, and F3.11 (approval and the posting log) is new.
+- 10x, the follow-up to that answer: which software comes first; proper vouchers or plain journals; which documents BiB posts; API push or an imported file; where bank reconciliation runs; who creates a new vendor or account in the software. (F3.1, F3.5, F3.10, F3.11)
 - 10x: who confirms rules; the materiality amount; who sees flagged items. (F4.6, F5.2, F7.4)
 - 10x: Form C date; the monthly list for "Monthly close". (F6.3, F1.7 seed)
 - Team: per-step desks (F1.8); a "you have new requests" email; the `/internal/v1/tenants/{id}/status` 500 (system actor with a name).
