@@ -436,6 +436,8 @@ version is exactly what gets asked about afterwards.
 | Verb | object_type | Meaning |
 |---|---|---|
 | `fin.intake_routed` | intake_item | The fin job took in a file a client supplied and sent it to a reader: `sheet`, `pdf`, `image`, `archive`, or `manual` (a person reads it). **Per FILE and only when the row was created**, so a second run of the job writes nothing. Actor is the SYSTEM. Payload: `documentVersionId`, `route`, `routeBasis`, `mediaType`, `byteSize`; never the filename or title, which routinely name a client. |
+| `fin.finding_raised` | finding | A check said a person should look at something (F4.2): lane `rule` (a fixed rule broken, counted in the exception score) or `pattern` (the client's own history, never counted). **Per FINDING and only when the row was created**, so the same checks over the same lines write nothing. Actor is the SYSTEM. Payload: `checkKey`, `lane`, `clientPartyId`, `periodStart`, `periodEnd`, `lineCount`; never a fact, an amount or a counterparty, which live on the row. |
+| `fin.finding_decided` | finding | A PERSON decided what a finding means, through the API rather than the fin job: `ask_client`, `correct` or `dismiss`. Per decision; changing one's mind is a second event. Payload: `decisionId`, `decision`, `reasonCode` (null unless dismissed), `checkKey`, `lane`. **Never the reason's words**: a person's text about a client, kept in the erasable `fin.finding_decision` row (§3.4, the split `obligation.resolved` makes). |
 
 > **One rename from the build plan.** T2.4 describes its trigger as a `contract.active`
 > event. Registered here as **`contract.activated`** — every verb is past tense, and a

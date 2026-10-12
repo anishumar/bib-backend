@@ -23,6 +23,8 @@ import {
 import { LedgerService } from "../usecase/ledger/service";
 import type { EventSink } from "../usecase/ledger/ports";
 import { FinIntakeService } from "../usecase/fin/intake";
+import { FindingService } from "../usecase/fin/findings";
+import { PostgresFindingStore, PostgresRuleParameters } from "../infrastructure/fin/postgres-findings";
 import type { FinDeps } from "../api/handler/fin";
 
 export interface WiredFinJob {
@@ -50,5 +52,17 @@ export function wireFinJob(cfg: Config): WiredFinJob {
  *  case the router registers none and every /api/v1/fin path is a 404. */
 export function finApiDeps(cfg: Config, app: Db, events: EventSink): FinDeps | undefined {
   if (!cfg.fin.enabled) return undefined;
-  return { intake: intakeService(app, events) };
+  return { intake: intakeService(app, events), findings: findingService(app, events) };
+}
+
+/** The findings store (F4.2): the API decides and reads through it; the fin
+ *  job will raise through it once committed lines exist (F2.8). */
+export function findingService(app: Db, events: EventSink): FindingService {
+  return new FindingService({
+    firms: new PostgresFinFirms(app),
+    store: new PostgresFindingStore(app),
+    parameters: new PostgresRuleParameters(app),
+    events,
+    ids: systemIds,
+  });
 }

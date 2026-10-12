@@ -9,12 +9,15 @@ import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
 import { scopeOf } from "../scope";
 import type { FinIntakeService } from "../../usecase/fin/intake";
+import type { FindingService } from "../../usecase/fin/findings";
 import type { IntakeItemView } from "../../usecase/fin/ports";
 import { INTAKE_ROUTES } from "../../domain/fin/intake";
 import type { IntakeRoute } from "../../domain/fin/intake";
 
 export interface FinDeps {
   readonly intake: FinIntakeService;
+  /** Findings and a person's decisions on them (F4.2): `api/handler/fin-findings.ts`. */
+  readonly findings: FindingService;
 }
 
 const MAX_INTAKE_LIMIT = 500;

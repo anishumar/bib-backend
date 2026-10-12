@@ -37,6 +37,7 @@ export type Permission =
   | "invoice:issue"
   | "advance:manage"
   | "books:read"
+  | "books:write"
   | "tenant:admin";
 
 export const PERMISSIONS: readonly Permission[] = [
@@ -55,6 +56,7 @@ export const PERMISSIONS: readonly Permission[] = [
   "invoice:issue",
   "advance:manage",
   "books:read",
+  "books:write",
   "tenant:admin",
 ];
 
@@ -121,6 +123,10 @@ export const PERMISSION_DESCRIPTIONS: Readonly<Record<Permission, string>> = {
     "See what FinCompliance made of a client's files: what it took in, what it read from " +
     "them and what it flagged. It names a client's suppliers, customers and amounts, so it " +
     "is kept apart from seeing the client list.",
+  "books:write":
+    "Decide what FinCompliance flagged in a client's books: ask the client, correct it, or " +
+    "dismiss it with a reason. A machine only says what to check; this is the person's answer, " +
+    "so it is kept apart from reading the books.",
   "tenant:admin":
     "Administer the firm: who works here, what their roles are, and every setting, " +
     "including this one.",
@@ -149,6 +155,7 @@ export const PERMISSION_ACTS: Readonly<Record<Permission, string>> = {
   "invoice:issue": "issue or cancel an invoice, or issue a credit note",
   "advance:manage": "raise or map an advance taken before the engagement letter",
   "books:read": "see a client's books in FinCompliance",
+  "books:write": "decide what FinCompliance flagged in a client's books",
   "tenant:admin": "manage the firm's people, roles and settings",
 };
 
@@ -254,6 +261,7 @@ export const DEFAULT_ROLES: Readonly<Record<string, RoleDefinition>> = {
       "invoice:issue",
       "advance:manage",
       "books:read",
+      "books:write",
     ],
   },
   // Runs delivery for a book of clients; sees the audit trail for their work.
@@ -270,13 +278,14 @@ export const DEFAULT_ROLES: Readonly<Record<string, RoleDefinition>> = {
       "billing:skip",
       "advance:manage",
       "books:read",
+      "books:write",
     ],
   },
   // Does the work, and quotes from the catalogue. No audit-trail sweep of the
   // whole firm.
   associate: {
     label: "Associate",
-    permissions: ["party:read", "party:write", "config:read", "work:write", "books:read"],
+    permissions: ["party:read", "party:write", "config:read", "work:write", "books:read", "books:write"],
   },
   // ── THE TWO PORTAL ROLES (T6.6) ───────────────────────────────────────
   //

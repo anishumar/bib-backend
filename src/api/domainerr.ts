@@ -1133,6 +1133,27 @@ export function mapError(err: unknown): MappedError {
       // send somebody looking for a permission no role change can grant.
       case "FIN_NOT_ENABLED":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      // Findings (F4.2). Not this firm's and not there are one answer.
+      case "FIN_FINDING_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      // A decision the form can fix: a dismissal's reason, and its words.
+      case "FIN_DISMISSAL_NEEDS_REASON":
+      case "FIN_OTHER_NEEDS_WORDS":
+      case "FIN_REASON_ONLY_ON_DISMISSAL":
+      case "FIN_REASON_TOO_LONG":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      // Well formed, and refused because the act behind it (raising the
+      // client's portal ask, F4.6) is not built.
+      case "FIN_ASK_NOT_WIRED":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      case "FIN_DECIDER_NOT_STAFF":
+        return { status: 403, code: "FORBIDDEN", message: err.message, reason: err.code };
+      // The fin job's own bugs (a check's output, a migration's value): never
+      // the caller's, so they answer as internal errors with the reason kept.
+      case "FIN_FINDING_DRAFT_INVALID":
+      case "FIN_CHECK_INPUT_INVALID":
+      case "FIN_PARAMETER_UNREADABLE":
+        return { status: 500, code: "INTERNAL", message: "internal error", reason: err.code };
       default:
         return unmapped(err.code);
     }

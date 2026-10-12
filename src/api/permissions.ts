@@ -945,6 +945,12 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // is on; a firm with fin off answers 404 from the service.
   [routeKey("GET", "/api/v1/fin/status"), "books:read" as const],
   [routeKey("GET", "/api/v1/fin/intake"), "books:read" as const],
+  // Findings (F4.2). Reading what the checks flagged is reading the books;
+  // deciding what a finding means is `books:write` (0388), the permission that
+  // says a person's answer about a client's books stands.
+  [routeKey("GET", "/api/v1/fin/findings"), "books:read" as const],
+  [routeKey("GET", "/api/v1/fin/findings/{findingId}"), "books:read" as const],
+  [routeKey("POST", "/api/v1/fin/findings/{findingId}/decision"), "books:write" as const],
   [routeKey("GET", "/api/v1/dashboard/overview"), "party:read" as const],
   [routeKey("GET", "/api/v1/dashboard/mrr/{axis}"), "party:read" as const],
   [routeKey("GET", "/api/v1/dashboard/mrr-by-currency"), "party:read" as const],

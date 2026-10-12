@@ -35,6 +35,8 @@ import type { Principal } from "../../src/platform/callctx";
 import { buildRouter } from "../../src/api/router";
 import { FinIntakeService } from "../../src/usecase/fin/intake";
 import { FakeFinFirms, FakeFinIntakeStore } from "../../src/testfakes/fin";
+import { FindingService } from "../../src/usecase/fin/findings";
+import { FakeFindingStore, FakeRuleParameters } from "../../src/testfakes/fin-findings";
 import { InMemoryRateLimiter } from "../../src/platform/ratelimit";
 import { CAPABILITIES } from "../../src/api/capabilities";
 import { AuthzService } from "../../src/usecase/authz/service";
@@ -640,6 +642,13 @@ function deps(): RouterDeps {
         firms: new FakeFinFirms(),
         candidates: new FakeFinIntakeStore(),
         items: new FakeFinIntakeStore(),
+        events: new RecordingEventSink(),
+        ids: new FakeIds(),
+      }),
+      findings: new FindingService({
+        firms: new FakeFinFirms(),
+        store: new FakeFindingStore(),
+        parameters: new FakeRuleParameters(),
         events: new RecordingEventSink(),
         ids: new FakeIds(),
       }),
@@ -1379,6 +1388,13 @@ describe("gate 3 — role", () => {
     expect(((await res.json()) as { error: { reason?: string } }).error.reason).toBe("SOURCE_NOT_FOUND");
     expect((await app(PORTAL_SESSION).request("/api/v1/documents/preview", init)).status).toBe(403);
     expect((await app(null).request("/api/v1/documents/preview", init)).status).toBe(401);
+  });
+
+  it("reading what FinCompliance flagged is books:read; deciding about it is books:write (0388)", () => {
+    const id = "00000000-0000-4000-8000-000000000001";
+    expect(decideRoute("GET", "/api/v1/fin/findings")).toEqual({ kind: "permission", permission: "books:read" });
+    expect(decideRoute("GET", `/api/v1/fin/findings/${id}`)).toEqual({ kind: "permission", permission: "books:read" });
+    expect(decideRoute("POST", `/api/v1/fin/findings/${id}/decision`)).toEqual({ kind: "permission", permission: "books:write" });
   });
 
   it("never lets a role reach an unmapped route", async () => {

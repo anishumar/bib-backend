@@ -18,6 +18,8 @@ import { describe, expect, it } from "vitest";
 import { buildRouter } from "../../src/api/router";
 import { FinIntakeService } from "../../src/usecase/fin/intake";
 import { FakeFinFirms, FakeFinIntakeStore } from "../../src/testfakes/fin";
+import { FindingService } from "../../src/usecase/fin/findings";
+import { FakeFindingStore, FakeRuleParameters } from "../../src/testfakes/fin-findings";
 import { InMemoryRateLimiter } from "../../src/platform/ratelimit";
 import { CAPABILITIES } from "../../src/api/capabilities";
 import { AuthzService } from "../../src/usecase/authz/service";
@@ -564,6 +566,13 @@ function deps(): RouterDeps {
         firms: new FakeFinFirms(),
         candidates: new FakeFinIntakeStore(),
         items: new FakeFinIntakeStore(),
+        events: new RecordingEventSink(),
+        ids: new FakeIds(),
+      }),
+      findings: new FindingService({
+        firms: new FakeFinFirms(),
+        store: new FakeFindingStore(),
+        parameters: new FakeRuleParameters(),
         events: new RecordingEventSink(),
         ids: new FakeIds(),
       }),
