@@ -72,7 +72,7 @@ export default tseslint.config(
 
   // The process shell and scripts may print and read env directly.
   {
-    files: ["src/cmd/**/*.ts"],
+    files: ["src/cmd/**/*.ts", "scripts/**/*.ts"],
     rules: { "no-console": "off" },
   },
 
