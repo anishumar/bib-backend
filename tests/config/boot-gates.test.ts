@@ -74,6 +74,16 @@ function productionLike(
       maxUploadBytes: 25 * 1024 * 1024,
       ...storage,
     },
+    // FinCompliance's AI reader with no provider: a real state, not a stub
+    // (see the F2.4 block at the end of this file).
+    finAi: {
+      provider: "none",
+      anthropicApiKey: null,
+      model: "claude-sonnet-5-5",
+      runCap: 50,
+      monthlyTokens: 20_000_000,
+      timeoutMs: 120_000,
+    },
   } as unknown as Config;
 }
 
@@ -175,5 +185,34 @@ describe("a development environment allows them", () => {
     expect(() => {
       validateServer(stubbed);
     }).not.toThrow();
+  });
+});
+
+// ── FinCompliance's AI reader (F2.4) ──────────────────────────────────────────
+//
+// Two answers, and they point opposite ways. `anthropic` without its key is a
+// typo in EVERY environment, so it is refused everywhere, naming the variable
+// and never a value. `none` is not a stub that lies: the reader answers "later"
+// and the files stay listed as unread, so a public environment may run with it.
+describe("the AI reader's provider (F2.4)", () => {
+  const withAi = (cfg: Config, finAi: Partial<Config["finAi"]>): Config =>
+    ({ ...cfg, finAi: { ...cfg.finAi, ...finAi } });
+
+  it("boots a production-like environment with no provider: fin without AI is a real state", () => {
+    expect(() => {
+      validateServer(withAi(productionLike(), { provider: "none", anthropicApiKey: null }));
+    }).not.toThrow();
+  });
+
+  it("refuses anthropic with no key, in a production-like environment and locally", () => {
+    for (const environment of ["production", "development"] as const) {
+      const cfg = withAi({ ...productionLike(), environment }, {
+        provider: "anthropic",
+        anthropicApiKey: null,
+      });
+      expect(() => {
+        validateServer(cfg);
+      }).toThrow(/^BIB_FIN_AI_PROVIDER=anthropic but BIB_FIN_ANTHROPIC_API_KEY is not set/);
+    }
   });
 });

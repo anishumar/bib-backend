@@ -12,6 +12,7 @@ import "dotenv/config";
 import { z } from "zod";
 import { CAPABILITIES } from "../api/capabilities";
 import type { InternalClient } from "../api/capabilities";
+import { Secret } from "./secret";
 
 const EnvSchema = z.object({
   // NO DEFAULT, and that is the whole point of this line.
@@ -61,6 +62,49 @@ const EnvSchema = z.object({
   // The fin job's own pool. Small on purpose: the database is shared, and fin
   // must never be able to take the connections the API and worker need.
   BIB_FIN_DB_POOL: z.coerce.number().int().positive().max(10).default(3),
+  // ── FinCompliance's AI document reader (F2.4) ────────────────────────────
+  // `none` builds no client at all: the reader is still registered and answers
+  // "later" for every PDF and image it would read, so nothing is parked with a
+  // person while there is no key. `anthropic` needs the key below (validate.ts
+  // refuses it without one, in every environment).
+  BIB_FIN_AI_PROVIDER: z.enum(["none", "anthropic"]).default("none"),
+  // A CREDENTIAL. Held as a `Secret` (config/secret.ts), so a logged config
+  // prints "[redacted]"; never put in an error message, which is why the
+  // refusal below describes the shape and never echoes the value. Empty is
+  // unset, as Docker writes an env var nobody passed.
+  BIB_FIN_ANTHROPIC_API_KEY: z.preprocess(
+    (v) => (v === "" ? undefined : v),
+    z
+      .string()
+      .regex(
+        /^sk-ant-[A-Za-z0-9_-]+$/,
+        "is not an Anthropic API key: one starts with sk-ant- and has no spaces or quotes (the value is not shown)",
+      )
+      .optional(),
+  ),
+  // Which model reads. One of the three the reader's request is shaped for
+  // (adaptive thinking, an effort level, a strict tool); the scorecard (S.2)
+  // picks per format later. A new model is a code review, not a typo.
+  BIB_FIN_AI_MODEL: z
+    .enum(["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5"])
+    .default("claude-sonnet-5-5"),
+  // Documents the AI reads PER FIRM in one fin run (one item = up to two
+  // calls: the read and its one retry). Bounds a run's length and cost, and
+  // counted per firm so one firm's month-end backlog never starves another.
+  BIB_FIN_AI_RUN_CAP: z.coerce.number().int().positive().max(500).default(50),
+  // Each firm's AI budget for a calendar month (the firm's own month, its zone),
+  // in INPUT-TOKEN EQUIVALENTS: an input token counts 1, a cache write 1.25, a
+  // cache read 0.1 and an output token 5. Those are Anthropic's price ratios
+  // and they hold for every current model (a cache read costs 0.1 or less, so
+  // it errs high), which makes this a spend cap in units of the model's input
+  // price: 20,000,000 is about US$40 a month on Sonnet 5.5 ($2 per million
+  // input tokens), an estimated 1,500 documents. Per firm because the usage it is
+  // counted from is under RLS, and one firm must not spend another's.
+  BIB_FIN_AI_MONTHLY_TOKENS: z.coerce.number().int().positive().default(20_000_000),
+  // How long one call may take before it is abandoned (and counted as a
+  // transport failure). One document at medium effort is expected to take
+  // tens of seconds, not minutes.
+  BIB_FIN_AI_TIMEOUT_MS: z.coerce.number().int().min(5_000).max(600_000).default(120_000),
 
   // ── Auth (T1.7) ───────────────────────────────────────────────────────────
   BIB_SESSION_COOKIE_NAME: z.string().min(1).default("bib_session"),
@@ -380,12 +424,31 @@ export interface Config {
   readonly mail: MailConfig;
   readonly fx: FxConfig;
   readonly fin: FinConfig;
+  readonly finAi: FinAiConfig;
 }
 
 /** FinCompliance's switch and the fin job's pool (F0.3, F0.5). */
 export interface FinConfig {
   readonly enabled: boolean;
   readonly poolSize: number;
+}
+
+/** The models the AI reader's request is shaped for (BIB_FIN_AI_MODEL). */
+export type FinAiModel = "claude-sonnet-5-5" | "claude-opus-5-5" | "claude-haiku-5-5";
+
+/** FinCompliance's AI document reader (F2.4). Its own branch of the config,
+ *  not `fin`, so `redacted()` decides about the key on purpose rather than
+ *  logging the whole `fin` object with a credential inside it. */
+export interface FinAiConfig {
+  readonly provider: "none" | "anthropic";
+  /** Null when unset; `validate.ts` refuses `anthropic` without it. */
+  readonly anthropicApiKey: Secret | null;
+  readonly model: FinAiModel;
+  /** Documents per firm per run. */
+  readonly runCap: number;
+  /** Input-token equivalents per firm per calendar month. */
+  readonly monthlyTokens: number;
+  readonly timeoutMs: number;
 }
 
 /** The exchange-rate feed (0345). */
@@ -536,6 +599,15 @@ export function load(): Config {
       enabled: env.BIB_FIN_ENABLED === "true",
       poolSize: env.BIB_FIN_DB_POOL,
     },
+    finAi: {
+      provider: env.BIB_FIN_AI_PROVIDER,
+      anthropicApiKey:
+        env.BIB_FIN_ANTHROPIC_API_KEY === undefined ? null : new Secret(env.BIB_FIN_ANTHROPIC_API_KEY),
+      model: env.BIB_FIN_AI_MODEL,
+      runCap: env.BIB_FIN_AI_RUN_CAP,
+      monthlyTokens: env.BIB_FIN_AI_MONTHLY_TOKENS,
+      timeoutMs: env.BIB_FIN_AI_TIMEOUT_MS,
+    },
     fx: {
       feed: env.BIB_FX_FEED,
       exchangeRateApiKey: env.BIB_FX_EXCHANGERATE_API_KEY ?? null,
@@ -619,6 +691,12 @@ export function redacted(cfg: Config): Record<string, unknown> {
     port: cfg.port,
     docsEnabled: cfg.docsEnabled,
     fin: cfg.fin,
+    // The Anthropic key is a credential: masked here by name, as the internal
+    // keys are below, and a `Secret` besides.
+    finAi: {
+      ...cfg.finAi,
+      anthropicApiKey: cfg.finAi.anthropicApiKey === null ? null : "***",
+    },
     // The internal key is a credential; redacted() exists so a config dump is
     // safe to log, and this is exactly the field that would make it unsafe.
     // Every key is a credential; redacted() exists so a config dump is safe to

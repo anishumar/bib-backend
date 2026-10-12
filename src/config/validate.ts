@@ -217,6 +217,23 @@ export function validateServer(cfg: Config): void {
       );
     }
   }
+
+  // ── FinCompliance's AI reader (F2.4): a provider needs its key ────────────
+  //
+  // Not gated on the environment, for the mail check's reason: `anthropic` with
+  // no key is a typo everywhere, and finding it at boot beats a fin job whose
+  // every scan waits "later" with nothing saying why. `none` is NOT refused in
+  // production: it is not a stub that lies (the reader says "later", honestly,
+  // and the files stay listed as unread), so fin without AI is a real state.
+  // The sentence names the variable and never a value.
+  if (cfg.finAi.provider === "anthropic" && cfg.finAi.anthropicApiKey === null) {
+    throw new Error(
+      `BIB_FIN_AI_PROVIDER=anthropic but BIB_FIN_ANTHROPIC_API_KEY is not set. The AI ` +
+        `document reader has no key to call Anthropic with. Set BIB_FIN_ANTHROPIC_API_KEY to ` +
+        `the firm's Anthropic API key (it starts with sk-ant-), or set BIB_FIN_AI_PROVIDER=none ` +
+        `to leave PDFs and images waiting, unread, until there is one.`,
+    );
+  }
 }
 
 /** The value committed in .env.example — safe locally, never anywhere public. */
