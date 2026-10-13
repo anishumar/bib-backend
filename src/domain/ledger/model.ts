@@ -75,6 +75,7 @@ export const EVENT_VERBS = {
   "membership.revoked":          { objectType: "membership",          lane: "platform",   description: "A membership was deactivated. The person's next request stops — resolveSession re-reads this on every one." },
   "membership.restored":         { objectType: "membership",          lane: "platform",   description: "A deactivated membership was reinstated." },
   "membership.role_changed":     { objectType: "membership",          lane: "platform",   description: "A member's role at a firm changed, and with it everything gate 3 lets them do." },
+  "membership.fees_visibility_changed": { objectType: "membership",    lane: "platform",   description: "Whether a member sees fees changed — the fifth axis, independent of role." },
   "membership.grade_changed":    { objectType: "membership",          lane: "platform",   description: "A member's SENIORITY changed — a different axis from role. It decides who may sign off another person's work, so who moved whom, and when, is exactly what gets asked about later." },
   "membership.reports_to_changed": { objectType: "membership",          lane: "platform",   description: "Who a member reports to changed. Read by one thing — a `reporting_line` verification policy deciding who may check their work — so 'who was my manager in March' is asked of this trail, because the column itself is not effective-dated." },
 

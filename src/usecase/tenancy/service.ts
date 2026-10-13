@@ -23,6 +23,7 @@ import { isCurrencyCode, normalizeCurrency } from "../../domain/money/model";
 import {
   InvalidDisplayName,
   EmailTaken,
+  FeesAreStaffOnly,
   InvalidAudience,
   InvalidCountry,
   InvalidCurrency,
@@ -123,6 +124,12 @@ export interface ChangeMemberRoleInput {
   readonly tenantId: string;
   readonly membershipId: string;
   readonly role: string;
+}
+
+export interface SetMemberFeesInput {
+  readonly tenantId: string;
+  readonly membershipId: string;
+  readonly commercialVisibility: boolean;
 }
 
 export interface SetMemberActiveInput {
@@ -672,6 +679,36 @@ export class TenancyService {
         audience: membership.audience,
         from: membership.role,
         to: input.role,
+      },
+    });
+    return updated;
+  }
+
+  /**
+   * Show somebody fees, or stop. Set at invite and never changeable until now,
+   * so a member promoted to partner kept the hidden fees they joined with
+   * (QA, 2026-10-13). Independent of role on purpose; changing one never moves
+   * the other. Idempotent, like the role.
+   */
+  async setMemberFees(input: SetMemberFeesInput, actor: Actor): Promise<Membership> {
+    const membership = await this.memberOrThrow(input.tenantId, input.membershipId);
+    if (membership.commercialVisibility === input.commercialVisibility) return membership;
+    if (membership.audience !== "STAFF") throw new FeesAreStaffOnly();
+
+    const updated = await this.deps.memberships.setCommercialVisibility(
+      input.tenantId,
+      membership.id,
+      input.commercialVisibility,
+    );
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "membership.fees_visibility_changed",
+      objectId: membership.id,
+      actor,
+      payload: {
+        userId: membership.userId,
+        from: membership.commercialVisibility,
+        to: input.commercialVisibility,
       },
     });
     return updated;

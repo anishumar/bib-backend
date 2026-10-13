@@ -283,6 +283,16 @@ export class FakeMembershipRepo implements MembershipRepository, RoleHolders {
     return Promise.resolve(this.replace(tenantId, membershipId, (r) => ({ ...r, role })));
   }
 
+  setCommercialVisibility(
+    tenantId: string,
+    membershipId: string,
+    commercialVisibility: boolean,
+  ): Promise<Membership> {
+    return Promise.resolve(
+      this.replace(tenantId, membershipId, (r) => ({ ...r, commercialVisibility })),
+    );
+  }
+
   setActive(tenantId: string, membershipId: string, isActive: boolean): Promise<Membership> {
     return Promise.resolve(this.replace(tenantId, membershipId, (r) => ({ ...r, isActive })));
   }

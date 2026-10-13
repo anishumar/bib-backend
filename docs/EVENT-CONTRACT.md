@@ -187,6 +187,7 @@ The authoritative list is `EVENT_VERBS`; this table is its rendering.
 | `membership.revoked` | membership | A membership was deactivated. The person's next request stops — the session resolver re-reads this every time. |
 | `membership.restored` | membership | A deactivated membership was reinstated. |
 | `membership.role_changed` | membership | A member's role changed, and with it everything gate 3 lets them do. |
+| `membership.fees_visibility_changed` | membership | Whether a member sees fees changed (`{userId, from, to}`). Independent of role: a firm promotes somebody without showing them fees, or shows fees to an associate. |
 | `membership.grade_changed` | membership | A member's SENIORITY changed — a different axis from role. It decides who may sign off another person's work, so who moved whom, and when, is exactly what gets asked about later. |
 | `membership.reports_to_changed` | membership | Who a member reports to changed (T2.9). Read by one thing — a `reporting_line` verification policy deciding who may check their work. The column is deliberately NOT effective-dated (nothing records when a reporting line started), so this trail is where "who was my manager in March" is asked. |
 | `staff_grade.created` | staff_grade | A firm added a rung to its own hierarchy — one its starting ladder did not have. |

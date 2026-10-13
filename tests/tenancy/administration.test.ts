@@ -14,6 +14,7 @@ import { NoAxesDefined } from "../../src/testfakes/serviceaxis";
 import { ConfigService } from "../../src/usecase/config/service";
 import { makeFakes } from "../../src/testfakes/tenancy";
 import {
+  FeesAreStaffOnly,
   LastAdministrator,
   MembershipExists,
   MembershipNotFound,
@@ -252,6 +253,59 @@ describe("changing what a member may do", () => {
     await expect(
       service.changeMemberRole(
         { tenantId: tenant.id, membershipId: "00000000-0000-4000-8000-00000000dead", role: "manager" },
+        ACTOR,
+      ),
+    ).rejects.toBeInstanceOf(MembershipNotFound);
+  });
+});
+
+describe("showing a member fees (QA 2026-10-13)", () => {
+  it("promoting somebody leaves their fees hidden, and the fee switch shows them", async () => {
+    const { service, f, tenant } = await firm();
+    const member = await service.inviteMember(
+      { tenantId: tenant.id, email: "kunal@harbour.example", audience: "STAFF", role: "associate", commercialVisibility: false },
+      ACTOR,
+    );
+    const promoted = await service.changeMemberRole(
+      { tenantId: tenant.id, membershipId: member.id, role: "partner" },
+      ACTOR,
+    );
+    expect(promoted.commercialVisibility).toBe(false);
+
+    const shown = await service.setMemberFees(
+      { tenantId: tenant.id, membershipId: member.id, commercialVisibility: true },
+      ACTOR,
+    );
+    expect(shown.commercialVisibility).toBe(true);
+    expect(shown.role).toBe("partner");
+    const last = f.events.recorded.at(-1);
+    expect(last?.verb).toBe("membership.fees_visibility_changed");
+    expect(last?.payload).toEqual({ userId: member.userId, from: false, to: true });
+    expect(JSON.stringify(last?.payload)).not.toContain("@");
+  });
+
+  it("records nothing when the setting does not change", async () => {
+    const { service, f, tenant, ownerMembership } = await firm();
+    const before = f.events.recorded.length;
+    await service.setMemberFees(
+      { tenantId: tenant.id, membershipId: ownerMembership.id, commercialVisibility: true },
+      ACTOR,
+    );
+    expect(f.events.recorded).toHaveLength(before);
+  });
+
+  it("refuses a client contact, and a membership that is not this firm's", async () => {
+    const { service, tenant } = await firm();
+    const contact = await service.inviteMember(
+      { tenantId: tenant.id, email: "cfo@client.example", audience: "CLIENT_PORTAL", role: "client_contact", commercialVisibility: false },
+      ACTOR,
+    );
+    await expect(
+      service.setMemberFees({ tenantId: tenant.id, membershipId: contact.id, commercialVisibility: true }, ACTOR),
+    ).rejects.toBeInstanceOf(FeesAreStaffOnly);
+    await expect(
+      service.setMemberFees(
+        { tenantId: tenant.id, membershipId: "00000000-0000-4000-8000-00000000dead", commercialVisibility: true },
         ACTOR,
       ),
     ).rejects.toBeInstanceOf(MembershipNotFound);

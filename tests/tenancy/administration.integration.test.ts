@@ -274,6 +274,22 @@ describe("revocation reaches a live session", () => {
     expect(principal?.role).toBe("manager");
   });
 
+  it("a fee change is visible to the very next request, and leaves the role alone", async () => {
+    await tenancy.setMemberFees(
+      { tenantId, membershipId: colleagueMembershipId, commercialVisibility: true },
+      SYSTEM_ACTOR,
+    );
+    let principal = await identity.resolveSession(colleagueToken);
+    expect(principal?.commercialVisibility).toBe(true);
+    expect(principal?.role).toBe("manager");
+    await tenancy.setMemberFees(
+      { tenantId, membershipId: colleagueMembershipId, commercialVisibility: false },
+      SYSTEM_ACTOR,
+    );
+    principal = await identity.resolveSession(colleagueToken);
+    expect(principal?.commercialVisibility).toBe(false);
+  });
+
   it("REVOKING ACCESS STOPS THE NEXT REQUEST", async () => {
     // The whole point. The token is unchanged and unexpired; the session row is
     // untouched. What changed is one boolean on the membership, and the session

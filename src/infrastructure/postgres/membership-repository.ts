@@ -200,6 +200,23 @@ export class PostgresMembershipRepository
     });
   }
 
+  async setCommercialVisibility(
+    tenantId: string,
+    membershipId: string,
+    commercialVisibility: boolean,
+  ): Promise<Membership> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<MembershipRow[]>`
+        UPDATE tenancy.membership SET commercial_visibility = ${commercialVisibility}
+        WHERE id = ${membershipId}
+        RETURNING id, tenant_id, user_id, audience, role, commercial_visibility, grade_id,
+                  reports_to_user_id, is_active
+      `;
+      if (!row) throw new Error(`membership ${membershipId} vanished between the read and the write`);
+      return toMembership(row);
+    });
+  }
+
   async setActive(
     tenantId: string,
     membershipId: string,

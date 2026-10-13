@@ -29,6 +29,7 @@ export type TenancyErrorCode =
   | "MEMBERSHIP_EXISTS"
   | "ROLE_NOT_DEFINED"
   | "LAST_ADMINISTRATOR"
+  | "FEES_ARE_STAFF_ONLY"
   | "SIGNATORY_NOT_A_MEMBER"
   | "SIGNATORY_NOT_FOUND"
   | "SIGNATORY_ALREADY_LISTED"
@@ -232,6 +233,13 @@ export class LastAdministrator extends TenancyError {
         `change roles or memberships at all, including undoing this, so nobody could put it back ` +
         `from inside the product. Give somebody else an administrator role first.`,
     );
+  }
+}
+
+/** Fee visibility is a staff setting; a client contact sees their own invoices on the portal. */
+export class FeesAreStaffOnly extends TenancyError {
+  constructor() {
+    super("FEES_ARE_STAFF_ONLY", "Seeing fees is a setting for the firm's own people, not for a client contact.");
   }
 }
 

@@ -136,6 +136,7 @@ export function mapError(err: unknown): MappedError {
       // rest of the roster, so the caller fixes it by changing SOMEBODY ELSE.
       case "ROLE_NOT_DEFINED":
       case "LAST_ADMINISTRATOR":
+      case "FEES_ARE_STAFF_ONLY":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       // 404 rather than 403: the caller is not being refused permission, they
       // named somebody who is not on this firm's roster. Same answer as
