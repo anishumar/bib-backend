@@ -631,6 +631,8 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     blocks: new PostgresDocumentBlockRepository(pools.app),
     ids: systemIds,
     events: ledger,
+    calendars: new PostgresFirmTimeZone(pools.app),
+    fiscalYears: configRepository,
   });
   // THE DOCUMENT STORE, for the signed copies the sweep files (0080) — the
   // first worker task that stores a document, which is the trigger iam.tf

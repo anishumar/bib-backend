@@ -33,13 +33,57 @@ export function refPrefix(type: DocumentType): string {
   return REF_PREFIXES[type];
 }
 
-/** The shape the database CHECKs, restated here so a malformed reference is
- *  refused before it reaches a constraint. `{4,}` because a firm that issues
- *  ten thousand documents in a year should get a fifth digit, not an error. */
-const REF_PATTERN = /^(?:PR|EL)-[0-9]{4}-[0-9]{4,}$/;
+/** The shapes the database CHECKs, restated here so a malformed reference is
+ *  refused before it reaches a constraint: the numbers issued before 0392
+ *  (`EL-2026-0007`) and the country ones after it (`27IN501`, `PL27IN501`). */
+const REF_PATTERN = /^(?:(?:PR|EL)-[0-9]{4}-[0-9]{4,}|(?:PL)?[0-9]{2}[A-Z]{2}[0-9]{3,})$/;
 
 export function isDocumentRef(v: string): boolean {
   return REF_PATTERN.test(v);
+}
+
+/** 0392: a proposal's country reference starts `PL`; a letter's has no prefix. */
+const COUNTRY_REF_PREFIXES: Readonly<Record<DocumentType, string>> = {
+  proposal: "PL",
+  engagement_letter: "",
+};
+
+/**
+ * A financial year named by the year it ENDS (0392, the user's "industry
+ * standard"): April 2026 to March 2027 is 27, as India's FY27 and a UK or US
+ * annual report name it. A year that starts in January ends in the same one.
+ */
+export function fyEndYear(startYear: number, startMonth: number): number {
+  return startMonth === 1 ? startYear : startYear + 1;
+}
+
+/**
+ * `27IN501` / `PL27IN501` (0392): the issuing company's financial year, its
+ * ISO country, and a number from that country's run. At least three digits,
+ * so a run that starts at 1 still reads as a column (`27IN001`).
+ */
+export function formatCountryRef(input: {
+  readonly type: DocumentType;
+  readonly fyEndYear: number;
+  readonly country: string;
+  readonly number: number;
+}): string {
+  if (!Number.isInteger(input.fyEndYear) || input.fyEndYear < 2000 || input.fyEndYear > 9999) {
+    throw new RangeError(`a financial year must end in a four-digit year, got ${String(input.fyEndYear)}`);
+  }
+  if (!isCountryCode(input.country)) {
+    throw new RangeError(`a reference names an ISO country in upper case, got ${JSON.stringify(input.country)}`);
+  }
+  if (!Number.isInteger(input.number) || input.number < 1) {
+    throw new RangeError(`document reference number must be a positive integer, got ${String(input.number)}`);
+  }
+  const yy = String(input.fyEndYear % 100).padStart(2, "0");
+  return `${COUNTRY_REF_PREFIXES[input.type]}${yy}${input.country}${String(input.number).padStart(3, "0")}`;
+}
+
+/** The country a 0392 reference was drawn in, or null for an older number. */
+export function countryOfRef(ref: string): string | null {
+  return /^(?:PL)?[0-9]{2}([A-Z]{2})[0-9]{3,}$/.exec(ref)?.[1] ?? null;
 }
 
 /**

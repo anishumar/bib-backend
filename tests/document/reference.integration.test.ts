@@ -20,6 +20,8 @@
 //   THE TENANT WALL over both new tables.
 //
 // Run with:  npm run test:integration   (needs a migrated local database)
+import { PostgresConfigRepository } from "../../src/infrastructure/postgres/config-repository";
+import { PostgresFirmTimeZone } from "../../src/infrastructure/postgres/firm-timezone-repository";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import postgres from "postgres";
 import { load } from "../../src/config/config";
@@ -52,6 +54,8 @@ const documents = new DocumentService({
   blocks: new PostgresDocumentBlockRepository(app),
   ids: systemIds,
   events: ledger,
+  calendars: new PostgresFirmTimeZone(app),
+  fiscalYears: new PostgresConfigRepository(app),
 });
 const party = new PartyService({
   parties: new PostgresPartyRepository(app),

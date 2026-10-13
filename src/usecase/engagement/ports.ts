@@ -147,7 +147,15 @@ export interface DocumentIdentity {
   issuerFor(tenantId: string, clientJurisdiction: string | null): Promise<string>;
   /** Whether a party is one of the firm's own companies (F-10-1). */
   isFirmEntity(tenantId: string, partyId: string): Promise<boolean>;
-  nextRef(tenantId: string, type: DocumentType, now: Date): Promise<string>;
+  nextRef(tenantId: string, type: DocumentType, issuingEntityPartyId: string, now: Date): Promise<string>;
+  /** A draft's number once its issuer changes: new when the country does (0392). */
+  refAfterIssuerChange(
+    tenantId: string,
+    type: DocumentType,
+    currentRef: string,
+    newIssuerPartyId: string,
+    now: Date,
+  ): Promise<string>;
   /**
    * Where the issuing entity is REGISTERED — G1.8's mismatch check.
    *
@@ -247,6 +255,8 @@ export interface LetterRevision {
   readonly advanceAmount?: Amount | null | undefined;
   readonly jurisdiction?: string | undefined;
   readonly issuingEntityPartyId?: string | undefined;
+  /** A new number when the new issuer is in another country (0392). */
+  readonly ref?: string | undefined;
   readonly currency?: CurrencyCode | undefined;
   readonly fxRate?: Amount | undefined;
   readonly fxRateDate?: string | undefined;
@@ -1321,6 +1331,9 @@ export interface QuotedLine {
   readonly currency: string;
   readonly jurisdiction: string | null;
   readonly billingFrequency: string | null;
+  /** When the quote said the fee is invoiced (0393); the letter keeps it. */
+  readonly billingTiming: string | null;
+  readonly billingOn: string | null;
   readonly scopeOverride: string | null;
   readonly clientObligationsOverride: string | null;
   readonly volumeLimitsOverride: string | null;

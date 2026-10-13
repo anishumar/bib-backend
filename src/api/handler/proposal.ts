@@ -28,7 +28,7 @@ import type { AuthzService } from "../../usecase/authz/service";
 import type { ProposalService } from "../../usecase/proposal/service";
 import type { ProposalRecord, ProposalSummary, ProposalView } from "../../usecase/proposal/ports";
 import type { ProposalStatus } from "../../domain/proposal/model";
-import { EMAIL_NOTE_MAX, SIGNER_NAME_MAX } from "../../domain/proposal/model";
+import { EMAIL_NOTE_MAX, LINE_BILLING_TIMINGS, SIGNER_NAME_MAX } from "../../domain/proposal/model";
 import type { EmailOutcome } from "../../usecase/proposal/service";
 import type { SharedProposal } from "../../usecase/proposal/ports";
 import type { BillingFrequency } from "../../domain/document/model";
@@ -384,6 +384,12 @@ const ProposalLineSchema = z
     /** How often this DEAL is billed — defaulted from the pinned service's
      *  recurrence at the moment the line was quoted, and freely different. */
     billingFrequency: z.enum(BILLING_FREQUENCY_VALUES).nullable(),
+    billingTiming: z.enum(LINE_BILLING_TIMINGS).nullable().openapi({
+      description:
+        "When the fee is invoiced (0393): `arrears` (each period's last day), `advance` (its first) or " +
+        "`on_date` (from `billingOn`). Carried to the letter; printed on neither document. Null: not chosen.",
+    }),
+    billingOn: DaySchema.nullable().openapi({ description: "The first invoice date, with `on_date` only." }),
     /** WHY there is no amount. Not redacted by the fee axis: it is the sentence
      *  that prints where a figure would, and hiding it leaves a line showing
      *  neither a price nor a reason. */
@@ -785,6 +791,9 @@ const AddLineRequest = z
     /** How often this DEAL is billed. Omit and it defaults from the PINNED
      *  service's `recurrence`; state it to bill a monthly service quarterly. */
     billingFrequency: z.enum(BILLING_FREQUENCY_VALUES).optional(),
+    /** When the fee is invoiced (0393); `billingOn` with `on_date` only. */
+    billingTiming: z.enum(LINE_BILLING_TIMINGS).optional(),
+    billingOn: DaySchema.optional(),
     /** THIS DOCUMENT'S OWN WORDING for any of the four scope blocks. Omit any of
      *  them and the pinned catalogue version's words print — which is what makes
      *  tailoring one client's scope stop meaning "edit the catalogue". */
@@ -823,6 +832,9 @@ const UpdateLineRequest = z
     discountPercent: AmountSchema.optional(),
     jurisdiction: JurisdictionSchema.nullable().optional(),
     billingFrequency: z.enum(BILLING_FREQUENCY_VALUES).nullable().optional(),
+    /** Sent together; null clears the choice (0393). */
+    billingTiming: z.enum(LINE_BILLING_TIMINGS).nullable().optional(),
+    billingOn: DaySchema.nullable().optional(),
     scopeOverride: z.string().max(20000).nullable().optional(),
     clientObligationsOverride: z.string().max(20000).nullable().optional(),
     volumeLimitsOverride: z.string().max(20000).nullable().optional(),
@@ -1527,6 +1539,8 @@ function toLineBody(
     net: fees ? l.net : null,
     jurisdiction: l.line.jurisdiction,
     billingFrequency: l.line.billingFrequency,
+    billingTiming: l.line.billingTiming,
+    billingOn: l.line.billingOn,
     pricingNote: l.line.pricingNote,
     oopEstimate: fees && l.line.oopEstimate !== null ? { ...l.line.oopEstimate } : null,
   };
@@ -1852,6 +1866,8 @@ export function registerProposalRoutes(app: OpenAPIHono<AppEnv>, deps: ProposalD
         discountPercent: body.discountPercent,
         jurisdiction: body.jurisdiction,
         billingFrequency: body.billingFrequency,
+        billingTiming: body.billingTiming,
+        billingOn: body.billingOn,
         scopeOverride: body.scopeOverride,
         clientObligationsOverride: body.clientObligationsOverride,
         volumeLimitsOverride: body.volumeLimitsOverride,

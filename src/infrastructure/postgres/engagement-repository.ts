@@ -1045,6 +1045,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
                issuing_entity_party_id = CASE WHEN ${has("issuingEntityPartyId")}
                                               THEN ${change.issuingEntityPartyId ?? null}::uuid
                                               ELSE issuing_entity_party_id END,
+               ref = CASE WHEN ${has("ref")} THEN ${change.ref ?? null} ELSE ref END,
                currency = CASE WHEN ${has("currency")} THEN ${change.currency ?? null}
                                ELSE currency END,
                fx_rate = CASE WHEN ${has("fxRate")} THEN ${change.fxRate ?? null}::numeric

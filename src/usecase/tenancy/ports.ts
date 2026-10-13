@@ -181,6 +181,11 @@ export interface MembershipRepository {
   listMembers(tenantId: string): Promise<readonly MemberRecord[]>;
   findById(tenantId: string, membershipId: string): Promise<Membership | null>;
   updateRole(tenantId: string, membershipId: string, role: string): Promise<Membership>;
+  setCommercialVisibility(
+    tenantId: string,
+    membershipId: string,
+    commercialVisibility: boolean,
+  ): Promise<Membership>;
   /**
    * The switch that has been missing since T1.7.
    *

@@ -325,6 +325,7 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("POST", "/api/v1/tenancy/members"), "tenant:admin" as const],
   [routeKey("PUT", "/api/v1/tenancy/members/{membershipId}/role"), "tenant:admin" as const],
   [routeKey("PUT", "/api/v1/tenancy/members/{membershipId}/active"), "tenant:admin" as const],
+  [routeKey("PUT", "/api/v1/tenancy/members/{membershipId}/fees"), "tenant:admin" as const],
 
   // THE SENIORITY LADDER (G3.3). `tenant:admin` on all five, the READ included,
   // and the read is the one worth explaining.
@@ -1007,6 +1008,8 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("PATCH", "/api/v1/firm-entities/{entityPartyId}"), "tenant:admin" as const],
   [routeKey("GET", "/api/v1/firm-entities/preferences"), "config:read" as const],
   [routeKey("POST", "/api/v1/firm-entities/preferences"), "tenant:admin" as const],
+  [routeKey("GET", "/api/v1/firm-entities/numbering"), "config:read" as const],
+  [routeKey("PUT", "/api/v1/firm-entities/numbering"), "tenant:admin" as const],
 
   // THE FIRM'S STANDARD PROSE (G1.7) — the same split, for the same reason.
   // Reading is `config:read`: an associate drafting a letter should see which

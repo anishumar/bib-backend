@@ -1831,6 +1831,8 @@ describe("writing an ACCEPTED quote up as a letter (T3.5b)", () => {
       currency: "INR",
       jurisdiction: "IN",
       billingFrequency: null,
+      billingTiming: null,
+      billingOn: null,
       scopeOverride: null,
       clientObligationsOverride: null,
       volumeLimitsOverride: null,
@@ -1965,6 +1967,20 @@ describe("writing an ACCEPTED quote up as a letter (T3.5b)", () => {
 
     expect(out.lines[0]?.unitAmount).toBeNull();
     expect(out.lines[0]?.pricingNote).toBe("As mutually agreed");
+  });
+
+  it("carries when each fee is invoiced, as the quote chose it (0393)", async () => {
+    const h = withQuote(
+      quoted([
+        quoteLine({ description: "Books", billingFrequency: "monthly", billingTiming: "advance" }),
+        quoteLine({ description: "Payroll", billingFrequency: "monthly", billingTiming: "on_date", billingOn: "2026-11-05" }),
+      ]),
+    );
+
+    const out = await h.service.draftFromQuote(ask(), ACTOR);
+
+    expect(out.lines[0]).toMatchObject({ billingTiming: "advance", billingOn: null });
+    expect(out.lines[1]).toMatchObject({ billingTiming: "on_date", billingOn: "2026-11-05" });
   });
 
   it("carries the four scope overrides — the words the client actually read", async () => {
@@ -2364,6 +2380,8 @@ describe("who a letter names beside the client (F-10-1)", () => {
           currency: "INR",
           jurisdiction: "IN",
           billingFrequency: null,
+          billingTiming: null,
+          billingOn: null,
           scopeOverride: null,
           clientObligationsOverride: null,
           volumeLimitsOverride: null,

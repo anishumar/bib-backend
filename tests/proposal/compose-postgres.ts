@@ -58,6 +58,8 @@ export function composeProposals() {
     blocks: new PostgresDocumentBlockRepository(app),
     ids: systemIds,
     events: ledger,
+    calendars: new PostgresFirmTimeZone(app),
+    fiscalYears: new PostgresConfigRepository(app),
   });
   const repository = new PostgresProposalRepository(app);
   const proposals = new ProposalService({

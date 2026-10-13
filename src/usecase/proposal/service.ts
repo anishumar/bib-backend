@@ -29,6 +29,7 @@ import { SYSTEM_ACTOR } from "../../domain/ledger/model";
 import type { EventSink } from "../ledger/ports";
 import type {
   Proposal,
+  LineBillingTiming,
   ProposalDecision,
   ProposalLine,
   ProposalStatus,
@@ -43,9 +44,11 @@ import {
   isPastValidity,
   isProposalDecision,
   largestDiscount,
+  isLineBillingTiming,
   needsDiscountApproval,
   parseShareToken,
   proposalDeletionBlock,
+  TIMED_BILLING_FREQUENCIES,
 } from "../../domain/proposal/model";
 import { isAmount, isExchangeRate, isCurrencyCode, normalizeCurrency, rateFor } from "../../domain/money/model";
 import type { CurrencyRate } from "../../domain/money/model";
@@ -110,6 +113,7 @@ import {
   SignerNameRequired,
   ProposalDeleted,
   ProposalError,
+  InvalidLineBillingTiming,
   ProposalNotCopyable,
   ProposalLeadDeleted,
   proposalDeletionRefusal,
@@ -364,6 +368,9 @@ export interface AddLineInput {
   /** How often this DEAL is billed. Absent falls back to the PINNED service's
    *  `recurrence`, resolved here, once, and stored. */
   readonly billingFrequency?: string | undefined;
+  /** When the fee is invoiced (0393): arrears, advance or on_date with `billingOn`. */
+  readonly billingTiming?: string | undefined;
+  readonly billingOn?: string | undefined;
   /** This document's own wording for any of the four scope blocks. Absent
    *  prints the pinned catalogue version's words. */
   readonly scopeOverride?: string | undefined;
@@ -420,6 +427,8 @@ export interface UpdateLineInput {
   readonly discountPercent?: string | undefined;
   readonly jurisdiction?: string | null | undefined;
   readonly billingFrequency?: string | null | undefined;
+  readonly billingTiming?: string | null | undefined;
+  readonly billingOn?: string | null | undefined;
   readonly scopeOverride?: string | null | undefined;
   readonly clientObligationsOverride?: string | null | undefined;
   readonly volumeLimitsOverride?: string | null | undefined;
@@ -443,6 +452,8 @@ const LINE_EDIT_FIELDS = [
   "discountPercent",
   "jurisdiction",
   "billingFrequency",
+  "billingTiming",
+  "billingOn",
   "scopeOverride",
   "clientObligationsOverride",
   "volumeLimitsOverride",
@@ -671,6 +682,7 @@ export class ProposalService {
     const ref = await this.deps.documents.nextRef(
       input.tenantId,
       "proposal",
+      issuingEntityPartyId,
       this.deps.clock.now(),
     );
 
@@ -774,6 +786,7 @@ export class ProposalService {
       addressedToPartyId?: string | null;
       preparedByUserId?: string | null;
       issuingEntityPartyId?: string;
+      ref?: string;
       currency?: string;
       fxRate?: string;
       fxRateDate?: string;
@@ -840,6 +853,14 @@ export class ProposalService {
         newIssuer,
       );
       change.issuingEntityPartyId = newIssuer;
+      const ref = await this.deps.documents.refAfterIssuerChange(
+        input.tenantId,
+        "proposal",
+        proposal.ref,
+        newIssuer,
+        this.deps.clock.now(),
+      );
+      if (ref !== proposal.ref) change.ref = ref;
     }
 
     if (Object.keys(change).length === 0) throw new NothingToRevise();
@@ -1015,6 +1036,7 @@ export class ProposalService {
 
     const jurisdiction = this.lineJurisdiction(input.jurisdiction);
     const billingFrequency = this.statedBillingFrequency(input.billingFrequency);
+    const resolvedFrequency = billingFrequency ?? readServiceBody(pinned.body).recurrence;
     const oopEstimate = this.outOfPocket(input.oopEstimate);
 
     // A new line is a discount raised from nothing: past the limit after a
@@ -1042,7 +1064,8 @@ export class ProposalService {
       // client is billed. Null stays null: a version that states no recurrence
       // has not decided this, and inventing `one_time` would put a billing
       // frequency on the document that nobody chose.
-      billingFrequency: billingFrequency ?? readServiceBody(pinned.body).recurrence,
+      billingFrequency: resolvedFrequency,
+      ...lineTiming(resolvedFrequency, input.billingTiming, input.billingOn),
       scopeOverride: blankToNull(input.scopeOverride),
       clientObligationsOverride: blankToNull(input.clientObligationsOverride),
       volumeLimitsOverride: blankToNull(input.volumeLimitsOverride),
@@ -1116,6 +1139,13 @@ export class ProposalService {
       billingFrequency = this.statedBillingFrequency(input.billingFrequency);
     }
 
+    // Sent together or not at all; a frequency no longer billed per period
+    // drops a timing it kept, as the letter does.
+    const timingSent = input.billingTiming !== undefined || input.billingOn !== undefined;
+    const timing = timingSent
+      ? lineTiming(billingFrequency, input.billingTiming, input.billingOn)
+      : lineTiming(billingFrequency, current.billingTiming, current.billingOn, true);
+
     const override = (next: string | null | undefined, now: string | null): string | null =>
       next === undefined ? now : blankToNull(next ?? undefined);
 
@@ -1132,6 +1162,7 @@ export class ProposalService {
         discountPercent,
         jurisdiction,
         billingFrequency,
+        ...timing,
         scopeOverride: override(input.scopeOverride, current.scopeOverride),
         clientObligationsOverride: override(
           input.clientObligationsOverride,
@@ -2213,4 +2244,34 @@ function checkPricing(
 function blankToNull(value: string | undefined): string | null {
   const trimmed = value?.trim() ?? "";
   return trimmed === "" ? null : trimmed;
+}
+
+/**
+ * When a quoted fee is invoiced (0393), judged as the letter judges it
+ * (0319): nothing chosen is null; a choice needs a per-period fee; `on_date`
+ * needs its day and no other timing takes one. `kept` re-reads a line's own
+ * stored timing, which a new frequency may make meaningless: dropped, not refused.
+ */
+function lineTiming(
+  frequency: string | null,
+  timing: string | null | undefined,
+  on: string | null | undefined,
+  kept = false,
+): { billingTiming: LineBillingTiming | null; billingOn: string | null } {
+  const day = on === undefined || on === null ? "" : on.trim();
+  if (timing === undefined || timing === null || timing.trim() === "") {
+    if (day !== "") throw new InvalidLineBillingTiming('a first invoice date goes with "on_date"');
+    return { billingTiming: null, billingOn: null };
+  }
+  if (!isLineBillingTiming(timing)) throw new InvalidLineBillingTiming(`${JSON.stringify(timing)} is not one`);
+  if (!TIMED_BILLING_FREQUENCIES.includes(frequency ?? "")) {
+    if (kept) return { billingTiming: null, billingOn: null };
+    throw new InvalidLineBillingTiming(`a ${frequency ?? "frequency-less"} fee is not billed per period`);
+  }
+  if (timing === "on_date") {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new InvalidLineBillingTiming('"on_date" needs a first invoice date');
+    return { billingTiming: timing, billingOn: day };
+  }
+  if (day !== "") throw new InvalidLineBillingTiming(`a date goes with "on_date" only, not ${JSON.stringify(timing)}`);
+  return { billingTiming: timing, billingOn: null };
 }

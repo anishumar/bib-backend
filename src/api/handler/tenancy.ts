@@ -338,6 +338,14 @@ const ChangeMemberRoleRequest = z
   .object({ role: z.string().min(1) })
   .openapi("ChangeMemberRoleRequest");
 
+const SetMemberFeesRequest = z
+  .object({
+    commercialVisibility: z.boolean().openapi({
+      description: "True shows this member fees, rates and amounts; false hides them. Role is unchanged.",
+    }),
+  })
+  .openapi("SetMemberFeesRequest");
+
 const SetMemberActiveRequest = z
   .object({
     isActive: z.boolean().openapi({
@@ -621,6 +629,27 @@ const setMemberActiveRoute = createRoute({
     403: errorResponse("The session has not selected an org, or the role may not administer the firm"),
     404: errorResponse("No such membership at this firm"),
     409: errorResponse("This would leave the firm with no administrator"),
+  },
+});
+
+const setMemberFeesRoute = createRoute({
+  method: "put",
+  path: "/api/v1/tenancy/members/{membershipId}/fees",
+  tags: ["tenancy"],
+  summary: "Show a member fees, or hide them",
+  description:
+    "The fee axis, separate from role: promoting somebody does not show them fees, and an " +
+    "associate may be shown them. Takes effect on their next request.",
+  request: {
+    params: MemberParam,
+    body: { content: { "application/json": { schema: SetMemberFeesRequest } }, required: true },
+  },
+  responses: {
+    200: { description: "Changed. Idempotent.", content: { "application/json": { schema: MembershipSchema } } },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not administer the firm"),
+    404: errorResponse("No such membership at this firm"),
+    409: errorResponse("A client contact, whose access has no fee setting"),
   },
 });
 
@@ -1077,6 +1106,18 @@ export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDep
     return c.json(membershipWire(membership), 200);
   });
 
+  app.openapi(setMemberFeesRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { membershipId } = c.req.valid("param");
+    const { commercialVisibility } = c.req.valid("json");
+    const membership = await deps.service.setMemberFees(
+      { tenantId: s.tenantId, membershipId, commercialVisibility },
+      s.actor,
+    );
+    return c.json(membershipWire(membership), 200);
+  });
+
   app.openapi(changeMemberGradeRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
@@ -1221,6 +1262,7 @@ export const tenancyRoutes = {
   inviteMember: inviteMemberRoute,
   changeMemberRole: changeMemberRoleRoute,
   setMemberActive: setMemberActiveRoute,
+  setMemberFees: setMemberFeesRoute,
   changeMemberGrade: changeMemberGradeRoute,
   setReportsTo: setReportsToRoute,
   firmSignatory: firmSignatoryRoute,

@@ -23,6 +23,7 @@ import { ProposalCitedByLetter } from "../../domain/proposal/errors";
 import { readServiceBody } from "../../domain/config/model";
 import { resolveTerms } from "../../domain/document/model";
 import type { BillingFrequency, OutOfPocketEstimate } from "../../domain/document/model";
+import type { LineBillingTiming } from "../../domain/proposal/model";
 import type {
   FiledPdf,
   LineEdit,
@@ -162,6 +163,8 @@ interface LineRow {
   discount_percent: string;
   jurisdiction: string | null;
   billing_frequency: BillingFrequency | null;
+  billing_timing: LineBillingTiming | null;
+  billing_on: Date | null;
   scope_override: string | null;
   client_obligations_override: string | null;
   volume_limits_override: string | null;
@@ -179,7 +182,8 @@ const LINE_COLUMNS = `id, tenant_id, proposal_id, entity_party_id, service_versi
                       description, position, quantity, unit_amount, currency, discount_percent,
                       jurisdiction, billing_frequency, scope_override,
                       client_obligations_override, volume_limits_override, exclusions_override,
-                      oop_estimate_min, oop_estimate_max, oop_currency, pricing_note`;
+                      oop_estimate_min, oop_estimate_max, oop_currency, pricing_note,
+                      billing_timing, billing_on`;
 
 interface TotalsRow {
   gross: string | null;
@@ -247,6 +251,8 @@ function toLine(r: LineRow): ProposalLine {
     discountPercent: r.discount_percent,
     jurisdiction: r.jurisdiction,
     billingFrequency: r.billing_frequency,
+    billingTiming: r.billing_timing,
+    billingOn: r.billing_on === null ? null : toDay(r.billing_on),
     scopeOverride: r.scope_override,
     clientObligationsOverride: r.client_obligations_override,
     volumeLimitsOverride: r.volume_limits_override,
@@ -478,6 +484,7 @@ export class PostgresProposalRepository implements ProposalRepository {
                l.jurisdiction, l.billing_frequency, l.scope_override,
                l.client_obligations_override, l.volume_limits_override, l.exclusions_override,
                l.oop_estimate_min, l.oop_estimate_max, l.oop_currency, l.pricing_note,
+               l.billing_timing, l.billing_on,
                -- NULL for an unpriced line, straight out of the view: there is
                -- no net of an amount that does not exist, and 0 here would sum
                -- into the document's total as a line the client gets free.
@@ -773,10 +780,11 @@ export class PostgresProposalRepository implements ProposalRepository {
            position, quantity, unit_amount, currency, discount_percent,
            jurisdiction, billing_frequency, scope_override, client_obligations_override,
            volume_limits_override, exclusions_override,
-           oop_estimate_min, oop_estimate_max, oop_currency, pricing_note)
+           oop_estimate_min, oop_estimate_max, oop_currency, pricing_note,
+           billing_timing, billing_on)
         SELECT $1, $2, $3, $4, $5, $6,
                coalesce(max(position), 0) + 1,
-               $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+               $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22::date
         FROM crm.proposal_line
         WHERE proposal_id = $3 AND removed_at IS NULL
         RETURNING ${LINE_COLUMNS}
@@ -802,6 +810,8 @@ export class PostgresProposalRepository implements ProposalRepository {
           l.oopEstimate?.max ?? null,
           l.oopEstimate?.currency ?? null,
           l.pricingNote,
+          l.billingTiming,
+          l.billingOn,
         ],
       );
       if (!row) throw new Error("proposal line insert returned no row");
@@ -827,7 +837,8 @@ export class PostgresProposalRepository implements ProposalRepository {
                jurisdiction = $8, billing_frequency = $9, scope_override = $10,
                client_obligations_override = $11, volume_limits_override = $12,
                exclusions_override = $13, oop_estimate_min = $14, oop_estimate_max = $15,
-               oop_currency = $16, pricing_note = $17, currency = $18
+               oop_currency = $16, pricing_note = $17, currency = $18,
+               billing_timing = $19, billing_on = $20::date
           FROM crm.proposal p
          WHERE l.id = $1 AND l.proposal_id = $2 AND l.tenant_id = $3 AND l.removed_at IS NULL
            AND p.id = l.proposal_id AND p.status = 'draft' AND p.deleted_at IS NULL
@@ -852,6 +863,8 @@ export class PostgresProposalRepository implements ProposalRepository {
           edit.oopEstimate?.currency ?? null,
           edit.pricingNote,
           edit.currency,
+          edit.billingTiming,
+          edit.billingOn,
         ],
       );
       if (!row) return null;
@@ -1146,6 +1159,7 @@ export class PostgresProposalRepository implements ProposalRepository {
                issuing_entity_party_id = CASE WHEN ${has("issuingEntityPartyId")}
                                               THEN ${change.issuingEntityPartyId ?? null}::uuid
                                               ELSE issuing_entity_party_id END,
+               ref = CASE WHEN ${has("ref")} THEN ${change.ref ?? null} ELSE ref END,
                -- The MAIN currency (0344). Lines keep their own: the WHERE
                -- below refuses a move while any live line is in the old one.
                currency = CASE WHEN ${has("currency")} THEN ${change.currency ?? null}

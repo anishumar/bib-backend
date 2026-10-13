@@ -215,6 +215,8 @@ export class FakeProposalRepo implements ProposalRepository {
       discountPercent: l.discountPercent,
       jurisdiction: l.jurisdiction,
       billingFrequency: l.billingFrequency,
+      billingTiming: l.billingTiming,
+      billingOn: l.billingOn,
       scopeOverride: l.scopeOverride,
       clientObligationsOverride: l.clientObligationsOverride,
       volumeLimitsOverride: l.volumeLimitsOverride,

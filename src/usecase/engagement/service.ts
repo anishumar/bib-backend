@@ -973,6 +973,7 @@ export class EngagementService {
     const ref = await this.deps.documents.nextRef(
       input.tenantId,
       "engagement_letter",
+      issuingEntityPartyId,
       this.deps.clock.now(),
     );
 
@@ -1219,6 +1220,8 @@ export class EngagementService {
           discountPercent: line.discountPercent,
           ...(line.jurisdiction === null ? {} : { jurisdiction: line.jurisdiction }),
           ...(line.billingFrequency === null ? {} : { billingFrequency: line.billingFrequency }),
+          ...(line.billingTiming === null ? {} : { billingTiming: line.billingTiming }),
+          ...(line.billingOn === null ? {} : { billingOn: line.billingOn }),
           ...(line.scopeOverride === null ? {} : { scopeOverride: line.scopeOverride }),
           ...(line.clientObligationsOverride === null
             ? {}
@@ -1832,6 +1835,7 @@ export class EngagementService {
       advanceAmount?: string | null;
       jurisdiction?: string;
       issuingEntityPartyId?: string;
+      ref?: string;
       currency?: string;
       fxRate?: string;
       fxRateDate?: string;
@@ -1933,7 +1937,17 @@ export class EngagementService {
       }
       prose = await this.deps.documents.standardProse(input.tenantId, owner, jurisdiction, issuer);
       if (jurisdiction !== letter.jurisdiction) change.jurisdiction = jurisdiction;
-      if (issuer !== letter.issuingEntityPartyId) change.issuingEntityPartyId = issuer;
+      if (issuer !== letter.issuingEntityPartyId) {
+        change.issuingEntityPartyId = issuer;
+        const ref = await this.deps.documents.refAfterIssuerChange(
+          input.tenantId,
+          "engagement_letter",
+          letter.ref,
+          issuer,
+          this.deps.clock.now(),
+        );
+        if (ref !== letter.ref) change.ref = ref;
+      }
     }
 
     if (Object.keys(change).length === 0) throw new NothingToRevise();

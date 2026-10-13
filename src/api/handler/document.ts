@@ -115,6 +115,50 @@ const setRoute = createRoute({
   },
 });
 
+// ── Document numbers (0392) ─────────────────────────────────────────────────
+
+const NumberingSchema = z
+  .object({
+    firstNumber: z.number().int().openapi({
+      description:
+        "Where every country's run of proposal and letter numbers starts each financial year " +
+        "(`27IN501`, `PL27IN501`). 1 until the firm says otherwise.",
+      example: 501,
+    }),
+  })
+  .openapi("DocumentNumbering");
+
+const getNumberingRoute = createRoute({
+  method: "get",
+  path: "/api/v1/firm-entities/numbering",
+  tags: ["firm-entities"],
+  summary: "Where the firm's proposal and letter numbers start",
+  responses: {
+    200: { description: "The setting", content: { "application/json": { schema: NumberingSchema } } },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+  },
+});
+
+const putNumberingRoute = createRoute({
+  method: "put",
+  path: "/api/v1/firm-entities/numbering",
+  tags: ["firm-entities"],
+  summary: "Change where the firm's proposal and letter numbers start",
+  description:
+    "A run already past the new first number carries on; one below it moves up to it at its next " +
+    "number. Numbers already given are never changed.",
+  request: {
+    body: { content: { "application/json": { schema: NumberingSchema } }, required: true },
+  },
+  responses: {
+    200: { description: "Saved", content: { "application/json": { schema: NumberingSchema } } },
+    400: errorResponse("Not a whole number from 1 to 999999"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+  },
+});
+
 // ── The firm's own companies (T6.18) ────────────────────────────────────────
 
 /** A registered address as the firm writes it: the lines it prints, in order,
@@ -675,6 +719,19 @@ export function registerDocumentRoutes(app: OpenAPIHono<AppEnv>, deps: DocumentD
       200,
     );
   });
+  app.openapi(getNumberingRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    return c.json({ firstNumber: await deps.service.firstNumber(s.tenantId) }, 200);
+  });
+
+  app.openapi(putNumberingRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { firstNumber } = c.req.valid("json");
+    return c.json({ firstNumber: await deps.service.setFirstNumber(s.tenantId, firstNumber, s.actor) }, 200);
+  });
+
   app.openapi(listBlocksRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);

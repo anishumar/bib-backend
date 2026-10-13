@@ -11,7 +11,10 @@ import { DocumentService } from "../../src/usecase/document/service";
 import { makeDocumentFakes, SEEDED_FIRM_ENTITY } from "../../src/testfakes/document";
 import {
   ANY_JURISDICTION,
+  countryOfRef,
+  formatCountryRef,
   formatDocumentRef,
+  fyEndYear,
   isDocumentRef,
   refYear,
   resolveIssuingEntity,
@@ -19,6 +22,7 @@ import {
 import type { FirmEntityPreference } from "../../src/domain/document/model";
 import {
   FirmEntityNotFound,
+  InvalidFirstNumber,
   InvalidJurisdictionKey,
   NoIssuingEntity,
 } from "../../src/domain/document/errors";
@@ -92,17 +96,96 @@ describe("the reference a client quotes back", () => {
     expect(refYear(new Date("2027-01-01T00:30:00Z"))).toBe(2027);
   });
 
-  it("gives each firm, type and year its own run of numbers", async () => {
+  it("gives an issuer with no country the firm-wide run, per type and year", async () => {
     const s = setup();
     const when = new Date("2026-06-01T09:00:00Z");
-    expect(await s.service.nextRef(TENANT, "proposal", when)).toBe("PR-2026-0001");
-    expect(await s.service.nextRef(TENANT, "proposal", when)).toBe("PR-2026-0002");
-    // A different document type is a different series, so the letter starts at
-    // one rather than continuing the proposals' run.
-    expect(await s.service.nextRef(TENANT, "engagement_letter", when)).toBe("EL-2026-0001");
-    // And a new year starts again.
-    expect(await s.service.nextRef(TENANT, "proposal", new Date("2027-01-02T09:00:00Z"))).toBe(
-      "PR-2027-0001",
+    expect(await s.service.nextRef(TENANT, "proposal", SEEDED_FIRM_ENTITY, when)).toBe("PR-2026-0001");
+    expect(await s.service.nextRef(TENANT, "proposal", SEEDED_FIRM_ENTITY, when)).toBe("PR-2026-0002");
+    expect(await s.service.nextRef(TENANT, "engagement_letter", SEEDED_FIRM_ENTITY, when)).toBe("EL-2026-0001");
+    expect(
+      await s.service.nextRef(TENANT, "proposal", SEEDED_FIRM_ENTITY, new Date("2027-01-02T09:00:00Z")),
+    ).toBe("PR-2027-0001");
+  });
+});
+
+describe("the country reference (0392)", () => {
+  function registered(): ReturnType<typeof setup> {
+    const s = setup();
+    s.preferences.partyJurisdictions.set(UAE_ENTITY, "AE");
+    s.preferences.partyJurisdictions.set(US_ENTITY, "US");
+    return s;
+  }
+  const OCT_2026 = new Date("2026-10-13T09:00:00Z");
+
+  it("spells the year it ends, the issuer's country and the number", () => {
+    expect(formatCountryRef({ type: "engagement_letter", fyEndYear: 2027, country: "IN", number: 501 })).toBe("27IN501");
+    expect(formatCountryRef({ type: "proposal", fyEndYear: 2027, country: "IN", number: 501 })).toBe("PL27IN501");
+    expect(formatCountryRef({ type: "proposal", fyEndYear: 2027, country: "AE", number: 7 })).toBe("PL27AE007");
+    expect(formatCountryRef({ type: "proposal", fyEndYear: 2027, country: "AE", number: 1234 })).toBe("PL27AE1234");
+    expect(() => formatCountryRef({ type: "proposal", fyEndYear: 2027, country: "XX", number: 1 })).toThrow(RangeError);
+    expect(countryOfRef("PL27AE007")).toBe("AE");
+    expect(countryOfRef("27IN501")).toBe("IN");
+    expect(countryOfRef("PR-2026-0001")).toBeNull();
+  });
+
+  it.each([["27IN501"], ["PL27IN501"], ["PL27AE1234"]])("accepts %s", (ref) => {
+    expect(isDocumentRef(ref)).toBe(true);
+  });
+
+  it("names a year by its end: April 2026 to March 2027 is 27, a calendar year is itself", () => {
+    expect(fyEndYear(2026, 4)).toBe(2027);
+    expect(fyEndYear(2026, 1)).toBe(2026);
+  });
+
+  it("starts each country's run at the firm's first number and keeps the runs apart", async () => {
+    const s = registered();
+    await s.service.setFirstNumber(TENANT, 501, ACTOR);
+    expect(await s.service.nextRef(TENANT, "engagement_letter", UAE_ENTITY, OCT_2026)).toBe("27AE501");
+    expect(await s.service.nextRef(TENANT, "engagement_letter", UAE_ENTITY, OCT_2026)).toBe("27AE502");
+    expect(await s.service.nextRef(TENANT, "engagement_letter", US_ENTITY, OCT_2026)).toBe("27US501");
+    expect(await s.service.nextRef(TENANT, "proposal", UAE_ENTITY, OCT_2026)).toBe("PL27AE501");
+    // A new financial year (1 April 2027) starts the run again.
+    expect(
+      await s.service.nextRef(TENANT, "engagement_letter", UAE_ENTITY, new Date("2027-04-01T09:00:00Z")),
+    ).toBe("28AE501");
+    expect(s.events.store.rows.some((e) => e.verb === "tenant.document_numbering_set")).toBe(true);
+  });
+
+  it("reads the issuing company's own year and zone", async () => {
+    const s = registered();
+    // The US company keeps a calendar year: October 2026 is in its year 2026.
+    s.calendars.calendars = new Map([
+      [US_ENTITY, { timeZone: "America/Los_Angeles", fiscalYearStartMonth: 1 }],
+      [UAE_ENTITY, { timeZone: "Asia/Dubai", fiscalYearStartMonth: null }],
+    ]);
+    expect(await s.service.nextRef(TENANT, "proposal", US_ENTITY, OCT_2026)).toBe("PL26US001");
+    // 31 March 23:30 in Dubai is still March there, though it is April in India.
+    expect(await s.service.nextRef(TENANT, "proposal", UAE_ENTITY, new Date("2027-03-31T19:30:00Z"))).toBe("PL27AE001");
+  });
+
+  it("moves a run already started up to a raised first number, never down", async () => {
+    const s = registered();
+    expect(await s.service.nextRef(TENANT, "proposal", UAE_ENTITY, OCT_2026)).toBe("PL27AE001");
+    await s.service.setFirstNumber(TENANT, 501, ACTOR);
+    expect(await s.service.nextRef(TENANT, "proposal", UAE_ENTITY, OCT_2026)).toBe("PL27AE501");
+    await s.service.setFirstNumber(TENANT, 100, ACTOR);
+    expect(await s.service.nextRef(TENANT, "proposal", UAE_ENTITY, OCT_2026)).toBe("PL27AE502");
+  });
+
+  it("refuses a first number that is not a whole number from 1", async () => {
+    const s = registered();
+    await expect(s.service.setFirstNumber(TENANT, 0, ACTOR)).rejects.toThrow(InvalidFirstNumber);
+    await expect(s.service.setFirstNumber(TENANT, 1.5, ACTOR)).rejects.toThrow(InvalidFirstNumber);
+  });
+
+  it("renumbers a draft whose new issuer is in another country, and only then", async () => {
+    const s = registered();
+    const ref = await s.service.nextRef(TENANT, "proposal", UAE_ENTITY, OCT_2026);
+    expect(await s.service.refAfterIssuerChange(TENANT, "proposal", ref, UAE_ENTITY, OCT_2026)).toBe(ref);
+    expect(await s.service.refAfterIssuerChange(TENANT, "proposal", ref, US_ENTITY, OCT_2026)).toBe("PL27US001");
+    // A number from before 0392 names no country and is kept.
+    expect(await s.service.refAfterIssuerChange(TENANT, "proposal", "PR-2026-0004", US_ENTITY, OCT_2026)).toBe(
+      "PR-2026-0004",
     );
   });
 });

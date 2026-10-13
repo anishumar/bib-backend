@@ -581,6 +581,8 @@ export function wire(cfg: Config, log: Logger): Wired {
     blocks: new PostgresDocumentBlockRepository(pools.app),
     ids: systemIds,
     events: ledger,
+    calendars: new PostgresFirmTimeZone(pools.app),
+    fiscalYears: configRepository,
   });
 
   // INVOICING (T3.4). Its repository is the only one in this codebase whose

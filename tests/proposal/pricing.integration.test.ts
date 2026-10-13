@@ -84,6 +84,8 @@ const documents = new DocumentService({
   blocks: new PostgresDocumentBlockRepository(app),
   ids: systemIds,
   events: ledger,
+  calendars: new PostgresFirmTimeZone(app),
+  fiscalYears: new PostgresConfigRepository(app),
 });
 const service = new ProposalService({
   proposals,
@@ -269,6 +271,8 @@ describe("the money adds up, in numeric", () => {
         // all.
         jurisdiction: l.line.jurisdiction,
         billingFrequency: l.line.billingFrequency,
+        billingTiming: l.line.billingTiming,
+        billingOn: l.line.billingOn,
         scopeOverride: l.line.scopeOverride,
         clientObligationsOverride: l.line.clientObligationsOverride,
         volumeLimitsOverride: l.line.volumeLimitsOverride,
@@ -450,6 +454,8 @@ describe("a line with no price — what the total MEANS then (G1.6)", () => {
         discountPercent: l.line.discountPercent,
         jurisdiction: l.line.jurisdiction,
         billingFrequency: l.line.billingFrequency,
+        billingTiming: l.line.billingTiming,
+        billingOn: l.line.billingOn,
         scopeOverride: l.line.scopeOverride,
         clientObligationsOverride: l.line.clientObligationsOverride,
         volumeLimitsOverride: l.line.volumeLimitsOverride,

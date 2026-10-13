@@ -18,6 +18,17 @@
 import type { Amount, CurrencyCode, CurrencyRate } from "../money/model";
 import type { BillingFrequency, OutOfPocketEstimate } from "../document/model";
 
+/** When a quoted recurring fee is invoiced (0393): the letter's three (0319). */
+export const LINE_BILLING_TIMINGS = ["arrears", "advance", "on_date"] as const;
+export type LineBillingTiming = (typeof LINE_BILLING_TIMINGS)[number];
+
+export function isLineBillingTiming(v: string): v is LineBillingTiming {
+  return (LINE_BILLING_TIMINGS as readonly string[]).includes(v);
+}
+
+/** Billed per period, so a day in the period can be chosen. */
+export const TIMED_BILLING_FREQUENCIES: readonly string[] = ["monthly", "quarterly", "annually"];
+
 /**
  * Where a proposal has got to.
  *
@@ -318,6 +329,10 @@ export interface ProposalLine {
    * trace.
    */
   readonly billingFrequency: BillingFrequency | null;
+  /** When the fee is invoiced (0393), carried to the letter and printed on
+   *  neither: arrears, advance or on_date (`billingOn`). Null = not chosen. */
+  readonly billingTiming: LineBillingTiming | null;
+  readonly billingOn: string | null;
   /**
    * THE FOUR OVERRIDES — this document's own wording for the four scope blocks,
    * or null to print the pinned catalogue version's words.
