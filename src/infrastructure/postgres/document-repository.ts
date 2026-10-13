@@ -78,6 +78,51 @@ export class PostgresDocumentRepository
     });
   }
 
+  /** 0392: the same single statement, keyed on the country and financial
+   *  year, and never below the firm's first number. */
+  async nextInCountry(
+    tenantId: string,
+    type: DocumentType,
+    country: string,
+    fyEndYear: number,
+    first: number,
+  ): Promise<number> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ last_number: number }[]>`
+        INSERT INTO crm.document_ref_country_series AS s
+          (tenant_id, document_type, jurisdiction, fy_end_year, last_number)
+        VALUES (${tenantId}, ${type}, ${country}, ${fyEndYear}, ${first})
+        ON CONFLICT (tenant_id, document_type, jurisdiction, fy_end_year)
+        DO UPDATE SET last_number = GREATEST(s.last_number + 1, ${first}::integer)
+        RETURNING last_number
+      `;
+      if (!row) throw new Error("document reference series returned no number");
+      return row.last_number;
+    });
+  }
+
+  async firstNumber(tenantId: string): Promise<number> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ first_number: number }[]>`
+        SELECT first_number FROM crm.document_numbering WHERE tenant_id = ${tenantId}
+      `;
+      return row?.first_number ?? 1;
+    });
+  }
+
+  async setFirstNumber(tenantId: string, first: number): Promise<number> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ first_number: number }[]>`
+        INSERT INTO crm.document_numbering (tenant_id, first_number)
+        VALUES (${tenantId}, ${first})
+        ON CONFLICT (tenant_id) DO UPDATE SET first_number = EXCLUDED.first_number
+        RETURNING first_number
+      `;
+      if (!row) throw new Error("document numbering returned no row");
+      return row.first_number;
+    });
+  }
+
   async preferences(tenantId: string): Promise<readonly FirmEntityPreference[]> {
     return withTenant(this.app, tenantId, async (db) => {
       const rows = await db<PreferenceRow[]>`

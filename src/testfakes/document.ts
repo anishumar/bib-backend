@@ -20,6 +20,8 @@ import type {
   BlockOwner,
   DocumentBlockEdit,
   DocumentBlockRepository,
+  DocumentCalendars,
+  DocumentFiscalYears,
   DocumentReferences,
   FirmEntity,
   FirmEntityPreferenceRecord,
@@ -44,6 +46,7 @@ import { DocumentService } from "../usecase/document/service";
 import { FakeIds } from "./ids";
 import { RecordingEventSink } from "./ledger";
 import { startMonthOfYearEnd } from "../domain/calendar/model";
+import type { CompanyCalendars } from "../domain/calendar/model";
 
 /** The entity every firm is seeded with — see the note on `FakePreferenceRepo`. */
 export const SEEDED_FIRM_ENTITY = "00000000-0000-0000-0000-0000000000f1";
@@ -173,11 +176,49 @@ export class FakePreferenceRepo implements FirmEntityPreferenceRepository {
 export class FakeDocumentReferences implements DocumentReferences {
   private readonly counters = new Map<string, number>();
 
+  private readonly firsts = new Map<string, number>();
+
   next(tenantId: string, type: DocumentType, year: number): Promise<number> {
     const key = `${tenantId} ${type} ${String(year)}`;
     const next = (this.counters.get(key) ?? 0) + 1;
     this.counters.set(key, next);
     return Promise.resolve(next);
+  }
+
+  nextInCountry(tenantId: string, type: DocumentType, country: string, fyEndYear: number, first: number): Promise<number> {
+    const key = `${tenantId} ${type} ${country} ${String(fyEndYear)}`;
+    const last = this.counters.get(key);
+    const next = last === undefined ? first : Math.max(last + 1, first);
+    this.counters.set(key, next);
+    return Promise.resolve(next);
+  }
+
+  firstNumber(tenantId: string): Promise<number> {
+    return Promise.resolve(this.firsts.get(tenantId) ?? 1);
+  }
+
+  setFirstNumber(tenantId: string, first: number): Promise<number> {
+    this.firsts.set(tenantId, first);
+    return Promise.resolve(first);
+  }
+}
+
+/** The firm's zone and its companies' own calendars; none by default. */
+export class FakeDocumentCalendars implements DocumentCalendars, DocumentFiscalYears {
+  zone = "Asia/Kolkata";
+  calendars: CompanyCalendars = new Map();
+  firmYearStart: number | null = null;
+
+  timeZoneFor(): Promise<string> {
+    return Promise.resolve(this.zone);
+  }
+
+  companyCalendars(): Promise<CompanyCalendars> {
+    return Promise.resolve(this.calendars);
+  }
+
+  fiscalYearStartMonth(): Promise<number | null> {
+    return Promise.resolve(this.firmYearStart);
   }
 }
 
@@ -310,7 +351,9 @@ export function makeDocumentFakes(): Deps & {
   standardBlocks: FakeStandardBlockRepo;
   blocks: FakeDocumentBlockRepo;
   events: RecordingEventSink;
+  calendars: FakeDocumentCalendars;
 } {
+  const calendars = new FakeDocumentCalendars();
   return {
     preferences: new FakePreferenceRepo(),
     refs: new FakeDocumentReferences(),
@@ -318,6 +361,8 @@ export function makeDocumentFakes(): Deps & {
     blocks: new FakeDocumentBlockRepo(),
     ids: new FakeIds(),
     events: new RecordingEventSink(),
+    calendars,
+    fiscalYears: calendars,
   };
 }
 

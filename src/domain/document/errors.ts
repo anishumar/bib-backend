@@ -14,6 +14,7 @@ export class DocumentError extends Error {
 
 export type DocumentErrorCode =
   | "NO_ISSUING_ENTITY"
+  | "INVALID_FIRST_NUMBER"
   | "INVALID_JURISDICTION"
   | "FIRM_ENTITY_NOT_FOUND"
   | "INVALID_BLOCK_KIND"
@@ -302,6 +303,16 @@ export class BlocksAlreadySeeded extends DocumentError {
       "BLOCKS_ALREADY_SEEDED",
       `Document ${JSON.stringify(documentId)} already carries ${String(count)} block(s). The ` +
         `standard set is copied ONCE, at creation; edit the document's own blocks from here.`,
+    );
+  }
+}
+
+/** 0392: the first number of the firm's proposal and letter runs. */
+export class InvalidFirstNumber extends DocumentError {
+  constructor(given: number, max: number) {
+    super(
+      "INVALID_FIRST_NUMBER",
+      `${String(given)} cannot start a run of document numbers. Use a whole number from 1 to ${String(max)}.`,
     );
   }
 }

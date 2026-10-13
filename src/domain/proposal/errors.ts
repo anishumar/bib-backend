@@ -45,6 +45,7 @@ export type ProposalErrorCode =
   | "SERVICE_HAS_NO_LIST_PRICE"
   | "UNPRICED_LINE_HAS_DISCOUNT"
   | "INVALID_BILLING_FREQUENCY"
+  | "INVALID_BILLING_TIMING"
   | "INVALID_LINE_JURISDICTION"
   | "INVALID_OOP_ESTIMATE"
   | "INVALID_DISCOUNT"
@@ -714,6 +715,17 @@ export class RateIsMainCurrency extends ProposalError {
     super(
       "RATE_FOR_MAIN_CURRENCY",
       `${currency} is this proposal's main currency. Change its rate with the currency on step 1.`,
+    );
+  }
+}
+
+/** 0393: when a quoted fee is invoiced, as the letter's own rule (0319) has it. */
+export class InvalidLineBillingTiming extends ProposalError {
+  constructor(why: string) {
+    super(
+      "INVALID_BILLING_TIMING",
+      `When this fee is invoiced cannot be saved: ${why}. Choose the end of each period, its ` +
+        `start, or a first invoice date, for a monthly, quarterly or yearly fee.`,
     );
   }
 }

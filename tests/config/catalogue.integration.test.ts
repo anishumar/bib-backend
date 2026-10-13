@@ -89,6 +89,8 @@ const documents = new DocumentService({
   blocks: new PostgresDocumentBlockRepository(app),
   ids: systemIds,
   events: ledger,
+  calendars: new PostgresFirmTimeZone(app),
+  fiscalYears: new PostgresConfigRepository(app),
 });
 const proposals = new ProposalService({
   proposals: new PostgresProposalRepository(app),

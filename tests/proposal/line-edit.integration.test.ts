@@ -65,6 +65,8 @@ const documents = new DocumentService({
   blocks: new PostgresDocumentBlockRepository(app),
   ids: systemIds,
   events: ledger,
+  calendars: new PostgresFirmTimeZone(app),
+  fiscalYears: new PostgresConfigRepository(app),
 });
 const service = new ProposalService({
   proposals: new PostgresProposalRepository(app),
@@ -245,6 +247,8 @@ describe("the line edit's UPDATE, against real Postgres (T6.18)", () => {
         discountPercent: "0",
         jurisdiction: null,
         billingFrequency: null,
+        billingTiming: null,
+        billingOn: null,
         scopeOverride: null,
         clientObligationsOverride: null,
         volumeLimitsOverride: null,

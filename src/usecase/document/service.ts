@@ -18,6 +18,9 @@ import type { IdGen } from "../../platform/ids";
 import type { Actor } from "../../domain/ledger/model";
 import type { EventSink } from "../ledger/ports";
 import type { DocumentType } from "../../domain/document/model";
+import { yearStartOfCompany, zoneOfCompany } from "../../domain/calendar/model";
+import { financialYearOf, INDIAN_FY_START_MONTH } from "../../domain/invoice/model";
+import { dayInZone } from "../../domain/scheduler/zone";
 import type {
   BlockKind,
   DocumentBlock,
@@ -27,7 +30,10 @@ import {
   ANY_JURISDICTION,
   blockKindsFor,
   blocksFor,
+  countryOfRef,
+  formatCountryRef,
   formatDocumentRef,
+  fyEndYear,
   isBlockKind,
   isJurisdiction,
   isJurisdictionKey,
@@ -43,6 +49,7 @@ import {
   DocumentBlockNotFound,
   FirmEntityNotFound,
   InvalidBlockKind,
+  InvalidFirstNumber,
   InvalidJurisdictionKey,
   InvalidSortOrder,
   LetterOnlyBlockKind,
@@ -54,6 +61,8 @@ import type {
   BlockOwner,
   DocumentBlockEdit,
   DocumentBlockRepository,
+  DocumentCalendars,
+  DocumentFiscalYears,
   DocumentReferences,
   FirmEntity,
   FirmEntityPreferenceRecord,
@@ -70,7 +79,12 @@ export interface Deps {
   readonly blocks: DocumentBlockRepository;
   readonly ids: IdGen;
   readonly events: EventSink;
+  readonly calendars: DocumentCalendars;
+  readonly fiscalYears: DocumentFiscalYears;
 }
+
+/** A first number a firm can name: past 999,999 the runs would outgrow the CHECK. */
+const MAX_FIRST_NUMBER = 999_999;
 
 export interface SetPreferenceInput {
   readonly tenantId: string;
@@ -571,9 +585,65 @@ export class DocumentService {
    * returns therefore burns its number, which is what a reference wants and
    * what an invoice number must never do — see migration 0020.
    */
-  async nextRef(tenantId: string, type: DocumentType, now: Date): Promise<string> {
-    const year = refYear(now);
-    const number = await this.deps.refs.next(tenantId, type, year);
-    return formatDocumentRef({ type, year, number });
+  async nextRef(tenantId: string, type: DocumentType, issuingEntityPartyId: string, now: Date): Promise<string> {
+    const issuer = await this.deps.preferences.findEntity(tenantId, issuingEntityPartyId);
+    const country = issuer?.jurisdiction ?? null;
+    // An issuer with no registration yet has no country to name: the firm-wide
+    // run it had before 0392, rather than a draft refused for want of one.
+    if (country === null) {
+      const year = refYear(now);
+      return formatDocumentRef({ type, year, number: await this.deps.refs.next(tenantId, type, year) });
+    }
+    const [firmZone, calendars, firmStart, first] = await Promise.all([
+      this.deps.calendars.timeZoneFor(tenantId),
+      this.deps.calendars.companyCalendars(tenantId),
+      this.deps.fiscalYears.fiscalYearStartMonth(tenantId),
+      this.deps.refs.firstNumber(tenantId),
+    ]);
+    // The ISSUING COMPANY's day and year, as its invoices take them (0337).
+    const day = dayInZone(now.toISOString(), zoneOfCompany(calendars, issuingEntityPartyId, firmZone));
+    const startMonth = yearStartOfCompany(calendars, issuingEntityPartyId, firmStart) ?? INDIAN_FY_START_MONTH;
+    const fy = fyEndYear(financialYearOf(day, startMonth), startMonth);
+    const number = await this.deps.refs.nextInCountry(tenantId, type, country, fy, first);
+    return formatCountryRef({ type, fyEndYear: fy, country, number });
+  }
+
+  /**
+   * A draft's number after its issuer changes (0392): a new one from the new
+   * company's country when that differs from the one the number names, else
+   * the same. Numbers issued before 0392 name no country and are kept.
+   */
+  async refAfterIssuerChange(
+    tenantId: string,
+    type: DocumentType,
+    currentRef: string,
+    newIssuerPartyId: string,
+    now: Date,
+  ): Promise<string> {
+    const named = countryOfRef(currentRef);
+    if (named === null) return currentRef;
+    const issuer = await this.deps.preferences.findEntity(tenantId, newIssuerPartyId);
+    if (issuer?.jurisdiction === named) return currentRef;
+    return this.nextRef(tenantId, type, newIssuerPartyId, now);
+  }
+
+  async firstNumber(tenantId: string): Promise<number> {
+    return this.deps.refs.firstNumber(tenantId);
+  }
+
+  async setFirstNumber(tenantId: string, first: number, actor: Actor): Promise<number> {
+    if (!Number.isInteger(first) || first < 1 || first > MAX_FIRST_NUMBER) {
+      throw new InvalidFirstNumber(first, MAX_FIRST_NUMBER);
+    }
+    const before = await this.deps.refs.firstNumber(tenantId);
+    const saved = await this.deps.refs.setFirstNumber(tenantId, first);
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "tenant.document_numbering_set",
+      objectId: tenantId,
+      actor,
+      payload: { from: before, to: saved },
+    });
+    return saved;
   }
 }

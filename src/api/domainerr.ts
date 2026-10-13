@@ -795,6 +795,7 @@ export function mapError(err: unknown): MappedError {
       case "SERVICE_HAS_NO_LIST_PRICE":
       case "UNPRICED_LINE_HAS_DISCOUNT":
       case "INVALID_BILLING_FREQUENCY":
+      case "INVALID_BILLING_TIMING":
       case "INVALID_LINE_JURISDICTION":
       case "INVALID_OOP_ESTIMATE":
       case "NOT_CALLERS_TODAY":
@@ -1155,6 +1156,7 @@ export function mapError(err: unknown): MappedError {
       case "NOTHING_TO_CHANGE_ON_ENTITY":
       case "INVALID_TIME_ZONE":
       case "INVALID_FISCAL_YEAR_START":
+      case "INVALID_FIRST_NUMBER":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       // NOT_A_FIRM_ENTITY (T6.18): a party of the firm's, but not one of its own
       // companies — from the Our companies route's side, not there.

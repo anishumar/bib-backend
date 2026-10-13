@@ -1,6 +1,7 @@
 // The ports the document use case needs from the world — the seams. Interfaces
 // are owned by the use case that needs them, stated in its own vocabulary;
 // adapters in infrastructure/ implement them.
+import type { CompanyCalendars } from "../../domain/calendar/model";
 import type {
   BlockKind,
   DocumentBlock,
@@ -91,6 +92,29 @@ export interface FirmEntityPreferenceRepository {
  */
 export interface DocumentReferences {
   next(tenantId: string, type: DocumentType, year: number): Promise<number>;
+  /** 0392: the next number in a country's run for a financial year, never
+   *  below `first` (a firm that raises its first number moves runs already
+   *  started up to it, never down). */
+  nextInCountry(
+    tenantId: string,
+    type: DocumentType,
+    country: string,
+    fyEndYear: number,
+    first: number,
+  ): Promise<number>;
+  /** The firm's first number of every run; 1 until it says otherwise. */
+  firstNumber(tenantId: string): Promise<number>;
+  setFirstNumber(tenantId: string, first: number): Promise<number>;
+}
+
+/** The issuing company's own day and year (0337), read the way invoices read them. */
+export interface DocumentCalendars {
+  timeZoneFor(tenantId: string): Promise<string>;
+  companyCalendars(tenantId: string): Promise<CompanyCalendars>;
+}
+
+export interface DocumentFiscalYears {
+  fiscalYearStartMonth(tenantId: string): Promise<number | null>;
 }
 
 // ── The prose blocks (G1.7) ────────────────────────────────────────────────

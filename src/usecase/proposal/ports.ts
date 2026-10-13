@@ -15,6 +15,7 @@ import type {
   OutOfPocketEstimate,
 } from "../../domain/document/model";
 import type {
+  LineBillingTiming,
   Proposal,
   ProposalDecision,
   ProposalLine,
@@ -85,7 +86,15 @@ export interface DocumentIdentity {
   issuerFor(tenantId: string, clientJurisdiction: string | null): Promise<string>;
   /** Whether a party is one of the firm's own companies (F-10-1). */
   isFirmEntity(tenantId: string, partyId: string): Promise<boolean>;
-  nextRef(tenantId: string, type: DocumentType, now: Date): Promise<string>;
+  nextRef(tenantId: string, type: DocumentType, issuingEntityPartyId: string, now: Date): Promise<string>;
+  /** A draft's number once its issuer changes: new when the country does (0392). */
+  refAfterIssuerChange(
+    tenantId: string,
+    type: DocumentType,
+    currentRef: string,
+    newIssuerPartyId: string,
+    now: Date,
+  ): Promise<string>;
   /**
    * COPY the firm's standard prose onto this new document (G1.7).
    *
@@ -191,6 +200,8 @@ export interface ProposalRevision {
   /** T6.18: which of the firm's companies issues it, and in what money. The
    *  three money fields travel together. */
   readonly issuingEntityPartyId?: string | undefined;
+  /** A new number when the new issuer is in another country (0392). */
+  readonly ref?: string | undefined;
   readonly currency?: CurrencyCode | undefined;
   readonly fxRate?: Amount | undefined;
   readonly fxRateDate?: string | undefined;
@@ -217,6 +228,8 @@ export interface NewProposalLine {
    *  default is a property of the deal at the moment it was struck rather than
    *  something re-derived from a catalogue that has since moved. */
   readonly billingFrequency: BillingFrequency | null;
+  readonly billingTiming: LineBillingTiming | null;
+  readonly billingOn: string | null;
   readonly scopeOverride: string | null;
   readonly clientObligationsOverride: string | null;
   readonly volumeLimitsOverride: string | null;
@@ -245,6 +258,8 @@ export interface LineEdit {
   readonly discountPercent: Amount;
   readonly jurisdiction: string | null;
   readonly billingFrequency: BillingFrequency | null;
+  readonly billingTiming: LineBillingTiming | null;
+  readonly billingOn: string | null;
   readonly scopeOverride: string | null;
   readonly clientObligationsOverride: string | null;
   readonly volumeLimitsOverride: string | null;
