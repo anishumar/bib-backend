@@ -441,6 +441,11 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("POST", "/api/v1/proposals/{proposalId}/lines"), "party:write" as const],
   [routeKey("DELETE", "/api/v1/proposals/{proposalId}/lines/{lineId}"), "party:write" as const],
   [routeKey("PATCH", "/api/v1/proposals/{proposalId}/lines/{lineId}"), "party:write" as const],
+  // One fee for several services (0394): writing the draft, as a priced line is.
+  [routeKey("PUT", "/api/v1/proposals/{proposalId}/lines/{lineId}/pricing"), "party:write" as const],
+  [routeKey("POST", "/api/v1/proposals/{proposalId}/fee-groups"), "party:write" as const],
+  [routeKey("PATCH", "/api/v1/proposals/{proposalId}/fee-groups/{groupId}"), "party:write" as const],
+  [routeKey("DELETE", "/api/v1/proposals/{proposalId}/fee-groups/{groupId}"), "party:write" as const],
   // The rate of one of a draft's other currencies (0344): part of writing it.
   [routeKey("PUT", "/api/v1/proposals/{proposalId}/rates/{currency}"), "party:write" as const],
   [routeKey("DELETE", "/api/v1/proposals/{proposalId}/rates/{currency}"), "party:write" as const],

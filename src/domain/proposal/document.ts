@@ -33,6 +33,10 @@
 // NOT merged, unlike the letter: a quote prices each company's work on its
 // own line, and two lines with two prices are two promises however alike their
 // words are.
+//
+// 4. ONE FEE FOR SEVERAL SERVICES (0394) prints the firm's own way (EduHubSpot,
+//    2026-10-14): the first of the section's services in print order carries
+//    the section's fee, and the others say "Included in A1".
 import type { Amount, CurrencyCode } from "../money/model";
 import type { BillingFrequency, DocumentTerms, OutOfPocketEstimate } from "../document/model";
 import { sectionCode } from "../engagement/model";
@@ -56,7 +60,35 @@ export interface ProposalPlanLine {
   readonly currency: CurrencyCode;
   readonly pricingNote: string | null;
   readonly oopEstimate: OutOfPocketEstimate | null;
+  /** The section whose fee pays for it (0394), or null/absent. */
+  readonly feeGroupId?: string | null;
 }
+
+/** A section's fee, as the proposal prints it (0394). */
+export interface ProposalPlanFeeGroup {
+  readonly id: string;
+  readonly title: string;
+  readonly amount: Amount;
+  readonly currency: CurrencyCode;
+  readonly billingFrequency: BillingFrequency;
+  readonly paymentTerms: string | null;
+}
+
+/** How one service's fee prints: its own, or its section's (rule 4). */
+export type ProposalItemFee =
+  | { readonly kind: "own" }
+  | {
+      readonly kind: "section";
+      readonly title: string;
+      readonly amount: Amount;
+      readonly currency: CurrencyCode;
+      readonly billingFrequency: BillingFrequency;
+      readonly paymentTerms: string | null;
+      /** The code of the service that carries the section's fee. */
+      readonly anchorCode: string;
+      /** This service carries it; the others are "Included in" it. */
+      readonly isAnchor: boolean;
+    };
 
 /** One of the firm's Depts, as `tenancy.service_axis` holds it — retired rows
  *  included, because a quote pinned to a retired Dept still names it. */
@@ -70,6 +102,8 @@ export interface ProposalPlanInput {
   /** The proposal's LIVE lines; order is taken from `position`. */
   readonly lines: readonly ProposalPlanLine[];
   readonly depts: readonly ProposalDept[];
+  /** The live sections (0394). */
+  readonly feeGroups?: readonly ProposalPlanFeeGroup[];
 }
 
 /** One service of a section — always exactly one line (see the header). */
@@ -87,6 +121,7 @@ export interface ProposalItem {
   readonly pricingNote: string | null;
   readonly oopEstimate: OutOfPocketEstimate | null;
   readonly lineId: string;
+  readonly fee: ProposalItemFee;
 }
 
 export interface ProposalSection {
@@ -157,10 +192,47 @@ export function planProposal(input: ProposalPlanInput): ProposalPlan {
           pricingNote: l.pricingNote,
           oopEstimate: l.oopEstimate,
           lineId: l.id,
+          fee: { kind: "own" },
         };
       });
     return { code, title, items };
   });
 
-  return { sections };
+  // RULE 4: the first service of each section in print order carries its fee.
+  const groups = new Map((input.feeGroups ?? []).map((g) => [g.id, g]));
+  const groupOf = new Map(
+    lines.flatMap((l) => {
+      const g = l.feeGroupId ?? null;
+      return g === null || !groups.has(g) ? [] : [[l.id, g] as const];
+    }),
+  );
+  const anchors = new Map<string, string>();
+  for (const item of sections.flatMap((s) => s.items)) {
+    const group = groupOf.get(item.lineId);
+    if (group !== undefined && !anchors.has(group)) anchors.set(group, item.code);
+  }
+  const priced = sections.map((s) => ({
+    ...s,
+    items: s.items.map((item): ProposalItem => {
+      const groupId = groupOf.get(item.lineId);
+      const group = groupId === undefined ? undefined : groups.get(groupId);
+      const anchorCode = groupId === undefined ? undefined : anchors.get(groupId);
+      if (group === undefined || anchorCode === undefined) return item;
+      return {
+        ...item,
+        fee: {
+          kind: "section",
+          title: group.title,
+          amount: group.amount,
+          currency: group.currency,
+          billingFrequency: group.billingFrequency,
+          paymentTerms: group.paymentTerms,
+          anchorCode,
+          isAnchor: anchorCode === item.code,
+        },
+      };
+    }),
+  }));
+
+  return { sections: priced };
 }

@@ -17,7 +17,14 @@ import { zoneDayOf } from "./instant";
 import { insertDocumentBlocks, strikeDocumentBlocks } from "./block-repository";
 import { insertRecordedAcceptance, readRecordedAcceptance } from "./recorded-acceptance";
 import type { NewRecordedAcceptance } from "../../domain/acceptance/model";
-import type { Proposal, ProposalLine, ProposalStatus, ProposalTotals } from "../../domain/proposal/model";
+import type {
+  Proposal,
+  ProposalFeeGroup,
+  ProposalLine,
+  ProposalStatus,
+  ProposalTotals,
+} from "../../domain/proposal/model";
+import { sectionCode } from "../../domain/engagement/model";
 import type { CurrencyRate } from "../../domain/money/model";
 import { ProposalCitedByLetter } from "../../domain/proposal/errors";
 import { readServiceBody } from "../../domain/config/model";
@@ -30,9 +37,12 @@ import type {
   NewClientAnswer,
   NewProposal,
   NewProposalEmail,
+  NewProposalFeeGroup,
   NewProposalLine,
   PinnedService,
   ProposalEmail,
+  ProposalFeeGroupEdit,
+  ProposalLinePricing,
   ProposalFilters,
   ProposalLineRecord,
   ProposalRecord,
@@ -112,13 +122,12 @@ const currencyTotalsOf = (proposal: string): string => `
             'currency', x.currency, 'gross', x.gross::text, 'discount', x.discount::text,
             'net', x.net::text, 'lineCount', x.line_count, 'unpriced', x.unpriced)
             ORDER BY x.currency), '[]'::json)
-     FROM (SELECT l.currency, count(*) AS line_count, sum(a.gross) AS gross,
-                  sum(a.gross - a.net) AS discount, sum(a.net) AS net,
-                  count(*) FILTER (WHERE a.gross IS NULL) AS unpriced
-             FROM crm.proposal_line_amount a
-             JOIN crm.proposal_line l ON l.id = a.id
-            WHERE a.proposal_id = ${proposal}.id
-            GROUP BY l.currency) x) AS currency_totals`;
+     FROM (SELECT i.currency, count(*) AS line_count, sum(i.gross) AS gross,
+                  sum(i.gross - i.net) AS discount, sum(i.net) AS net,
+                  count(*) FILTER (WHERE i.unpriced) AS unpriced
+             FROM crm.proposal_fee_item i
+            WHERE i.proposal_id = ${proposal}.id
+            GROUP BY i.currency) x) AS currency_totals`;
 
 interface CurrencyTotalsJson {
   currency: string;
@@ -173,6 +182,7 @@ interface LineRow {
   oop_estimate_max: string | null;
   oop_currency: string | null;
   pricing_note: string | null;
+  fee_group_id: string | null;
 }
 
 /** Every column of a line, in one place: the SELECT list appears in four
@@ -183,7 +193,45 @@ const LINE_COLUMNS = `id, tenant_id, proposal_id, entity_party_id, service_versi
                       jurisdiction, billing_frequency, scope_override,
                       client_obligations_override, volume_limits_override, exclusions_override,
                       oop_estimate_min, oop_estimate_max, oop_currency, pricing_note,
-                      billing_timing, billing_on`;
+                      billing_timing, billing_on, fee_group_id`;
+
+interface FeeGroupRow {
+  id: string;
+  tenant_id: string;
+  proposal_id: string;
+  position: number;
+  title: string;
+  billing_frequency: BillingFrequency;
+  billing_timing: LineBillingTiming | null;
+  billing_on: Date | null;
+  amount: string;
+  currency: string;
+  payment_terms: string | null;
+}
+
+const FEE_GROUP_COLUMNS = `id, tenant_id, proposal_id, position, title, billing_frequency,
+                           billing_timing, billing_on, amount, currency, payment_terms`;
+
+function toFeeGroup(r: FeeGroupRow): ProposalFeeGroup {
+  return {
+    id: r.id,
+    tenantId: r.tenant_id,
+    proposalId: r.proposal_id,
+    position: r.position,
+    title: r.title,
+    billingFrequency: r.billing_frequency,
+    billingTiming: r.billing_timing,
+    billingOn: r.billing_on === null ? null : toDay(r.billing_on),
+    amount: r.amount,
+    currency: r.currency,
+    paymentTerms: r.payment_terms,
+  };
+}
+
+/** A live DRAFT, as every section write requires ($2 is the proposal): one
+ *  sent or deleted since the use case read it is left as it stands. */
+const LIVE_DRAFT = `EXISTS (SELECT 1 FROM crm.proposal p
+                            WHERE p.id = $2 AND p.status = 'draft' AND p.deleted_at IS NULL)`;
 
 interface TotalsRow {
   gross: string | null;
@@ -259,6 +307,7 @@ function toLine(r: LineRow): ProposalLine {
     exclusionsOverride: r.exclusions_override,
     oopEstimate: toOopEstimate(r),
     pricingNote: r.pricing_note,
+    feeGroupId: r.fee_group_id,
   };
 }
 
@@ -484,7 +533,7 @@ export class PostgresProposalRepository implements ProposalRepository {
                l.jurisdiction, l.billing_frequency, l.scope_override,
                l.client_obligations_override, l.volume_limits_override, l.exclusions_override,
                l.oop_estimate_min, l.oop_estimate_max, l.oop_currency, l.pricing_note,
-               l.billing_timing, l.billing_on,
+               l.billing_timing, l.billing_on, l.fee_group_id,
                -- NULL for an unpriced line, straight out of the view: there is
                -- no net of an amount that does not exist, and 0 here would sum
                -- into the document's total as a line the client gets free.
@@ -508,6 +557,11 @@ export class PostgresProposalRepository implements ProposalRepository {
         SELECT ${db.unsafe(currencyTotalsOf("p"))} FROM crm.proposal p WHERE p.id = ${proposalId}
       `;
 
+      const groups = await db<FeeGroupRow[]>`
+        SELECT ${db.unsafe(FEE_GROUP_COLUMNS)} FROM crm.proposal_fee_group
+        WHERE proposal_id = ${proposalId} AND removed_at IS NULL ORDER BY position
+      `;
+
       // THE MONEY PER FREQUENCY (T6.18, D8), added by the database from the same
       // per-line view the document total comes from. `sum` skips an unpriced
       // line's NULL, and the count beside it says so. Reading order: monthly
@@ -524,35 +578,33 @@ export class PostgresProposalRepository implements ProposalRepository {
           unpriced_line_count: string;
         }[]
       >`
-        SELECT l.currency,
-               l.billing_frequency AS frequency,
-               sum(a.net)::text AS net,
+        SELECT i.currency,
+               i.billing_frequency AS frequency,
+               sum(i.net)::text AS net,
                count(*) AS line_count,
-               count(*) FILTER (WHERE l.unit_amount IS NULL) AS unpriced_line_count
-        FROM crm.proposal_line l
-        JOIN crm.proposal_line_amount a ON a.id = l.id
-        WHERE l.proposal_id = ${proposalId} AND l.removed_at IS NULL
-        GROUP BY l.currency, l.billing_frequency
-        ORDER BY (l.currency = ${head.currency}) DESC, l.currency,
+               count(*) FILTER (WHERE i.unpriced) AS unpriced_line_count
+        FROM crm.proposal_fee_item i
+        WHERE i.proposal_id = ${proposalId}
+        GROUP BY i.currency, i.billing_frequency
+        ORDER BY (i.currency = ${head.currency}) DESC, i.currency,
                  coalesce(array_position(
                    ARRAY['monthly', 'quarterly', 'annually', 'one_time', 'custom'],
-                   l.billing_frequency::text), 99)
+                   i.billing_frequency::text), 99)
       `;
 
       // A YEAR OF THE RECURRING FEES (CA#42), added by the database: monthly
       // x 12, quarterly x 4, annually x 1. No one-off or custom fee is in it.
       const annual = await db<{ currency: string; value: string | null }[]>`
-        SELECT l.currency,
-               sum(a.net * CASE l.billing_frequency WHEN 'monthly' THEN 12
+        SELECT i.currency,
+               sum(i.net * CASE i.billing_frequency WHEN 'monthly' THEN 12
                                                     WHEN 'quarterly' THEN 4
                                                     WHEN 'annually' THEN 1 END)::text AS value
-        FROM crm.proposal_line l
-        JOIN crm.proposal_line_amount a ON a.id = l.id
-        WHERE l.proposal_id = ${proposalId} AND l.removed_at IS NULL
-          AND l.unit_amount IS NOT NULL
-          AND l.billing_frequency IN ('monthly', 'quarterly', 'annually')
-        GROUP BY l.currency
-        ORDER BY (l.currency = ${head.currency}) DESC, l.currency
+        FROM crm.proposal_fee_item i
+        WHERE i.proposal_id = ${proposalId}
+          AND NOT i.unpriced
+          AND i.billing_frequency IN ('monthly', 'quarterly', 'annually')
+        GROUP BY i.currency
+        ORDER BY (i.currency = ${head.currency}) DESC, i.currency
       `;
 
       // The firm's Depts and delivery teams, retired rows included — the render
@@ -639,6 +691,11 @@ export class PostgresProposalRepository implements ProposalRepository {
           };
         }),
         totals: toCurrencyTotals(totals?.currency_totals ?? null, head.currency),
+        feeGroups: groups.map((g, index) => ({
+          group: toFeeGroup(g),
+          code: sectionCode(index),
+          lineIds: lines.filter((l) => l.fee_group_id === g.id).map((l) => l.id),
+        })),
         // email is the discriminator, not the id: an account always has an
         // address and may have no name.
         approvedBy:
@@ -781,10 +838,11 @@ export class PostgresProposalRepository implements ProposalRepository {
            jurisdiction, billing_frequency, scope_override, client_obligations_override,
            volume_limits_override, exclusions_override,
            oop_estimate_min, oop_estimate_max, oop_currency, pricing_note,
-           billing_timing, billing_on)
+           billing_timing, billing_on, fee_group_id)
         SELECT $1, $2, $3, $4, $5, $6,
                coalesce(max(position), 0) + 1,
-               $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22::date
+               $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22::date,
+               $23::uuid
         FROM crm.proposal_line
         WHERE proposal_id = $3 AND removed_at IS NULL
         RETURNING ${LINE_COLUMNS}
@@ -812,6 +870,7 @@ export class PostgresProposalRepository implements ProposalRepository {
           l.pricingNote,
           l.billingTiming,
           l.billingOn,
+          l.feeGroupId,
         ],
       );
       if (!row) throw new Error("proposal line insert returned no row");
@@ -893,6 +952,135 @@ export class PostgresProposalRepository implements ProposalRepository {
         [proposalId],
       );
       return rows.map(toLine);
+    });
+  }
+
+  async listFeeGroups(tenantId: string, proposalId: string): Promise<readonly ProposalFeeGroup[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<FeeGroupRow[]>`
+        SELECT ${db.unsafe(FEE_GROUP_COLUMNS)} FROM crm.proposal_fee_group
+        WHERE proposal_id = ${proposalId} AND removed_at IS NULL ORDER BY position
+      `;
+      return rows.map(toFeeGroup);
+    });
+  }
+
+  async addFeeGroup(g: NewProposalFeeGroup): Promise<ProposalFeeGroup | null> {
+    return withTenant(this.app, g.tenantId, async (db) => {
+      // Positioned after the last live section in the same statement, as a line is.
+      const [row] = await db.unsafe<FeeGroupRow[]>(
+        `
+        INSERT INTO crm.proposal_fee_group
+          (id, tenant_id, proposal_id, currency, position, title, billing_frequency,
+           billing_timing, billing_on, amount, payment_terms)
+        SELECT $1, $3, $2, $4,
+               coalesce((SELECT max(position) FROM crm.proposal_fee_group
+                          WHERE proposal_id = $2 AND removed_at IS NULL), 0) + 1,
+               $5, $6, $7, $8::date, $9::numeric, $10
+        WHERE ${LIVE_DRAFT}
+        RETURNING ${FEE_GROUP_COLUMNS}
+      `,
+        [
+          g.id,
+          g.proposalId,
+          g.tenantId,
+          g.currency,
+          g.title,
+          g.billingFrequency,
+          g.billingTiming,
+          g.billingOn,
+          g.amount,
+          g.paymentTerms,
+        ],
+      );
+      return row === undefined ? null : toFeeGroup(row);
+    });
+  }
+
+  async editFeeGroup(
+    tenantId: string,
+    proposalId: string,
+    groupId: string,
+    edit: ProposalFeeGroupEdit,
+  ): Promise<ProposalFeeGroup | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // A new currency takes the section's lines with it IN THE SAME STATEMENT
+      // (the letter's way, 0344): their key onto the group carries the currency
+      // and is checked when the statement ends. Pulled lines move too.
+      const [row] = await db.unsafe<FeeGroupRow[]>(
+        `
+        WITH moved AS (
+          UPDATE crm.proposal_line SET currency = $4
+           WHERE fee_group_id = $1 AND proposal_id = $2 AND currency <> $4 AND ${LIVE_DRAFT}
+          RETURNING id
+        )
+        UPDATE crm.proposal_fee_group
+           SET title = $5, currency = $4, billing_frequency = $6, billing_timing = $7,
+               billing_on = $8::date, amount = $9::numeric, payment_terms = $10
+         WHERE id = $1 AND proposal_id = $2 AND tenant_id = $3 AND removed_at IS NULL
+           AND ${LIVE_DRAFT}
+        RETURNING ${FEE_GROUP_COLUMNS}
+      `,
+        [
+          groupId,
+          proposalId,
+          tenantId,
+          edit.currency,
+          edit.title,
+          edit.billingFrequency,
+          edit.billingTiming,
+          edit.billingOn,
+          edit.amount,
+          edit.paymentTerms,
+        ],
+      );
+      return row === undefined ? null : toFeeGroup(row);
+    });
+  }
+
+  async removeFeeGroup(tenantId: string, proposalId: string, groupId: string): Promise<boolean> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db.unsafe(
+        `
+        UPDATE crm.proposal_fee_group SET removed_at = now()
+         WHERE id = $1 AND proposal_id = $2 AND tenant_id = $3 AND removed_at IS NULL
+           AND ${LIVE_DRAFT}
+        RETURNING id
+      `,
+        [groupId, proposalId, tenantId],
+      );
+      return rows.length > 0;
+    });
+  }
+
+  async setLinePricing(
+    tenantId: string,
+    proposalId: string,
+    lineId: string,
+    pricing: ProposalLinePricing,
+  ): Promise<ProposalLine | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db.unsafe<LineRow[]>(
+        `
+        UPDATE crm.proposal_line
+           SET fee_group_id = $4::uuid, unit_amount = $5::numeric, discount_percent = $6::numeric,
+               pricing_note = $7, currency = $8
+         WHERE id = $1 AND proposal_id = $2 AND tenant_id = $3 AND removed_at IS NULL
+           AND ${LIVE_DRAFT}
+        RETURNING ${LINE_COLUMNS}
+      `,
+        [
+          lineId,
+          proposalId,
+          tenantId,
+          pricing.feeGroupId,
+          pricing.unitAmount,
+          pricing.discountPercent,
+          pricing.pricingNote,
+          pricing.currency,
+        ],
+      );
+      return row === undefined ? null : toLine(row);
     });
   }
 
@@ -1008,9 +1196,11 @@ export class PostgresProposalRepository implements ProposalRepository {
           oop_estimate_min: string | null;
           oop_estimate_max: string | null;
           oop_currency: string | null;
+          fee_group_id: string | null;
         }[]
       >`
         SELECT l.description, l.quantity, l.unit_amount, l.currency, l.discount_percent, a.net,
+               l.fee_group_id,
                -- What the RECIPIENT reads where a figure would be, how often
                -- they will be invoiced, and what they are told to expect to
                -- reimburse. The four scope blocks are deliberately not here:
@@ -1024,6 +1214,14 @@ export class PostgresProposalRepository implements ProposalRepository {
         WHERE l.proposal_id = ${head.id} AND l.removed_at IS NULL
         ORDER BY l.position
       `;
+
+      // One fee for several services (0394): what each section charges, by the
+      // letter the recipient reads beside its services.
+      const groups = await db<FeeGroupRow[]>`
+        SELECT ${db.unsafe(FEE_GROUP_COLUMNS)} FROM crm.proposal_fee_group
+        WHERE proposal_id = ${head.id} AND removed_at IS NULL ORDER BY position
+      `;
+      const codeOf = new Map(groups.map((g, index) => [g.id, sectionCode(index)]));
 
       return {
         id: head.id,
@@ -1055,6 +1253,15 @@ export class PostgresProposalRepository implements ProposalRepository {
                   max: l.oop_estimate_max,
                   currency: l.oop_currency,
                 },
+          feeGroupCode: l.fee_group_id === null ? null : (codeOf.get(l.fee_group_id) ?? null),
+        })),
+        feeGroups: groups.map((g, index) => ({
+          code: sectionCode(index),
+          title: g.title,
+          amount: g.amount,
+          currency: g.currency,
+          billingFrequency: g.billing_frequency,
+          paymentTerms: g.payment_terms,
         })),
         // Per currency (0344). The recipient is told the same thing a partner
         // is: how many lines each figure does not cover. A client reading a

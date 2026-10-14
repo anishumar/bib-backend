@@ -1344,6 +1344,21 @@ export interface QuotedLine {
     readonly currency: string;
   } | null;
   readonly pricingNote: string | null;
+  /** The quote's section that pays for it (0394); the letter's copy of that
+   *  section pays for it there. */
+  readonly feeGroupId: string | null;
+}
+
+/** One fee for several services on the quote (0394), carried onto the letter. */
+export interface QuotedFeeGroup {
+  readonly id: string;
+  readonly title: string;
+  readonly billingFrequency: string;
+  readonly billingTiming: string | null;
+  readonly billingOn: string | null;
+  readonly amount: string;
+  readonly currency: string;
+  readonly paymentTerms: string | null;
 }
 
 /**
@@ -1377,6 +1392,7 @@ export interface QuotedProposalHeader {
 export interface QuotedProposal {
   readonly proposal: QuotedProposalHeader;
   readonly lines: readonly QuotedLine[];
+  readonly feeGroups: readonly QuotedFeeGroup[];
 }
 
 export interface AcceptedQuoteDirectory {

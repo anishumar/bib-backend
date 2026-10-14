@@ -436,6 +436,27 @@ describe("the columns 0084 added", () => {
     );
   });
 
+  it("prints a section's fee on its first service and \"Included in\" on the rest (0394)", async () => {
+    const id = await nexusProposal();
+    const group = await proposals.addFeeGroup(tenant, id, {
+      title: "Compliance retainer",
+      billingFrequency: "annually",
+      amount: "60000",
+    });
+    for (const l of (await proposals.describe(tenant, id)).lines) {
+      await proposals.setLinePricing({ tenantId: tenant, proposalId: id, lineId: l.line.id, feeGroupId: group.id });
+    }
+    const described = await source.describe({ tenantId: tenant, kind: "proposal", subjectRef: id });
+    const flow = texts(described?.document.proposal?.flow ?? []);
+    expect(flow).toContain("[Fees] H3: ₹60,000 Yearly (Compliance retainer)");
+    expect(flow).toContain("[Fees] C2: Included in H3");
+    expect(flow).toContain(
+      "A | H3 | Transfer pricing audit — Form 3CEB | Yearly | ₹60,000\n" +
+        "B | C2 | TDS/TCS — quarterly returns | Quarterly | Included in H3",
+    );
+    expect(flow).toContain("[Total] ₹60,000 Yearly");
+  });
+
   it("an unpriced line and a line with no frequency each get their own row, counted", async () => {
     const id = await nexusProposal();
     const line = (await proposals.describe(tenant, id)).lines[0];

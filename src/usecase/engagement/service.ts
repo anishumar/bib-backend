@@ -1188,6 +1188,22 @@ export class EngagementService {
       await this.deps.letters.setRate(input.tenantId, letter.id, rate);
     }
 
+    // The quote's sections (0394) become the letter's, so one fee for several
+    // services carries across as agreed rather than as unpriced lines.
+    const sections = new Map<string, string>();
+    for (const g of found.feeGroups) {
+      const added = await this.addFeeGroup(input.tenantId, letter.id, {
+        title: g.title,
+        currency: g.currency,
+        billingFrequency: g.billingFrequency,
+        amount: g.amount,
+        ...(g.billingTiming === null ? {} : { billingTiming: g.billingTiming }),
+        ...(g.billingOn === null ? {} : { billingOn: g.billingOn }),
+        ...(g.paymentTerms === null ? {} : { paymentTerms: g.paymentTerms }),
+      });
+      sections.set(g.id, added.id);
+    }
+
     const lines: LetterLine[] = [];
     const skipped: SkippedQuoteLine[] = [];
     // IN ORDER, one at a time. `addLine` takes each line's `position` from what
@@ -1234,6 +1250,7 @@ export class EngagementService {
             : { exclusionsOverride: line.exclusionsOverride }),
           ...(line.oopEstimate === null ? {} : { oopEstimate: line.oopEstimate }),
           ...(line.pricingNote === null ? {} : { pricingNote: line.pricingNote }),
+          ...(line.feeGroupId === null ? {} : { feeGroupId: sections.get(line.feeGroupId) }),
         }),
       );
     }

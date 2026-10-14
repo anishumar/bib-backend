@@ -72,7 +72,13 @@ export type ProposalErrorCode =
   | "EMAIL_UNAVAILABLE"
   | "SIGNER_NAME_REQUIRED"
   | "ACCEPTANCE_NOT_CONFIRMED"
-  | "ALREADY_ANSWERED";
+  | "ALREADY_ANSWERED"
+  | "FEE_GROUP_NOT_FOUND"
+  | "FEE_GROUP_TITLE_REQUIRED"
+  | "FEE_GROUP_NOT_EMPTY"
+  | "FEE_GROUP_EMPTY"
+  | "GROUPED_LINE_PRICED"
+  | "LINE_NOT_PRICED";
 
 // ── The proposal by email, and the client's own answer (0085) ────────────────
 //
@@ -726,6 +732,65 @@ export class InvalidLineBillingTiming extends ProposalError {
       "INVALID_BILLING_TIMING",
       `When this fee is invoiced cannot be saved: ${why}. Choose the end of each period, its ` +
         `start, or a first invoice date, for a monthly, quarterly or yearly fee.`,
+    );
+  }
+}
+
+// ── One fee for several services (0394) ─────────────────────────────────────
+
+export class ProposalFeeGroupNotFound extends ProposalError {
+  constructor(id: string) {
+    super("FEE_GROUP_NOT_FOUND", `No section ${JSON.stringify(id)} on this proposal`);
+  }
+}
+
+export class ProposalFeeGroupTitleRequired extends ProposalError {
+  constructor() {
+    super("FEE_GROUP_TITLE_REQUIRED", `A section needs a title, such as "Accounting, Tax & GST".`);
+  }
+}
+
+/** Struck out, the section would leave its services with no price at all. */
+export class ProposalFeeGroupNotEmpty extends ProposalError {
+  constructor(title: string, serviceCount: number) {
+    const one = serviceCount === 1;
+    super(
+      "FEE_GROUP_NOT_EMPTY",
+      `"${title}" still covers ${String(serviceCount)} service${one ? "" : "s"}. Move ` +
+        `${one ? "it" : "them"} into another section, price ${one ? "it" : "them"} on ` +
+        `${one ? "its" : "their"} own, or remove ${one ? "it" : "them"} first.`,
+    );
+  }
+}
+
+/** A section covering nothing would quote its fee for no named service. */
+export class ProposalFeeGroupEmpty extends ProposalError {
+  constructor(title: string) {
+    super(
+      "FEE_GROUP_EMPTY",
+      `The section "${title}" covers no services. Put the services it pays for into it, or ` +
+        `strike it out, before sending the proposal.`,
+    );
+  }
+}
+
+/** The section's fee pays for the service; a price on both would charge twice. */
+export class ProposalGroupedLinePriced extends ProposalError {
+  constructor() {
+    super(
+      "GROUPED_LINE_PRICED",
+      `A service in a section has no price, discount or currency of its own: the section's ` +
+        `fee pays for it. Take it out of the section to price it on its own.`,
+    );
+  }
+}
+
+export class ProposalLineNotPriced extends ProposalError {
+  constructor(description: string) {
+    super(
+      "LINE_NOT_PRICED",
+      `Priced on its own, "${description}" needs a price, or a note saying why it has none ` +
+        `("As mutually agreed").`,
     );
   }
 }

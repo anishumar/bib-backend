@@ -364,6 +364,30 @@ export interface ProposalLine {
    * rule is one-directional.
    */
   readonly pricingNote: string | null;
+  /** The section whose one fee pays for this line (0394), or null when it is
+   *  priced on its own. Grouped, it has no price, discount or note. */
+  readonly feeGroupId: string | null;
+}
+
+/**
+ * One fee for several services of a proposal (0394): the letter's fee group
+ * (0083) without its prose, which the letter drafted from the quote adds. Its
+ * letter (A, B, …) is its rank among the live groups, derived when read.
+ */
+export interface ProposalFeeGroup {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly proposalId: string;
+  readonly position: number;
+  readonly title: string;
+  readonly billingFrequency: BillingFrequency;
+  readonly billingTiming: LineBillingTiming | null;
+  readonly billingOn: string | null;
+  /** Per billing period: 70,000 on a monthly group is 70,000 a month. */
+  readonly amount: Amount;
+  readonly currency: CurrencyCode;
+  /** "40% advance, 60% on completion", as the firm writes it. */
+  readonly paymentTerms: string | null;
 }
 
 /**

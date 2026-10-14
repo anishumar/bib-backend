@@ -18,7 +18,8 @@ import { FakeClientStructure, FakePartyStanding } from "./party";
 import { FakeStaffDirectory } from "./lead";
 import { FakeFirmTimeZone } from "./tenancy";
 import { FakeClock } from "./clock";
-import type { Proposal, ProposalLine, ProposalStatus } from "../domain/proposal/model";
+import type { Proposal, ProposalFeeGroup, ProposalLine, ProposalStatus } from "../domain/proposal/model";
+import { sectionCode } from "../domain/engagement/model";
 import type { CurrencyRate, Money } from "../domain/money/model";
 import { VIEW_DEDUPE_MINUTES } from "../domain/proposal/model";
 import type { NewRecordedAcceptance } from "../domain/acceptance/model";
@@ -27,6 +28,9 @@ import { readServiceBody } from "../domain/config/model";
 import { resolveTerms } from "../domain/document/model";
 import type {
   DecisionNotice,
+  NewProposalFeeGroup,
+  ProposalFeeGroupEdit,
+  ProposalLinePricing,
   FiledPdf,
   LeadStanding,
   LineEdit,
@@ -61,6 +65,8 @@ import type { FakeDocumentBlockRepo, FakePreferenceRepo } from "./document";
 export class FakeProposalRepo implements ProposalRepository {
   readonly rows: Proposal[] = [];
   readonly lines: (Omit<ProposalLine, "currency"> & { currency: string; removed: boolean })[] = [];
+  /** Sections (0394), struck-off ones kept as the table keeps them. */
+  readonly groups: (ProposalFeeGroup & { removed: boolean })[] = [];
   /**
    * The catalogue the pins resolve against, so `describe` returns the PINNED
    * service the way the Postgres adapter's join does instead of a null that
@@ -159,7 +165,8 @@ export class FakeProposalRepo implements ProposalRepository {
     if (
       change.currency !== undefined &&
       change.currency !== current.currency &&
-      this.liveLines(tenantId, proposalId).some((l) => l.currency === current.currency)
+      (this.liveLines(tenantId, proposalId).some((l) => l.currency === current.currency) ||
+        this.liveGroups(tenantId, proposalId).some((g) => g.currency === current.currency))
     ) {
       return Promise.resolve(null);
     }
@@ -223,6 +230,7 @@ export class FakeProposalRepo implements ProposalRepository {
       exclusionsOverride: l.exclusionsOverride,
       oopEstimate: l.oopEstimate,
       pricingNote: l.pricingNote,
+      feeGroupId: l.feeGroupId,
       removed: false,
     };
     this.lines.push(row);
@@ -266,6 +274,73 @@ export class FakeProposalRepo implements ProposalRepository {
 
   listLines(tenantId: string, proposalId: string): Promise<readonly ProposalLine[]> {
     return Promise.resolve(this.liveLines(tenantId, proposalId).map(stripRemoved));
+  }
+
+  listFeeGroups(tenantId: string, proposalId: string): Promise<readonly ProposalFeeGroup[]> {
+    return Promise.resolve(this.liveGroups(tenantId, proposalId).map(stripRemoved));
+  }
+
+  /** The adapter's LIVE_DRAFT: a draft that was not deleted. */
+  private isLiveDraft(tenantId: string, proposalId: string): boolean {
+    const p = this.rows.find((r) => r.tenantId === tenantId && r.id === proposalId);
+    return p?.status === "draft" && p.deletedAt === null;
+  }
+
+  addFeeGroup(g: NewProposalFeeGroup): Promise<ProposalFeeGroup | null> {
+    if (!this.isLiveDraft(g.tenantId, g.proposalId)) return Promise.resolve(null);
+    const live = this.liveGroups(g.tenantId, g.proposalId);
+    const row = {
+      ...g,
+      position: Math.max(0, ...live.map((x) => x.position)) + 1,
+      removed: false,
+    };
+    this.groups.push(row);
+    return Promise.resolve(stripRemoved(row));
+  }
+
+  editFeeGroup(
+    tenantId: string,
+    proposalId: string,
+    groupId: string,
+    edit: ProposalFeeGroupEdit,
+  ): Promise<ProposalFeeGroup | null> {
+    const index = this.groups.findIndex(
+      (x) => x.tenantId === tenantId && x.proposalId === proposalId && x.id === groupId && !x.removed,
+    );
+    const current = this.groups[index];
+    if (current === undefined || !this.isLiveDraft(tenantId, proposalId)) return Promise.resolve(null);
+    const next = { ...current, ...edit };
+    this.groups[index] = next;
+    // Its lines move with a new currency, pulled ones too (the adapter's CTE).
+    for (const l of this.lines) if (l.feeGroupId === groupId) l.currency = edit.currency;
+    return Promise.resolve(stripRemoved(next));
+  }
+
+  removeFeeGroup(tenantId: string, proposalId: string, groupId: string): Promise<boolean> {
+    const group = this.liveGroups(tenantId, proposalId).find((x) => x.id === groupId);
+    if (group === undefined || !this.isLiveDraft(tenantId, proposalId)) return Promise.resolve(false);
+    // 0394's trigger: a section still paying for a live service stays.
+    if (this.liveLines(tenantId, proposalId).some((l) => l.feeGroupId === groupId)) {
+      throw new Error(`fee group ${groupId} still covers live services`);
+    }
+    group.removed = true;
+    return Promise.resolve(true);
+  }
+
+  setLinePricing(
+    tenantId: string,
+    proposalId: string,
+    lineId: string,
+    pricing: ProposalLinePricing,
+  ): Promise<ProposalLine | null> {
+    const index = this.lines.findIndex(
+      (l) => l.tenantId === tenantId && l.proposalId === proposalId && l.id === lineId && !l.removed,
+    );
+    const current = this.lines[index];
+    if (current === undefined || !this.isLiveDraft(tenantId, proposalId)) return Promise.resolve(null);
+    const next = { ...current, ...pricing };
+    this.lines[index] = next;
+    return Promise.resolve(stripRemoved(next));
   }
 
   setStatus(
@@ -316,6 +391,8 @@ export class FakeProposalRepo implements ProposalRepository {
     const proposal = await this.findById(tenantId, proposalId);
     if (proposal === null) return null;
     const lines = this.liveLines(tenantId, proposalId);
+    const groups = this.liveGroups(tenantId, proposalId);
+    const codeOf = new Map(groups.map((g, index) => [g.id, sectionCode(index)]));
     return {
       id: proposal.id,
       ref: proposal.ref,
@@ -339,8 +416,17 @@ export class FakeProposalRepo implements ProposalRepository {
         pricingNote: l.pricingNote,
         billingFrequency: l.billingFrequency,
         oopEstimate: l.oopEstimate,
+        feeGroupCode: l.feeGroupId === null ? null : (codeOf.get(l.feeGroupId) ?? null),
       })),
-      totals: totalsOf(lines, proposal.currency),
+      feeGroups: groups.map((g, index) => ({
+        code: sectionCode(index),
+        title: g.title,
+        amount: g.amount,
+        currency: g.currency,
+        billingFrequency: g.billingFrequency,
+        paymentTerms: g.paymentTerms,
+      })),
+      totals: totalsOf(feeItemsOf(lines, groups), proposal.currency),
       answer: (() => {
         const a = this.answers.find((x) => x.tenantId === tenantId && x.proposalId === proposalId);
         return a === undefined
@@ -374,8 +460,15 @@ export class FakeProposalRepo implements ProposalRepository {
     const proposal = await this.findById(tenantId, proposalId);
     if (proposal === null) return null;
     const lines = this.liveLines(tenantId, proposalId);
+    const groups = this.liveGroups(tenantId, proposalId);
+    const items = feeItemsOf(lines, groups);
     return {
       proposal,
+      feeGroups: groups.map((g, index) => ({
+        group: stripRemoved(g),
+        code: sectionCode(index),
+        lineIds: lines.filter((l) => l.feeGroupId === g.id).map((l) => l.id),
+      })),
       party: {
         id: proposal.partyId,
         displayName: this.partyNames.get(proposal.partyId) ?? proposal.partyId,
@@ -391,8 +484,8 @@ export class FakeProposalRepo implements ProposalRepository {
         jurisdiction: this.partyJurisdictions.get(proposal.issuingEntityPartyId) ?? null,
       },
       issuedOn: (proposal.sentAt ?? "2026-06-01T09:00:00.000Z").slice(0, 10),
-      totalsByFrequency: totalsByFrequencyOf(lines, proposal.currency),
-      annualValue: annualValueOf(lines, proposal.currency),
+      totalsByFrequency: totalsByFrequencyOf(items, proposal.currency),
+      annualValue: annualValueOf(items, proposal.currency),
       depts: this.axes
         .filter((a) => a.axis === "dept")
         .map((a) => ({ code: a.code, name: a.name, sortOrder: a.sortOrder })),
@@ -424,7 +517,7 @@ export class FakeProposalRepo implements ProposalRepository {
         ),
         net: netOf(l),
       })),
-      totals: totalsOf(lines, proposal.currency),
+      totals: totalsOf(items, proposal.currency),
       approvedBy: null,
       addressee:
         proposal.addressedToPartyId === null
@@ -541,7 +634,7 @@ export class FakeProposalRepo implements ProposalRepository {
             displayName:
               this.partyNames.get(proposal.issuingEntityPartyId) ?? proposal.issuingEntityPartyId,
           },
-          totals: totalsOf(lines, proposal.currency),
+          totals: totalsOf(feeItemsOf(lines, this.liveGroups(tenantId, proposal.id)), proposal.currency),
           lineCount: lines.length,
         };
       }),
@@ -693,6 +786,12 @@ export class FakeProposalRepo implements ProposalRepository {
         declinedReason: answer.declinedReason,
       })),
     );
+  }
+
+  private liveGroups(tenantId: string, proposalId: string): (ProposalFeeGroup & { removed: boolean })[] {
+    return this.groups
+      .filter((g) => g.tenantId === tenantId && g.proposalId === proposalId && !g.removed)
+      .sort((a, b) => a.position - b.position);
   }
 
   private liveLines(
@@ -1000,6 +1099,24 @@ function currenciesOf(lines: readonly Pick<ProposalLine, "currency">[], main: st
 }
 
 /** Per currency (0344); one zero row in the main currency when there is no line. */
+/** `crm.proposal_fee_item` (0394): each line priced on its own, and each live
+ *  section as one item of its fee. Grouped lines are not in it. */
+function feeItemsOf(
+  lines: readonly ProposalLine[],
+  groups: readonly ProposalFeeGroup[],
+): Pick<ProposalLine, "unitAmount" | "quantity" | "discountPercent" | "currency" | "billingFrequency">[] {
+  return [
+    ...lines.filter((l) => l.feeGroupId === null),
+    ...groups.map((g) => ({
+      unitAmount: g.amount,
+      quantity: "1",
+      discountPercent: "0",
+      currency: g.currency,
+      billingFrequency: g.billingFrequency,
+    })),
+  ];
+}
+
 function totalsOf(
   lines: readonly Pick<ProposalLine, "unitAmount" | "quantity" | "discountPercent" | "currency">[],
   main: string,
@@ -1108,7 +1225,7 @@ function pinnedServiceOf(
   };
 }
 
-function stripRemoved(l: ProposalLine & { removed: boolean }): ProposalLine {
-  const { removed: _removed, ...line } = l;
-  return line;
+function stripRemoved<T extends object>(l: T & { removed: boolean }): T {
+  const { removed: _removed, ...row } = l;
+  return row as T;
 }

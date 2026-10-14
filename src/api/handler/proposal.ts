@@ -328,6 +328,9 @@ const ProposalPlanSchema = z
             description: z.string(),
             /** The company, when the document names one beside the service. */
             subject: z.string().nullable(),
+            /** "A1" when a section's fee is printed on that service and this one
+             *  reads "Included in A1" (0394); null otherwise. */
+            includedIn: z.string().nullable(),
           }),
         ),
       }),
@@ -397,8 +400,74 @@ const ProposalLineSchema = z
     /** Out-of-pocket expenses, separate from the fee and never in the totals.
      *  Redacted with the money — it is an amount the firm expects to bill on. */
     oopEstimate: OopEstimateSchema.nullable(),
+    /** The section whose one fee pays for this service (0394), or null when it
+     *  is priced on its own. Grouped, it has no price, discount or note. */
+    feeGroupId: z.string().uuid().nullable(),
   })
   .openapi("ProposalLine");
+
+/** One fee for several services (0394): the letter's fee group without its
+ *  prose, which the letter drafted from the proposal adds. */
+const ProposalFeeGroupSchema = z
+  .object({
+    id: z.string().uuid(),
+    /** "A", "B", … — its rank among the live sections. */
+    code: z.string(),
+    position: z.number().int(),
+    title: z.string(),
+    billingFrequency: z.enum(BILLING_FREQUENCY_VALUES),
+    billingTiming: z.enum(LINE_BILLING_TIMINGS).nullable(),
+    billingOn: DaySchema.nullable(),
+    /** PER BILLING PERIOD. Null when the fee axis hides it. */
+    amount: AmountSchema.nullable(),
+    currency: CurrencySchema,
+    /** "40% advance, 60% on completion". Redacted with the money. */
+    paymentTerms: z.string().nullable(),
+    /** The live lines this fee pays for, in line order. */
+    lineIds: z.array(z.string().uuid()),
+  })
+  .openapi("ProposalFeeGroup");
+
+const ProposalFeeGroupRequest = z
+  .object({
+    title: z.string().min(1).max(200),
+    /** The main currency when omitted, else one the proposal holds a rate for. */
+    currency: CurrencySchema.optional(),
+    billingFrequency: z.enum(BILLING_FREQUENCY_VALUES),
+    billingTiming: z.enum(LINE_BILLING_TIMINGS).optional(),
+    billingOn: DaySchema.optional(),
+    /** PER BILLING PERIOD — 70000 on a monthly section is 70,000 a month. */
+    amount: AmountSchema,
+    paymentTerms: z.string().max(500).optional(),
+  })
+  .openapi("ProposalFeeGroupRequest");
+
+/** Every field optional; absent is left as it is. Null clears the timing, and
+ *  an empty `paymentTerms` clears it. A new currency moves its services too. */
+const EditProposalFeeGroupRequest = z
+  .object({
+    title: z.string().min(1).max(200).optional(),
+    currency: CurrencySchema.optional(),
+    billingFrequency: z.enum(BILLING_FREQUENCY_VALUES).optional(),
+    billingTiming: z.enum(LINE_BILLING_TIMINGS).nullable().optional(),
+    billingOn: DaySchema.nullable().optional(),
+    amount: AmountSchema.optional(),
+    paymentTerms: z.string().max(500).optional(),
+  })
+  .openapi("EditProposalFeeGroupRequest");
+
+const ProposalLinePricingRequest = z
+  .object({
+    feeGroupId: z.string().uuid().nullable().openapi({
+      description:
+        "The section to price this service, or null to price it on its own. Into a section the " +
+        "service gives up its price, discount and note; on its own it needs `unitAmount` or a " +
+        "`pricingNote` saying why it has none.",
+    }),
+    unitAmount: AmountSchema.optional(),
+    pricingNote: z.string().min(1).max(2000).optional(),
+  })
+  .openapi("ProposalLinePricingRequest");
 
 const ApproverSchema = z
   .object({
@@ -479,6 +548,8 @@ const ClientDecisionSchema = z
 const ProposalRecordSchema = z
   .object({
     proposal: ProposalSchema,
+    /** The live sections (0394): one fee for several services each. */
+    feeGroups: z.array(ProposalFeeGroupSchema),
     party: PartyRefSchema,
     /** The issuing entity by NAME — a letterhead prints a name, not a uuid. */
     issuingEntity: PartyRefSchema,
@@ -669,6 +740,19 @@ const SharedProposalSchema = z
         billingFrequency: z.enum(BILLING_FREQUENCY_VALUES).nullable(),
         /** What they are told to expect to reimburse, separate from the fee. */
         oopEstimate: OopEstimateSchema.nullable(),
+        /** The section whose fee pays for it (0394), by its letter. */
+        feeGroupCode: z.string().nullable(),
+      }),
+    ),
+    /** One fee for several services (0394): what each section charges. */
+    feeGroups: z.array(
+      z.object({
+        code: z.string(),
+        title: z.string(),
+        amount: AmountSchema,
+        currency: CurrencySchema,
+        billingFrequency: z.enum(BILLING_FREQUENCY_VALUES),
+        paymentTerms: z.string().nullable(),
       }),
     ),
     /** One per currency, the main currency first (0344): never one figure
@@ -812,6 +896,11 @@ const AddLineRequest = z
         "What this line is priced in (0344). Absent: the list price's currency when the fee is " +
         "taken from it and the proposal holds a rate for it, else the main currency. Any other " +
         "than the main currency needs its rate first (CURRENCY_NEEDS_A_RATE).",
+    }),
+    feeGroupId: z.string().uuid().optional().openapi({
+      description:
+        "The section whose fee pays for this service (0394). Send no `unitAmount`, `pricingNote` " +
+        "or discount with it: the section's fee is the price.",
     }),
   })
   .openapi("AddProposalLineRequest");
@@ -1249,6 +1338,83 @@ const reissueRoute = createRoute({
   },
 });
 
+const addFeeGroupRoute = createRoute({
+  method: "post",
+  path: "/api/v1/proposals/{proposalId}/fee-groups",
+  tags: ["proposals"],
+  summary: "Add a section — one fee for several services",
+  description:
+    "0394. Services are put in it when added (`feeGroupId`) or afterwards (`PUT …/lines/{lineId}/pricing`), " +
+    "and then carry no price of their own. The letter drafted from the proposal copies it. Draft only.",
+  request: {
+    params: z.object({ proposalId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: ProposalFeeGroupRequest } }, required: true },
+  },
+  responses: {
+    201: { description: "Added", content: { "application/json": { schema: ProposalFeeGroupSchema } } },
+    400: errorResponse("No title, an amount that is not one, or an unknown billing frequency or timing"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such proposal at this firm"),
+    409: errorResponse("The proposal is no longer a draft, or has no rate for the currency"),
+  },
+});
+
+const editFeeGroupRoute = createRoute({
+  method: "patch",
+  path: "/api/v1/proposals/{proposalId}/fee-groups/{groupId}",
+  tags: ["proposals"],
+  summary: "Change a section on a draft",
+  request: {
+    params: z.object({ proposalId: z.string().uuid(), groupId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: EditProposalFeeGroupRequest } }, required: true },
+  },
+  responses: {
+    200: { description: "Changed", content: { "application/json": { schema: ProposalFeeGroupSchema } } },
+    400: errorResponse("A blank title, an amount that is not one, or an unknown billing frequency or timing"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such proposal, or no such live section on it"),
+    409: errorResponse("The proposal is no longer a draft, or has no rate for the currency"),
+  },
+});
+
+const removeFeeGroupRoute = createRoute({
+  method: "delete",
+  path: "/api/v1/proposals/{proposalId}/fee-groups/{groupId}",
+  tags: ["proposals"],
+  summary: "Strike a section off a draft",
+  request: {
+    params: z.object({ proposalId: z.string().uuid(), groupId: z.string().uuid() }),
+  },
+  responses: {
+    204: { description: "Struck off" },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such proposal, or no such live section on it"),
+    409: errorResponse("The proposal is no longer a draft, or the section still covers services"),
+  },
+});
+
+const linePricingRoute = createRoute({
+  method: "put",
+  path: "/api/v1/proposals/{proposalId}/lines/{lineId}/pricing",
+  tags: ["proposals"],
+  summary: "Price a service by a section, or on its own",
+  request: {
+    params: z.object({ proposalId: z.string().uuid(), lineId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: ProposalLinePricingRequest } }, required: true },
+  },
+  responses: {
+    200: { description: "Repriced", content: { "application/json": { schema: ProposalLineSchema } } },
+    400: errorResponse("Into a section with a price, or on its own with neither a price nor a reason"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such proposal, line or section at this firm"),
+    409: errorResponse("The proposal is no longer a draft"),
+  },
+});
+
 const viewSharedRoute = createRoute({
   method: "post",
   path: "/api/v1/proposals/shared",
@@ -1543,12 +1709,34 @@ function toLineBody(
     billingOn: l.line.billingOn,
     pricingNote: l.line.pricingNote,
     oopEstimate: fees && l.line.oopEstimate !== null ? { ...l.line.oopEstimate } : null,
+    feeGroupId: l.line.feeGroupId,
+  };
+}
+
+/** A section as a screen reads it; its fee and payment terms behind the fee axis. */
+function toFeeGroupBody(
+  g: ProposalView["feeGroups"][number],
+  fees: boolean,
+): z.infer<typeof ProposalFeeGroupSchema> {
+  return {
+    id: g.group.id,
+    code: g.code,
+    position: g.group.position,
+    title: g.group.title,
+    billingFrequency: g.group.billingFrequency,
+    billingTiming: g.group.billingTiming,
+    billingOn: g.group.billingOn,
+    amount: fees ? g.group.amount : null,
+    currency: g.group.currency,
+    paymentTerms: fees ? g.group.paymentTerms : null,
+    lineIds: [...g.lineIds],
   };
 }
 
 function toRecordBody(record: ProposalView, fees: boolean): z.infer<typeof ProposalRecordSchema> {
   return {
     proposal: toProposalBody(record.proposal, fees),
+    feeGroups: record.feeGroups.map((g) => toFeeGroupBody(g, fees)),
     party: { id: record.party.id, displayName: record.party.displayName },
     issuingEntity: {
       id: record.issuingEntity.id,
@@ -1578,6 +1766,7 @@ function toRecordBody(record: ProposalView, fees: boolean): z.infer<typeof Propo
           code: item.code,
           description: item.description,
           subject: item.subject,
+          includedIn: item.fee.kind === "section" && !item.fee.isAnchor ? item.fee.anchorCode : null,
         })),
       })),
     },
@@ -1694,7 +1883,9 @@ function toSharedBody(shared: SharedProposal): z.infer<typeof SharedProposalSche
       pricingNote: l.pricingNote,
       billingFrequency: l.billingFrequency,
       oopEstimate: l.oopEstimate === null ? null : { ...l.oopEstimate },
+      feeGroupCode: l.feeGroupCode,
     })),
+    feeGroups: shared.feeGroups.map((g) => ({ ...g })),
     totals: shared.totals.map((t) => ({
       gross: t.gross,
       discount: t.discount,
@@ -1888,6 +2079,55 @@ export function registerProposalRoutes(app: OpenAPIHono<AppEnv>, deps: ProposalD
     const { proposalId, lineId } = c.req.valid("param");
     await deps.service.removeLine(s.tenantId, proposalId, lineId);
     return c.body(null, 204);
+  });
+
+  /** A section as the read carries it: its letter and the lines it covers. */
+  const groupAsRead = async (
+    tenantId: string,
+    proposalId: string,
+    groupId: string,
+    fees: boolean,
+  ): Promise<z.infer<typeof ProposalFeeGroupSchema>> => {
+    const record = await deps.service.describe(tenantId, proposalId);
+    const group = record.feeGroups.find((g) => g.group.id === groupId);
+    if (group === undefined) throw new Error(`section ${groupId} is not on the proposal it was written to`);
+    return toFeeGroupBody(group, fees);
+  };
+
+  app.openapi(addFeeGroupRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { proposalId } = c.req.valid("param");
+    const group = await deps.service.addFeeGroup(s.tenantId, proposalId, c.req.valid("json"));
+    return c.json(await groupAsRead(s.tenantId, proposalId, group.id, seesFees(c.get("principal"))), 201);
+  });
+
+  app.openapi(editFeeGroupRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { proposalId, groupId } = c.req.valid("param");
+    await deps.service.editFeeGroup(s.tenantId, proposalId, groupId, c.req.valid("json"));
+    return c.json(await groupAsRead(s.tenantId, proposalId, groupId, seesFees(c.get("principal"))), 200);
+  });
+
+  app.openapi(removeFeeGroupRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { proposalId, groupId } = c.req.valid("param");
+    await deps.service.removeFeeGroup(s.tenantId, proposalId, groupId);
+    return c.body(null, 204);
+  });
+
+  app.openapi(linePricingRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { proposalId, lineId } = c.req.valid("param");
+    const body = c.req.valid("json");
+    await deps.service.setLinePricing({ tenantId: s.tenantId, proposalId, lineId, ...body });
+    const record = await deps.service.describe(s.tenantId, proposalId);
+    const line = record.lines.find((l) => l.line.id === lineId);
+    if (line === undefined) throw new Error(`line ${lineId} is not on the proposal it was repriced on`);
+    return c.json(toLineBody(line, seesFees(c.get("principal"))), 200);
   });
 
   app.openapi(approveDiscountRoute, async (c) => {

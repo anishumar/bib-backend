@@ -1839,6 +1839,7 @@ describe("writing an ACCEPTED quote up as a letter (T3.5b)", () => {
       exclusionsOverride: null,
       oopEstimate: null,
       pricingNote: null,
+      feeGroupId: null,
       ...over,
     };
   }
@@ -1863,6 +1864,7 @@ describe("writing an ACCEPTED quote up as a letter (T3.5b)", () => {
         ...over,
       },
       lines,
+      feeGroups: [],
     };
   }
 
@@ -1942,6 +1944,35 @@ describe("writing an ACCEPTED quote up as a letter (T3.5b)", () => {
     expect(out.lines.map((l) => l.currency)).toEqual(["AED", "INR"]);
     const view = await h.service.describe(TENANT, out.letter.id);
     expect(view.letter.rates).toEqual([{ currency: "AED", fxRate: "22.75", fxRateDate: "2026-07-01", source: "typed" }]);
+  });
+
+  it("carries the quote's sections, its services priced by the section's fee there too (0394)", async () => {
+    const section = {
+      id: "quote-section-1",
+      title: "Accounting, Tax & GST",
+      billingFrequency: "monthly",
+      billingTiming: "advance",
+      billingOn: null,
+      amount: "70000",
+      currency: "INR",
+      paymentTerms: null,
+    };
+    const h = withQuote({
+      ...quoted([
+        quoteLine({ description: "a", unitAmount: null, discountPercent: "0", feeGroupId: section.id }),
+        quoteLine({ description: "b" }),
+      ]),
+      feeGroups: [section],
+    });
+
+    const out = await h.service.draftFromQuote(ask(), ACTOR);
+
+    const view = await h.service.describe(TENANT, out.letter.id);
+    expect(view.feeGroups).toHaveLength(1);
+    const group = view.feeGroups[0];
+    expect(group?.group).toMatchObject({ title: "Accounting, Tax & GST", amount: "70000", billingTiming: "advance" });
+    expect(out.lines[0]).toMatchObject({ description: "a", feeGroupId: group?.group.id, unitAmount: null });
+    expect(out.lines[1]).toMatchObject({ description: "b", feeGroupId: null, unitAmount: "6000.00" });
   });
 
   it("links the letter back to the quote, and inherits its issuer and title", async () => {
@@ -2265,6 +2296,7 @@ describe("who a letter names beside the client (F-10-1)", () => {
         deletedAt: null,
       },
       lines: [],
+      feeGroups: [],
     });
     const ask = (proposalId: string) =>
       s.service.draft(
@@ -2388,8 +2420,10 @@ describe("who a letter names beside the client (F-10-1)", () => {
           exclusionsOverride: null,
           oopEstimate: null,
           pricingNote: null,
+          feeGroupId: null,
         },
       ],
+      feeGroups: [],
     });
     await expect(
       s.service.draftFromQuote(

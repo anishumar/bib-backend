@@ -1687,9 +1687,9 @@ one service across four companies (lines merge only when everything they print i
 company named once per section when every item covers the same ones and never on a one-company
 letter, lines priced on their own as a last section.
 
-**Not built, and said:** the signatory's phone, a page header, and fee groups on a PROPOSAL — a
-quote's lines carry across ungrouped and are grouped on the letter. (The firm's address, contact
-and registration numbers print under its name since 0334, below.)
+**Not built, and said:** the signatory's phone and a page header. Fee groups on a PROPOSAL came
+in 0394 and the letter drafted from the quote copies them. (The firm's address, contact and
+registration numbers print under its name since 0334, below.)
 
 ## The proposal as a document — "Proposal For Services" (0084)
 
@@ -1741,9 +1741,14 @@ whole where it is whole ("INR 50,000"); frequencies in the firm's words ("Yearly
 took a `FlowStyle` (the letter's is the old constants) and the cursor a `turn` hook (absent: a
 blank page, as before); `tests/render/layout.test.ts` still matches the pre-0083 hashes.
 
-**Not built, and said:** fee groups on a proposal, a serif body face (the firm's sample is Times;
-this product embeds Noto Sans everywhere), and page numbers (the template has none). The PDF
-download on the client's share link was built in 0085, below.
+**Not built, and said:** a serif body face (the firm's sample is Times; this product embeds Noto
+Sans everywhere), and page numbers (the template has none). The PDF download on the client's
+share link was built in 0085, below.
+
+**Sections on a proposal (0394):** `crm.proposal_fee_group` is the letter's fee group without its
+prose; its lines carry no price, and every total reads `crm.proposal_fee_item` (lines priced on
+their own + live groups). The PDF prints the fee on the group's first service in print order and
+"Included in H3" on the rest (`planProposal` rule 4), the firm's own EduHubSpot style.
 
 ## The proposal by email, and the client's own answer (0085)
 

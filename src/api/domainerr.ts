@@ -797,6 +797,9 @@ export function mapError(err: unknown): MappedError {
       case "UNPRICED_LINE_HAS_DISCOUNT":
       case "INVALID_BILLING_FREQUENCY":
       case "INVALID_BILLING_TIMING":
+      case "FEE_GROUP_TITLE_REQUIRED":
+      case "GROUPED_LINE_PRICED":
+      case "LINE_NOT_PRICED":
       case "INVALID_LINE_JURISDICTION":
       case "INVALID_OOP_ESTIMATE":
       case "NOT_CALLERS_TODAY":
@@ -825,6 +828,7 @@ export function mapError(err: unknown): MappedError {
       // probing learn which firms exist and which links used to.
       case "PROPOSAL_NOT_FOUND":
       case "LINE_NOT_FOUND":
+      case "FEE_GROUP_NOT_FOUND":
       case "SERVICE_NOT_FOUND":
       case "SHARE_LINK_UNKNOWN":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
@@ -864,6 +868,8 @@ export function mapError(err: unknown): MappedError {
       case "CURRENCY_NEEDS_A_RATE":
       case "RATE_IN_USE":
       case "PROSE_EDITED":
+      case "FEE_GROUP_NOT_EMPTY":
+      case "FEE_GROUP_EMPTY":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       // Reachable only from a process composed with no mailer — the worker,
       // which never sends. Said plainly rather than as a 500, the render

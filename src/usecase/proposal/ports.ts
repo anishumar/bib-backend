@@ -18,6 +18,7 @@ import type {
   LineBillingTiming,
   Proposal,
   ProposalDecision,
+  ProposalFeeGroup,
   ProposalLine,
   ProposalStatus,
   ProposalTotals,
@@ -236,6 +237,55 @@ export interface NewProposalLine {
   readonly exclusionsOverride: string | null;
   readonly oopEstimate: OutOfPocketEstimate | null;
   readonly pricingNote: string | null;
+  /** The section that prices it (0394); its price, discount and note are then
+   *  null, "0" and null, and its currency the section's. */
+  readonly feeGroupId: string | null;
+}
+
+/** A section to write onto a draft (0394). Its position is assigned by the
+ *  adapter, after the last live one, in the same statement. */
+export interface NewProposalFeeGroup {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly proposalId: string;
+  readonly currency: CurrencyCode;
+  readonly title: string;
+  readonly billingFrequency: BillingFrequency;
+  readonly billingTiming: LineBillingTiming | null;
+  readonly billingOn: string | null;
+  readonly amount: Amount;
+  readonly paymentTerms: string | null;
+}
+
+/** A section as an edit leaves it, validated as a whole by the use case. A new
+ *  currency moves its lines with it, in the same statement. */
+export interface ProposalFeeGroupEdit {
+  readonly title: string;
+  readonly currency: CurrencyCode;
+  readonly billingFrequency: BillingFrequency;
+  readonly billingTiming: LineBillingTiming | null;
+  readonly billingOn: string | null;
+  readonly amount: Amount;
+  readonly paymentTerms: string | null;
+}
+
+/** Moving a line into or out of a section, with the price it then has: one
+ *  fact, written in one statement, so no row is ever grouped AND priced. */
+export interface ProposalLinePricing {
+  readonly feeGroupId: string | null;
+  readonly currency: CurrencyCode;
+  readonly unitAmount: Amount | null;
+  readonly discountPercent: Amount;
+  readonly pricingNote: string | null;
+}
+
+/** A section as a screen and the renderer read it. */
+export interface ProposalFeeGroupRecord {
+  readonly group: ProposalFeeGroup;
+  /** "A", "B", … — its rank among the live sections. */
+  readonly code: string;
+  /** The live lines it pays for, in line order. */
+  readonly lineIds: readonly string[];
 }
 
 /**
@@ -285,6 +335,8 @@ export interface ProposalRecord {
   readonly proposal: Proposal;
   readonly party: { readonly id: string; readonly displayName: string };
   readonly lines: readonly ProposalLineRecord[];
+  /** The live sections (0394), in order. */
+  readonly feeGroups: readonly ProposalFeeGroupRecord[];
   /** One row per currency the live lines are in, the main currency first, then
    *  by code (0344). Amounts in two currencies are never added together, so
    *  there is no single total. A proposal with no line has one row, its main
@@ -806,6 +858,17 @@ export interface SharedProposalRecord {
     /** What the client is told to expect to reimburse, separate from the fee
      *  and in its own currency. Never folded into the totals. */
     readonly oopEstimate: OutOfPocketEstimate | null;
+    /** The section whose fee pays for this line (0394), by its letter. */
+    readonly feeGroupCode: string | null;
+  }[];
+  /** One fee for several services (0394): what each section charges. */
+  readonly feeGroups: readonly {
+    readonly code: string;
+    readonly title: string;
+    readonly amount: Amount;
+    readonly currency: CurrencyCode;
+    readonly billingFrequency: BillingFrequency;
+    readonly paymentTerms: string | null;
   }[];
   /** Per currency, the main currency first (0344). */
   readonly totals: readonly ProposalTotals[];
@@ -884,6 +947,26 @@ export interface ProposalRepository {
   removeLine(tenantId: string, proposalId: string, lineId: string): Promise<void>;
   /** The live lines, in document order. */
   listLines(tenantId: string, proposalId: string): Promise<readonly ProposalLine[]>;
+
+  // ── One fee for several services (0394). Each write is refused (null/false)
+  // when the proposal is no longer a live draft. ─────────────────────────────
+  /** The live sections, in order. */
+  listFeeGroups(tenantId: string, proposalId: string): Promise<readonly ProposalFeeGroup[]>;
+  addFeeGroup(g: NewProposalFeeGroup): Promise<ProposalFeeGroup | null>;
+  editFeeGroup(
+    tenantId: string,
+    proposalId: string,
+    groupId: string,
+    edit: ProposalFeeGroupEdit,
+  ): Promise<ProposalFeeGroup | null>;
+  /** Soft: sets removed_at. */
+  removeFeeGroup(tenantId: string, proposalId: string, groupId: string): Promise<boolean>;
+  setLinePricing(
+    tenantId: string,
+    proposalId: string,
+    lineId: string,
+    pricing: ProposalLinePricing,
+  ): Promise<ProposalLine | null>;
 
   /**
    * Write an edit to a live line of a DRAFT (T6.18), and — when
