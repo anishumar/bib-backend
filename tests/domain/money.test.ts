@@ -5,7 +5,7 @@
 // whether money may leave a firm. The first case below is the one the audit
 // found; the rest are the neighbours that would have hidden it.
 import { describe, expect, it } from "vitest";
-import { compareAmounts, subtractAmounts } from "../../src/domain/money/model";
+import { addAmounts, compareAmounts, proratedAmount, subtractAmounts } from "../../src/domain/money/model";
 
 describe("subtractAmounts", () => {
   it("does not lose the last paisa the way binary floating point does", () => {
@@ -55,5 +55,32 @@ describe("compareAmounts", () => {
     // Two amounts a double cannot tell apart: 2^53 is 9007199254740992, so
     // these are the same `number` and different money.
     expect(compareAmounts("900719925474099.2", "900719925474099.3")).toBe(-1);
+  });
+});
+
+describe("addAmounts", () => {
+  it("adds exactly at the wider scale, signs and all", () => {
+    expect(addAmounts("0.1", "0.2")).toBe("0.3");
+    expect(addAmounts("25000.00", "8000")).toBe("33000.00");
+    expect(addAmounts("-1.25", "0.25")).toBe("-1.00");
+    expect(addAmounts("0", "0")).toBe("0");
+  });
+});
+
+describe("proratedAmount", () => {
+  it("prices a part period as 0318's view does: round(full x served / days, 2)", () => {
+    expect(proratedAmount("25000.0000", 15, 30)).toBe("12500.00");
+    expect(proratedAmount("10000", 10, 31)).toBe("3225.81");
+    expect(proratedAmount("100", 1, 3)).toBe("33.33");
+    expect(proratedAmount("100", 2, 3)).toBe("66.67");
+  });
+
+  it("rounds a half away from zero, as numeric round does", () => {
+    expect(proratedAmount("0.05", 1, 2)).toBe("0.03");
+    expect(proratedAmount("-0.05", 1, 2)).toBe("-0.03");
+  });
+
+  it("a whole period is the full fee", () => {
+    expect(proratedAmount("40000.0000", 31, 31)).toBe("40000.00");
   });
 });

@@ -715,6 +715,8 @@ export function wire(cfg: Config, log: Logger): Wired {
     clock: systemClock,
     // Today's rate is asked before the by-currency report reads it (0345).
     rates: fx,
+    // The projection runs the billing sweep's schedules forward.
+    billing: { schedules: new PostgresBillingDueWriter(pools.app), calendars: new PostgresFirmTimeZone(pools.app) },
   });
 
   // SETUP READINESS (V2.6). Read-only: eight lines computed from one read, on

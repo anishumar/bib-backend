@@ -16,8 +16,11 @@ import { withTenant } from "../../db/tenant";
 import type { AgeingBucket, MrrByCurrency, MrrExclusion, Slice } from "../../domain/dashboard/model";
 import { AGEING_BUCKETS } from "../../domain/dashboard/model";
 import type {
+  AccountTeams,
   BillingCompany,
   BillingWindowDays,
+  ClientSummaryQuery,
+  ClientSummaryRow,
   CompanyMonthRow,
   DashboardRepository,
   ManagerMonthRow,
@@ -27,6 +30,8 @@ import type {
   PersonCurrencyRow,
   ReceivableTotals,
   RevenueQuery,
+  SubjectNames,
+  SummaryKind,
 } from "../../usecase/dashboard/ports";
 
 export class PostgresDashboardRepository implements DashboardRepository {
@@ -713,6 +718,298 @@ export class PostgresDashboardRepository implements DashboardRepository {
     });
   }
 
+  async clientSummary(tenantId: string, q: ClientSummaryQuery): Promise<readonly ClientSummaryRow[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const issuer = q.issuerPartyId === undefined ? db`` : db`AND i.entity_party_id = ${q.issuerPartyId}`;
+      const currency = q.currency === undefined ? db`` : db`AND i.currency = ${q.currency}`;
+      const party = q.partyId === undefined ? db`` : db`AND i.party_id = ${q.partyId}`;
+      const keyManager =
+        q.keyManagerUserId === undefined
+          ? db``
+          : db`AND EXISTS (SELECT 1 FROM team t WHERE t.client_party_id = s.party_id
+                              AND t.role = 'key_manager' AND t.user_id = ${q.keyManagerUserId})`;
+      const spoc =
+        q.spocUserId === undefined
+          ? db``
+          : db`AND EXISTS (SELECT 1 FROM team t WHERE t.client_party_id = s.party_id
+                              AND t.role = 'spoc' AND t.user_id = ${q.spocUserId} AND t.code = ANY(s.dept_codes))`;
+      // `share` is the line's fraction of its invoice's total (round-off and
+      // all), so a client's lines add back to its invoices. A service in a
+      // section bills the section, however the line named it. An advance taken
+      // before the letter (0363) is split by its mappings, as the originator
+      // report splits it: a part mapped to a service is that service's.
+      const rows = await db<SummaryRow[]>`
+        WITH inv AS (
+          SELECT i.id, i.party_id, i.currency, i.issued_on
+            FROM crm.invoice i
+           WHERE i.status = 'issued' ${issuer} ${currency} ${party}
+        ), line AS (
+          SELECT la.invoice_id, inv.party_id, inv.currency, inv.issued_on, t.total,
+                 (la.net + la.tax) / nullif(t.net + t.tax, 0) AS share,
+                 coalesce(bill.fee_group_id, (SELECT sl.fee_group_id FROM crm.engagement se
+                                    JOIN crm.engagement_letter_line sl
+                                      ON sl.id = se.engagement_letter_line_id AND sl.tenant_id = se.tenant_id
+                                   WHERE se.id = coalesce(il.engagement_id, bill.engagement_id))) AS fee_group_id,
+                 coalesce(il.engagement_id, bill.engagement_id) AS engagement_id,
+                 coalesce(bill.kind = 'advance', false) AS advance
+            FROM crm.invoice_line_amount la
+            JOIN inv ON inv.id = la.invoice_id
+            JOIN crm.invoice_totals t ON t.invoice_id = la.invoice_id
+            JOIN crm.invoice_line il ON il.id = la.invoice_line_id
+            LEFT JOIN LATERAL (
+              SELECT d.fee_group_id, d.engagement_id, d.kind
+                FROM crm.billing_due d
+               WHERE d.invoice_line_id = il.id AND d.tenant_id = il.tenant_id
+               LIMIT 1
+            ) bill ON true
+           WHERE NOT EXISTS (SELECT 1 FROM crm.adhoc_advance aa WHERE aa.invoice_id = la.invoice_id)
+          UNION ALL
+          SELECT part.invoice_id, inv.party_id, inv.currency, inv.issued_on, t.total,
+                 part.net / t.net, (SELECT sl.fee_group_id FROM crm.engagement se
+                                    JOIN crm.engagement_letter_line sl
+                                      ON sl.id = se.engagement_letter_line_id AND sl.tenant_id = se.tenant_id
+                                   WHERE se.id = part.engagement_id), part.engagement_id, true
+            FROM (
+              SELECT al.invoice_id, al.engagement_id, sum(coalesce(al.kept_amount, al.amount)) AS net
+                FROM crm.advance_allocation al
+               GROUP BY 1, 2
+              UNION ALL
+              SELECT aa.invoice_id, NULL::uuid,
+                     t.net - coalesce((SELECT sum(coalesce(al.kept_amount, al.amount))
+                                         FROM crm.advance_allocation al
+                                        WHERE al.adhoc_advance_id = aa.id AND al.tenant_id = aa.tenant_id), 0)
+                FROM crm.adhoc_advance aa
+                JOIN crm.invoice_totals t ON t.invoice_id = aa.invoice_id AND t.tenant_id = aa.tenant_id
+            ) part
+            JOIN inv ON inv.id = part.invoice_id
+            JOIN crm.invoice_totals t ON t.invoice_id = part.invoice_id
+           WHERE t.net > 0 AND part.net <> 0
+        ), subj AS (
+          -- A service is its catalogue ENTRY under its live name; a section is
+          -- the letter's fee group (0083) with the services in it.
+          SELECT l.*,
+                 CASE WHEN l.fee_group_id IS NOT NULL THEN 'section'
+                      WHEN l.engagement_id IS NOT NULL THEN 'service'
+                      WHEN l.advance THEN 'advance'
+                      ELSE 'other' END AS kind,
+                 coalesce(l.fee_group_id::text, svc.entry_key, '') AS subject_key,
+                 coalesce(g.title, svc.name) AS name,
+                 coalesce(grp.services, '{}') AS services,
+                 coalesce(CASE WHEN l.fee_group_id IS NOT NULL THEN grp.depts
+                               ELSE array_remove(ARRAY[svc.dept], NULL) END, '{}') AS dept_codes
+            FROM line l
+            LEFT JOIN crm.engagement_letter_fee_group g ON g.id = l.fee_group_id
+            LEFT JOIN LATERAL (
+              SELECT coalesce(pinned.entry_id::text, 'line:' || ll.description) AS entry_key,
+                     coalesce(live.body ->> 'name', pinned.body ->> 'name', ll.description) AS name,
+                     coalesce(live.body ->> 'module', pinned.body ->> 'module') AS dept
+                FROM crm.engagement e
+                JOIN crm.engagement_letter_line ll
+                  ON ll.id = e.engagement_letter_line_id AND ll.tenant_id = e.tenant_id
+                LEFT JOIN config.version pinned
+                  ON pinned.id = ll.service_version_id AND pinned.tenant_id = ll.tenant_id
+                LEFT JOIN config.version live
+                  ON live.entry_id = pinned.entry_id AND live.tenant_id = pinned.tenant_id
+                 AND live.status = 'published'
+               WHERE e.id = l.engagement_id
+               LIMIT 1
+            ) svc ON l.fee_group_id IS NULL
+            LEFT JOIN LATERAL (
+              SELECT array_agg(coalesce(live.body ->> 'name', pinned.body ->> 'name', ll.description)
+                               ORDER BY ll.position) AS services,
+                     array_remove(array_agg(DISTINCT coalesce(live.body ->> 'module', pinned.body ->> 'module')),
+                                  NULL) AS depts
+                FROM crm.engagement_letter_line ll
+                LEFT JOIN config.version pinned
+                  ON pinned.id = ll.service_version_id AND pinned.tenant_id = ll.tenant_id
+                LEFT JOIN config.version live
+                  ON live.entry_id = pinned.entry_id AND live.tenant_id = pinned.tenant_id
+                 AND live.status = 'published'
+               WHERE ll.fee_group_id = l.fee_group_id AND ll.removed_at IS NULL
+            ) grp ON l.fee_group_id IS NOT NULL
+           WHERE l.share IS NOT NULL
+        ), team AS (
+          SELECT a.client_party_id, a.role, a.user_id, x.code
+            FROM crm.client_assignment a
+            JOIN tenancy.membership m
+              ON m.tenant_id = a.tenant_id AND m.user_id = a.user_id AND m.audience = 'STAFF' AND m.is_active
+            LEFT JOIN tenancy.service_axis x
+              ON x.id = a.axis_id AND x.tenant_id = a.tenant_id AND x.axis = 'dept'
+           WHERE a.valid_from <= ${q.today}::date
+             AND (a.valid_to IS NULL OR a.valid_to > ${q.today}::date)
+        ), kept AS (
+          SELECT s.* FROM subj s WHERE true ${keyManager} ${spoc}
+        ), docs AS (
+          SELECT k.party_id, k.kind, k.subject_key, k.currency, k.invoice_id, 'billed' AS what,
+                 round(k.total * k.share, 4) AS billed, 0::numeric AS received, 0::numeric AS tds,
+                 0::numeric AS pending, 0::numeric AS overdue
+            FROM kept k
+           WHERE k.issued_on BETWEEN ${q.from}::date AND ${q.to}::date
+          UNION ALL
+          SELECT k.party_id, k.kind, k.subject_key, k.currency, k.invoice_id, 'credited',
+                 -round(c.amount * k.share, 4), 0, 0, 0, 0
+            FROM crm.credit_note c
+            JOIN kept k ON k.invoice_id = c.invoice_id
+           WHERE c.issued_on BETWEEN ${q.from}::date AND ${q.to}::date
+          UNION ALL
+          SELECT k.party_id, k.kind, k.subject_key, k.currency, k.invoice_id, 'paid',
+                 0, round(p.amount * k.share, 4), round(coalesce(p.tds_amount, 0) * k.share, 4), 0, 0
+            FROM crm.payment p
+            JOIN kept k ON k.invoice_id = p.invoice_id
+           WHERE p.received_on BETWEEN ${q.from}::date AND ${q.to}::date
+          UNION ALL
+          SELECT k.party_id, k.kind, k.subject_key, k.currency, k.invoice_id, 'owed',
+                 0, 0, 0, round(a.outstanding * k.share, 4),
+                 CASE WHEN a.bucket IN ('d1_30', 'd31_60', 'd61_90', 'd90_plus')
+                      THEN round(a.outstanding * k.share, 4) ELSE 0 END
+            FROM crm.receivable_ageing_on(${q.asOf}::date) a
+            JOIN kept k ON k.invoice_id = a.invoice_id
+        ), sums AS (
+          SELECT party_id, kind, subject_key, currency,
+                 GROUPING(party_id)::int AS no_party, GROUPING(kind)::int AS no_subject,
+                 sum(billed)::text AS billed, sum(received)::text AS received, sum(tds)::text AS tds,
+                 sum(pending)::text AS pending, sum(overdue)::text AS overdue,
+                 (count(DISTINCT invoice_id) FILTER (WHERE what = 'billed'))::int AS invoices
+            FROM docs
+           GROUP BY GROUPING SETS ((party_id, kind, subject_key, currency), (party_id, currency), (currency))
+          HAVING sum(billed) <> 0 OR sum(received) <> 0 OR sum(tds) <> 0 OR sum(pending) <> 0
+        ), meta AS (
+          SELECT DISTINCT ON (party_id, kind, subject_key) party_id, kind, subject_key, name, services, dept_codes
+            FROM kept
+           ORDER BY party_id, kind, subject_key
+        )
+        SELECT s.party_id, s.kind, s.subject_key, s.currency, s.no_party, s.no_subject,
+               s.billed, s.received, s.tds, s.pending, s.overdue, s.invoices,
+               p.display_name AS party_name, m.name, m.services, m.dept_codes
+          FROM sums s
+          LEFT JOIN core.party p ON p.id = s.party_id
+          LEFT JOIN meta m ON m.party_id = s.party_id AND m.kind = s.kind AND m.subject_key = s.subject_key
+      `;
+      return rows.map(
+        (r): ClientSummaryRow => ({
+          scope: r.no_party === 1 ? "currency" : r.no_subject === 1 ? "client" : "subject",
+          partyId: r.party_id,
+          partyName: r.party_name,
+          kind: r.no_subject === 1 ? null : r.kind,
+          subjectKey: r.no_subject === 1 ? null : r.subject_key,
+          name: r.name,
+          services: r.services ?? [],
+          deptCodes: r.dept_codes ?? [],
+          currency: r.currency,
+          billed: r.billed,
+          received: r.received,
+          tds: r.tds,
+          pending: r.pending,
+          overdue: r.overdue,
+          invoices: r.invoices,
+        }),
+      );
+    });
+  }
+
+  async accountTeams(tenantId: string, clientIds: readonly string[], day: string): Promise<AccountTeams> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const people =
+        clientIds.length === 0
+          ? []
+          : await db<
+              { client_party_id: string; role: "key_manager" | "spoc"; user_id: string; name: string; code: string | null }[]
+            >`
+              SELECT a.client_party_id, a.role, a.user_id,
+                     coalesce(nullif(btrim(u.display_name), ''), u.email::text) AS name, x.code
+                FROM crm.client_assignment a
+                JOIN tenancy.membership m
+                  ON m.tenant_id = a.tenant_id AND m.user_id = a.user_id AND m.audience = 'STAFF' AND m.is_active
+                JOIN tenancy.user_account u ON u.id = a.user_id
+                LEFT JOIN tenancy.service_axis x
+                  ON x.id = a.axis_id AND x.tenant_id = a.tenant_id AND x.axis = 'dept'
+               WHERE a.client_party_id = ANY(${clientIds as string[]}::uuid[])
+                 AND a.valid_from <= ${day}::date
+                 AND (a.valid_to IS NULL OR a.valid_to > ${day}::date)
+               ORDER BY a.client_party_id, a.role, a.valid_from DESC, name
+            `;
+      const depts = await db<{ code: string; name: string }[]>`
+        SELECT code, name FROM tenancy.service_axis WHERE axis = 'dept' ORDER BY sort_order, name
+      `;
+      return {
+        people: people.map((p) => ({
+          clientPartyId: p.client_party_id,
+          role: p.role,
+          userId: p.user_id,
+          name: p.name,
+          deptCode: p.code,
+        })),
+        depts: depts.map((d) => ({ code: d.code, name: d.name })),
+      };
+    });
+  }
+
+  async subjectNames(
+    tenantId: string,
+    engagementIds: readonly string[],
+    feeGroupIds: readonly string[],
+  ): Promise<SubjectNames> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const engagements =
+        engagementIds.length === 0
+          ? []
+          : await db<{ engagement_id: string; party_name: string; entry_key: string; name: string; dept: string | null }[]>`
+              SELECT e.id AS engagement_id, p.display_name AS party_name,
+                     coalesce(pinned.entry_id::text, 'line:' || ll.description) AS entry_key,
+                     coalesce(live.body ->> 'name', pinned.body ->> 'name', ll.description) AS name,
+                     coalesce(live.body ->> 'module', pinned.body ->> 'module') AS dept
+                FROM crm.engagement e
+                JOIN core.party p ON p.id = e.party_id AND p.tenant_id = e.tenant_id
+                JOIN crm.engagement_letter_line ll
+                  ON ll.id = e.engagement_letter_line_id AND ll.tenant_id = e.tenant_id
+                LEFT JOIN config.version pinned
+                  ON pinned.id = ll.service_version_id AND pinned.tenant_id = ll.tenant_id
+                LEFT JOIN config.version live
+                  ON live.entry_id = pinned.entry_id AND live.tenant_id = pinned.tenant_id
+                 AND live.status = 'published'
+               WHERE e.id = ANY(${engagementIds as string[]}::uuid[])
+            `;
+      const groups =
+        feeGroupIds.length === 0
+          ? []
+          : await db<{ fee_group_id: string; party_name: string; title: string; services: string[] | null; depts: string[] | null }[]>`
+              SELECT g.id AS fee_group_id, p.display_name AS party_name, g.title,
+                     array_agg(coalesce(live.body ->> 'name', pinned.body ->> 'name', ll.description)
+                               ORDER BY ll.position) FILTER (WHERE ll.id IS NOT NULL) AS services,
+                     array_remove(array_agg(DISTINCT coalesce(live.body ->> 'module', pinned.body ->> 'module')),
+                                  NULL) AS depts
+                FROM crm.engagement_letter_fee_group g
+                JOIN crm.engagement_letter l ON l.id = g.engagement_letter_id AND l.tenant_id = g.tenant_id
+                JOIN core.party p ON p.id = l.party_id AND p.tenant_id = l.tenant_id
+                LEFT JOIN crm.engagement_letter_line ll
+                  ON ll.fee_group_id = g.id AND ll.tenant_id = g.tenant_id AND ll.removed_at IS NULL
+                LEFT JOIN config.version pinned
+                  ON pinned.id = ll.service_version_id AND pinned.tenant_id = ll.tenant_id
+                LEFT JOIN config.version live
+                  ON live.entry_id = pinned.entry_id AND live.tenant_id = pinned.tenant_id
+                 AND live.status = 'published'
+               WHERE g.id = ANY(${feeGroupIds as string[]}::uuid[])
+               GROUP BY g.id, p.display_name, g.title
+            `;
+      return {
+        engagements: engagements.map((r) => ({
+          engagementId: r.engagement_id,
+          partyName: r.party_name,
+          entryKey: r.entry_key,
+          name: r.name,
+          deptCode: r.dept,
+        })),
+        feeGroups: groups.map((r) => ({
+          feeGroupId: r.fee_group_id,
+          partyName: r.party_name,
+          title: r.title,
+          services: r.services ?? [],
+          deptCodes: r.depts ?? [],
+        })),
+      };
+    });
+  }
+
   private toSlice(r: { key: string; label: string; total: string; n: string }): Slice {
     return {
       key: r.key,
@@ -721,6 +1018,25 @@ export class PostgresDashboardRepository implements DashboardRepository {
       count: Number(r.n),
     };
   }
+}
+
+interface SummaryRow {
+  party_id: string | null;
+  kind: SummaryKind | null;
+  subject_key: string | null;
+  currency: string;
+  no_party: number;
+  no_subject: number;
+  billed: string;
+  received: string;
+  tds: string;
+  pending: string;
+  overdue: string;
+  invoices: number;
+  party_name: string | null;
+  name: string | null;
+  services: string[] | null;
+  dept_codes: string[] | null;
 }
 
 interface RevenueRow {

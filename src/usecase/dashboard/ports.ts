@@ -8,6 +8,8 @@
 // TypeScript would be a second implementation of arithmetic the database
 // already does, and the two would eventually disagree.
 import type { AgeingBand, MrrByCurrency, MrrGap, Slice } from "../../domain/dashboard/model";
+import type { CompanyCalendars } from "../../domain/calendar/model";
+import type { BillingSubject } from "../billing/ports";
 
 export interface MrrTotals {
   /** Decimal string in the firm's reporting currency. "0" when nothing counts. */
@@ -98,6 +100,119 @@ export interface DashboardRepository {
    * SQL on `numeric`. See `RevenueQuery` for the person and the definitions.
    */
   revenueByPerson(tenantId: string, q: RevenueQuery): Promise<readonly PersonCurrencyRow[]>;
+
+  /** The client summary: billed, received and owed per client and per what the
+   *  money was for, per currency, with each client's and each currency's total
+   *  (grouping sets). See `ClientSummaryQuery` for the definitions. */
+  clientSummary(tenantId: string, q: ClientSummaryQuery): Promise<readonly ClientSummaryRow[]>;
+
+  /** Who is on each client's account team on `day` (active staff only), and
+   *  the names of the firm's Depts. */
+  accountTeams(tenantId: string, clientIds: readonly string[], day: string): Promise<AccountTeams>;
+
+  /** What each billing subject is called, for the projection's rows: a
+   *  service under its live catalogue name, a section with its services. */
+  subjectNames(
+    tenantId: string,
+    engagementIds: readonly string[],
+    feeGroupIds: readonly string[],
+  ): Promise<SubjectNames>;
+}
+
+export interface SubjectNames {
+  readonly engagements: readonly {
+    readonly engagementId: string;
+    readonly partyName: string;
+    /** The catalogue entry, as the client summary keys a service. */
+    readonly entryKey: string;
+    readonly name: string;
+    readonly deptCode: string | null;
+  }[];
+  readonly feeGroups: readonly {
+    readonly feeGroupId: string;
+    readonly partyName: string;
+    readonly title: string;
+    readonly services: readonly string[];
+    readonly deptCodes: readonly string[];
+  }[];
+}
+
+/** The billing schedules (0318) as the sweep reads them; the projection runs
+ *  the sweep's own rule forward (structural: the billing adapter). */
+export interface BillingScheduleSource {
+  subjectsFor(tenantId: string): Promise<readonly BillingSubject[]>;
+}
+
+/** Each of the firm's companies' year and zone (0337). */
+export interface CompanyCalendarSource {
+  companyCalendars(tenantId: string): Promise<CompanyCalendars>;
+}
+
+/**
+ * Billed, received and owed per CLIENT and per what each invoice line was for:
+ * a service (its catalogue entry, so a renewed letter stays one row), a section
+ * (one fee for several services), an advance, or nothing. A line's share of its
+ * invoice's credit notes, money and balance is its share of the invoice total
+ * (pro rata, to four places), as the revenue report's originator view splits it.
+ *
+ * BILLED is issued in [from, to] with tax, less credit notes issued in the
+ * window. RECEIVED is money received in the window (the revenue report's
+ * COLLECTED), and TDS beside it. PENDING is owed at the close
+ * of `asOf`, and OVERDUE the part of it past its due date. Drafts and cancelled
+ * invoices count nowhere. Key Manager and SPOC are the ones in force on `today`.
+ */
+export interface ClientSummaryQuery {
+  readonly from: string;
+  readonly to: string;
+  readonly asOf: string;
+  readonly today: string;
+  readonly partyId?: string | undefined;
+  readonly issuerPartyId?: string | undefined;
+  readonly currency?: string | undefined;
+  /** Only clients this person is the Key Manager of. */
+  readonly keyManagerUserId?: string | undefined;
+  /** Only the rows this person is a SPOC for: the client, and the Dept of the work. */
+  readonly spocUserId?: string | undefined;
+}
+
+export type SummaryKind = "service" | "section" | "advance" | "other";
+
+export interface ClientSummaryRow {
+  /** `subject`: one client's one service (or section...) in one currency;
+   *  `client`: that client's total in the currency; `currency`: the firm's. */
+  readonly scope: "subject" | "client" | "currency";
+  readonly partyId: string | null;
+  readonly partyName: string | null;
+  readonly kind: SummaryKind | null;
+  /** The catalogue entry or the section's id; empty for an advance or other. */
+  readonly subjectKey: string | null;
+  /** The live service's name, or the section's title. */
+  readonly name: string | null;
+  /** A section's services, by name. */
+  readonly services: readonly string[];
+  /** The Dept codes of the work (the live service's module). */
+  readonly deptCodes: readonly string[];
+  readonly currency: string;
+  readonly billed: string;
+  readonly received: string;
+  /** Tax the client deducted on those payments (Q057): settled, not received. */
+  readonly tds: string;
+  readonly pending: string;
+  readonly overdue: string;
+  /** Invoices issued in the window that count here. */
+  readonly invoices: number;
+}
+
+export interface AccountTeams {
+  readonly people: readonly {
+    readonly clientPartyId: string;
+    readonly role: "key_manager" | "spoc";
+    readonly userId: string;
+    readonly name: string;
+    /** A SPOC's Dept; null for a Key Manager. */
+    readonly deptCode: string | null;
+  }[];
+  readonly depts: readonly { readonly code: string; readonly name: string }[];
 }
 
 /**

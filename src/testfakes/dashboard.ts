@@ -14,7 +14,11 @@ import type { MrrByCurrency } from "../domain/dashboard/model";
 import type { MrrGap, Slice } from "../domain/dashboard/model";
 import { AGEING_BUCKETS } from "../domain/dashboard/model";
 import type {
+  AccountTeams,
   BillingCompany,
+  ClientSummaryQuery,
+  ClientSummaryRow,
+  SubjectNames,
   CompanyMonthRow,
   DashboardRepository,
   ManagerMonthRow,
@@ -155,5 +159,28 @@ export class FakeDashboardRepo implements DashboardRepository {
   revenueByPerson(_tenantId: string, q: RevenueQuery): Promise<readonly PersonCurrencyRow[]> {
     this.revenueAsked.push(q);
     return Promise.resolve(this.personRows[q.by].filter((r) => q.currency === undefined || r.currency === q.currency));
+  }
+
+  /** The client summary's rows as SQL would have summed them, and the asks. */
+  summaryRows: ClientSummaryRow[] = [];
+  summaryAsked: ClientSummaryQuery[] = [];
+  teams: AccountTeams = { people: [], depts: [] };
+
+  clientSummary(_tenantId: string, q: ClientSummaryQuery): Promise<readonly ClientSummaryRow[]> {
+    this.summaryAsked.push(q);
+    return Promise.resolve(this.summaryRows);
+  }
+
+  subjects: SubjectNames = { engagements: [], feeGroups: [] };
+
+  subjectNames(): Promise<SubjectNames> {
+    return Promise.resolve(this.subjects);
+  }
+
+  accountTeams(_tenantId: string, clientIds: readonly string[]): Promise<AccountTeams> {
+    return Promise.resolve({
+      people: this.teams.people.filter((p) => clientIds.includes(p.clientPartyId)),
+      depts: this.teams.depts,
+    });
   }
 }
