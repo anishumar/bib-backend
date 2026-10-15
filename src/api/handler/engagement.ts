@@ -1857,6 +1857,35 @@ const recordAcceptanceRoute = createRoute({
   },
 });
 
+const recordAgreedRoute = createRoute({
+  method: "post",
+  path: "/api/v1/engagement-letters/{letterId}/agreed",
+  tags: ["engagement-letters"],
+  summary: "Record a draft the client already agreed to, without sending it",
+  description:
+    "The short letter: the client agreed to these services and fees by email or on a call, " +
+    "so nothing is sent for signature. Needs `acceptance:record`, and the body and evidence " +
+    "rules of `/acceptance` (the client's email uploaded and attached to THIS letter). Only " +
+    "while the letter is a draft. A draft with no terms gets the firm's standard terms. The " +
+    "letter is then signed as `/acceptance` signs one, under `recorded_acceptance`; no " +
+    "envelope is raised and no cover page is needed. A refusal leaves it a draft.",
+  request: {
+    params: z.object({ letterId: z.string().uuid() }),
+    query: CallerDayQuery,
+    body: { content: { "application/json": { schema: RecordAcceptanceRequest } }, required: true },
+  },
+  responses: {
+    200: {
+      description: "Signed as agreed, with the engagements it created",
+      content: { "application/json": { schema: SignedResponse } },
+    },
+    400: errorResponse("A field is missing or impossible, no evidence, or asOf is not today anywhere"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not hold acceptance:record"),
+    404: errorResponse("No such letter at this firm"),
+    409: errorResponse("Not a draft, no services or terms, or the file is not attached to this letter"),
+  },
+});
 
 // ── Mapping ─────────────────────────────────────────────────────────────────
 
@@ -2607,6 +2636,26 @@ export function registerEngagementRoutes(app: OpenAPIHono<AppEnv>, deps: Engagem
     const { letterId } = c.req.valid("param");
     // The recorder is the SESSION's user, never a field in the body.
     const result = await deps.service.recordAcceptance(
+      { tenantId: s.tenantId, letterId, statement: c.req.valid("json"), asOf: c.req.valid("query").asOf },
+      principal?.userId ?? "",
+      s.actor,
+    );
+    const fees = seesFees(principal);
+    return c.json(
+      {
+        letter: toLetterBody(result.letter, fees),
+        engagements: result.engagements.map(toEngagementBody),
+      },
+      200,
+    );
+  });
+
+  app.openapi(recordAgreedRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const principal = c.get("principal");
+    const { letterId } = c.req.valid("param");
+    const result = await deps.service.recordAgreed(
       { tenantId: s.tenantId, letterId, statement: c.req.valid("json"), asOf: c.req.valid("query").asOf },
       principal?.userId ?? "",
       s.actor,

@@ -655,6 +655,10 @@ one DocuSign reports signed is refused (`EnvelopeAlreadySigned`) and left for th
   `proposal.accepted` / `engagement_letter.signed`; the client's name and the note are in the
   erasable row. Both detail reads carry `recordedAcceptance` (who recorded it, the file's title).
 - `smoke.sh` and `demo-seed.sh` record the acceptance on the UTC day (both firms run on UTC).
+- **The short letter (2026-10-15):** `POST /engagement-letters/{id}/agreed` (`recordAgreed`, same
+  permission and body) records a DRAFT the client agreed to by email: no envelope, no cover page, no
+  `engagement_letter.sent`; standard terms put on when it has none; everything that can refuse is
+  asked before `markSent`, so a refusal leaves a draft. Screen: `/engagement-letters/agreed`.
 
 ## A phone is stored in E.164, and PAN / GSTIN are checked for shape (2026-09-30)
 
