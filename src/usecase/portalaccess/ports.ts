@@ -46,6 +46,10 @@ export interface PortalAccessRepository {
    */
   listForClient(tenantId: string, clientPartyId: string): Promise<readonly PortalAccessRecord[]>;
 
+  /** Every grant at the firm in force on `onDay` (half-open), for the roster's
+   *  Clients view. One read, not one per login. */
+  listInForce(tenantId: string, onDay: string): Promise<readonly PortalAccessRecord[]>;
+
   /**
    * The grants this login holds, for resolving a session's scope.
    *

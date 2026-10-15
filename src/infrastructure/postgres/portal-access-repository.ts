@@ -156,6 +156,30 @@ export class PostgresPortalAccessRepository
     );
   }
 
+  async listInForce(tenantId: string, onDay: string): Promise<readonly PortalAccessRecord[]> {
+    return this.records(
+      tenantId,
+      async (db) => db<AccessRecordRow[]>`
+        SELECT pa.id, pa.tenant_id, pa.membership_id, pa.client_party_id,
+               pa.valid_from::text AS valid_from, pa.valid_to::text AS valid_to, pa.granted_by,
+               p.display_name AS client_name,
+               contact.email AS contact_email, contact.display_name AS contact_display_name,
+               EXISTS (
+                 SELECT 1 FROM tenancy.credential cr WHERE cr.user_id = m.user_id
+               ) AS contact_accepted,
+               granter.email AS granted_by_email, granter.display_name AS granted_by_display_name
+          FROM crm.portal_access pa
+          JOIN core.party p          ON p.id = pa.client_party_id AND p.tenant_id = pa.tenant_id
+          JOIN tenancy.membership m  ON m.id = pa.membership_id   AND m.tenant_id = pa.tenant_id
+          JOIN tenancy.user_account contact ON contact.id = m.user_id
+          LEFT JOIN tenancy.user_account granter ON granter.id = pa.granted_by
+         WHERE pa.valid_from <= ${onDay}::date
+           AND (pa.valid_to IS NULL OR pa.valid_to > ${onDay}::date)
+         ORDER BY p.display_name ASC, contact.email ASC
+      `,
+    );
+  }
+
   /** The scope read, and the one on the hot path: it runs for every portal
    *  request once T6.5 exists. No joins — the caller wants ids, and the index
    *  is `(tenant_id, membership_id)`. */

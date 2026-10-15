@@ -70,6 +70,19 @@ export class FakePortalAccessRepo implements PortalAccessRepository {
     );
   }
 
+  listInForce(tenantId: string, onDay: string): Promise<readonly PortalAccessRecord[]> {
+    return Promise.resolve(
+      this.rows
+        .filter(
+          (r) =>
+            r.tenantId === tenantId &&
+            r.validFrom <= onDay &&
+            (r.validTo === null || r.validTo > onDay),
+        )
+        .map((r) => this.record(r)),
+    );
+  }
+
   listGrants(tenantId: string, membershipId: string): Promise<readonly PortalAccess[]> {
     return Promise.resolve(
       this.rows.filter((r) => r.tenantId === tenantId && r.membershipId === membershipId),

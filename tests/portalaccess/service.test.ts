@@ -450,6 +450,32 @@ describe("reading who can see what", () => {
     expect(row?.grantedByEmail).toBeNull();
     expect(row?.clientName).toBe("Cobalt Foods");
   });
+
+  it("firm-wide, holds only the grants in force on the FIRM's day", async () => {
+    // The People screen's Clients view: an ended grant and one starting next
+    // month are both real rows, and neither is somebody who can sign in today.
+    const w = world();
+    const grant = (clientPartyId: string, validFrom: string, validTo: string | null = null) =>
+      w.service.grant(
+        { tenantId: FIRM, membershipId: PORTAL_LOGIN, clientPartyId, validFrom, validTo, grantedBy: PARTNER },
+        SYSTEM_ACTOR,
+      );
+    await grant(COBALT, "2026-01-01", "2026-09-01");
+    await grant(COBALT, "2026-10-01");
+    await grant(KAVERI, "2026-08-01");
+    w.grants.rows.push({
+      id: "00000000-0000-4000-8000-00000000a999",
+      tenantId: "00000000-0000-4000-8000-00000000f002",
+      membershipId: PORTAL_LOGIN,
+      clientPartyId: COBALT,
+      validFrom: "2026-01-01",
+      validTo: null,
+      grantedBy: PARTNER,
+    });
+
+    const live = await w.service.listInForce(FIRM);
+    expect(live.map((r) => r.clientName)).toEqual(["Kaveri Foods"]);
+  });
 });
 
 // ── Q064: a group's contact sees its sister companies ───────────────────────
