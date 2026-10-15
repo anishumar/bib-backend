@@ -949,6 +949,7 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("GET", "/api/v1/dashboard/revenue/by-company"), "party:read" as const],
   [routeKey("GET", "/api/v1/dashboard/revenue/by-manager"), "party:read" as const],
   [routeKey("GET", "/api/v1/dashboard/revenue/report"), "party:read" as const],
+  [routeKey("GET", "/api/v1/dashboard/client-summary"), "party:read" as const],
   [routeKey("GET", "/api/v1/engagement-letters/{letterId}/originator"), "party:read" as const],
   [routeKey("PUT", "/api/v1/engagement-letters/{letterId}/originator"), "tenant:admin" as const],
 

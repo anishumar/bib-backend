@@ -2487,6 +2487,21 @@ CRM, HubSpot), Clio an originating attorney per matter, Karbon and TaxDome a cli
   note, a fee-group line through its bill, drafts/cancelled/another firm, the store's defaults and
   wall). Walk: `bdr-walk.mjs q049` (29) on `bdr-rev-fixture.mjs`.
 
+## Client summary — billed, received and pending per client and service (2026-10-15, no migration)
+
+`GET /api/v1/dashboard/client-summary` (`from`, `to`, `partyId`, `issuerPartyId`, `currency`,
+`keyManagerUserId`, `spocUserId`; behind the fee axis), the Invoices page's "Client summary" tab.
+One row per client × what each invoice line was for: a **service** (its catalogue ENTRY under its
+live name, so renewals stay one row), a **section** (the line's bill's fee group, or the fee group
+of the service it names), an **advance** (an unmapped part of a 0363 advance, a letter-wide
+advance) or **other** (a hand line with no service). Each line takes its share of the invoice TOTAL
+(round-off included) of credit notes, payments, TDS and balance, as the originator report splits.
+BILLED is with tax (a collections view, so billed − received − TDS − credits = pending);
+RECEIVED is the revenue report's COLLECTED; PENDING/OVERDUE from `crm.receivable_ageing_on`.
+Key Manager and SPOCs are the ones in force today; a SPOC matches a row by the live service's
+`module` (Dept), as the billing desk reads it. Tests: `tests/dashboard/client-summary.test.ts`
+(3), `client-summary.integration.test.ts` (10). Walks: `cs-walk.mjs` (32), `cs-fy-walk.mjs` (6).
+
 ## Release hardening (S7, 2026-10-05): what changed under the gates
 
 `release/2026-10-final` = `release/2026-10-05` + S1-S5, then hardening only (feature freeze until

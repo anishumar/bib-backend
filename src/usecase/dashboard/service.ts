@@ -19,12 +19,14 @@ import { defaultCurrencyFor } from "../../domain/document/model";
 import { dayInZone } from "../../domain/scheduler/zone";
 import type { Clock } from "../../platform/clock";
 import type {
+  ClientSummaryRow,
   DashboardRepository,
   FirmTimeZone,
   FiscalYearSource,
   ManagerMonthRow,
   PersonCurrencyRow,
   RateWarmer,
+  SummaryKind,
 } from "./ports";
 
 export interface Deps {
@@ -103,6 +105,58 @@ export interface RevenueReport {
   /** By name, nobody last, then by currency. */
   readonly rows: readonly RevenueRow[];
 }
+
+/** One currency's figures (`ClientSummaryQuery` defines them), as decimal strings. */
+export interface SummaryFigures {
+  readonly currency: string;
+  readonly billed: string;
+  readonly received: string;
+  readonly tds: string;
+  readonly pending: string;
+  readonly overdue: string;
+  readonly invoices: number;
+}
+
+export interface SummaryPerson {
+  readonly userId: string;
+  readonly name: string;
+}
+
+/** One client's one service (or section, advance, other) in one currency. */
+export interface ClientSummaryLine extends SummaryFigures {
+  readonly kind: SummaryKind;
+  /** The catalogue entry or the section's id; empty for an advance or other. */
+  readonly key: string;
+  readonly name: string | null;
+  /** A section's services. */
+  readonly services: readonly string[];
+  readonly depts: readonly { readonly code: string; readonly name: string }[];
+  /** The client's SPOCs for the Depts of this work. */
+  readonly spocs: readonly (SummaryPerson & { readonly deptCode: string })[];
+}
+
+export interface ClientSummaryClient {
+  readonly partyId: string;
+  readonly name: string;
+  readonly keyManager: SummaryPerson | null;
+  /** One per currency the client's lines are in. */
+  readonly totals: readonly SummaryFigures[];
+  readonly lines: readonly ClientSummaryLine[];
+}
+
+/** What `clientSummary` answers. */
+export interface ClientSummary {
+  readonly from: string;
+  readonly to: string;
+  readonly asOf: string;
+  readonly financialYearStartMonth: number | null;
+  /** The firm's whole, one per currency: every client's totals add up to it. */
+  readonly currencies: readonly SummaryFigures[];
+  /** By name. */
+  readonly clients: readonly ClientSummaryClient[];
+}
+
+const KIND_ORDER: Readonly<Record<SummaryKind, number>> = { service: 0, section: 1, advance: 2, other: 3 };
 
 /** How far back a report may reach in one read: three years. */
 export const REVENUE_REPORT_MAX_DAYS = 3 * 366;
@@ -381,6 +435,107 @@ export class DashboardService {
     return { by: q.by, from, to, asOf, financialYearStartMonth, currencies, rows: out };
   }
 
+  /**
+   * THE CLIENT SUMMARY: per client and per service, what was billed, what came
+   * in and what is still owed, beside who looks after the client (its Key
+   * Manager) and who the client rings for that work (the SPOC of its Dept).
+   * The period is the revenue report's: this financial year to date unless
+   * given. The adding up is SQL's; this puts names on it and orders it.
+   */
+  async clientSummary(
+    tenantId: string,
+    q: {
+      readonly from?: string | undefined;
+      readonly to?: string | undefined;
+      readonly partyId?: string | undefined;
+      readonly issuerPartyId?: string | undefined;
+      readonly currency?: string | undefined;
+      readonly keyManagerUserId?: string | undefined;
+      readonly spocUserId?: string | undefined;
+    },
+  ): Promise<ClientSummary> {
+    const today = await this.firmDay(tenantId);
+    const financialYearStartMonth = await this.deps.fiscalYears.fiscalYearStartMonth(tenantId);
+    const to = q.to ?? today;
+    const from = q.from ?? yearToDateFrom(to, financialYearStartMonth);
+    const asOf = to < today ? to : today;
+    const rows = await this.deps.dashboards.clientSummary(tenantId, {
+      from,
+      to,
+      asOf,
+      today,
+      partyId: q.partyId,
+      issuerPartyId: q.issuerPartyId,
+      currency: q.currency,
+      keyManagerUserId: q.keyManagerUserId,
+      spocUserId: q.spocUserId,
+    });
+    const clientIds = [...new Set(rows.flatMap((r) => (r.partyId === null ? [] : [r.partyId])))];
+    const teams = await this.deps.dashboards.accountTeams(tenantId, clientIds, today);
+    const deptName = new Map(teams.depts.map((d) => [d.code, d.name]));
+    const keyManagers = new Map<string, SummaryPerson>();
+    for (const p of teams.people) {
+      // Newest first per client: the one in force if two overlap a changeover.
+      if (p.role === "key_manager" && !keyManagers.has(p.clientPartyId)) {
+        keyManagers.set(p.clientPartyId, { userId: p.userId, name: p.name });
+      }
+    }
+
+    const clients = new Map<string, { name: string; totals: SummaryFigures[]; lines: ClientSummaryLine[] }>();
+    const clientOf = (r: ClientSummaryRow) => {
+      const id = r.partyId ?? "";
+      let c = clients.get(id);
+      if (c === undefined) {
+        c = { name: r.partyName ?? "", totals: [], lines: [] };
+        clients.set(id, c);
+      }
+      return c;
+    };
+    const currencies: SummaryFigures[] = [];
+    for (const r of rows) {
+      if (r.scope === "currency") currencies.push(figuresOf(r));
+      else if (r.scope === "client") clientOf(r).totals.push(figuresOf(r));
+      else if (r.kind !== null) {
+        const codes = [...r.deptCodes].sort();
+        clientOf(r).lines.push({
+          ...figuresOf(r),
+          kind: r.kind,
+          key: r.subjectKey ?? "",
+          name: r.name,
+          services: r.services,
+          depts: codes.map((code) => ({ code, name: deptName.get(code) ?? code })),
+          spocs: teams.people
+            .filter(
+              (p) =>
+                p.role === "spoc" && p.clientPartyId === r.partyId && p.deptCode !== null && codes.includes(p.deptCode),
+            )
+            .map((p) => ({ userId: p.userId, name: p.name, deptCode: p.deptCode ?? "" })),
+        });
+      }
+    }
+    const byName = (a: string | null, b: string | null) =>
+      (a ?? "").localeCompare(b ?? "", "en", { sensitivity: "base" });
+    const byCurrency = (a: SummaryFigures, b: SummaryFigures) => a.currency.localeCompare(b.currency);
+    return {
+      from,
+      to,
+      asOf,
+      financialYearStartMonth,
+      currencies: currencies.sort(byCurrency),
+      clients: [...clients.entries()]
+        .map(([partyId, c]) => ({
+          partyId,
+          name: c.name,
+          keyManager: keyManagers.get(partyId) ?? null,
+          totals: c.totals.sort(byCurrency),
+          lines: c.lines.sort(
+            (a, b) => KIND_ORDER[a.kind] - KIND_ORDER[b.kind] || byName(a.name, b.name) || byCurrency(a, b),
+          ),
+        }))
+        .sort((a, b) => byName(a.name, b.name)),
+    };
+  }
+
   /** The last `months` months on the FIRM's calendar (T6.14). */
   private async window(tenantId: string, months: number) {
     return billingWindow(await this.firmDay(tenantId), months);
@@ -442,6 +597,18 @@ export class DashboardService {
 
 /** The first day of the financial year `day` falls in (the firm's own start
  *  month), or, with none set, the first of the month eleven months before. */
+function figuresOf(r: ClientSummaryRow): SummaryFigures {
+  return {
+    currency: r.currency,
+    billed: r.billed,
+    received: r.received,
+    tds: r.tds,
+    pending: r.pending,
+    overdue: r.overdue,
+    invoices: r.invoices,
+  };
+}
+
 export function yearToDateFrom(day: string, startMonth: number | null): string {
   const [y = 0, m = 1] = day.split("-").map(Number);
   if (startMonth === null) {
