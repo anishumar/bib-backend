@@ -31,6 +31,7 @@ import type {
   Proposal,
   LineBillingTiming,
   ProposalDecision,
+  ProposalFeeGroup,
   ProposalLine,
   ProposalStatus,
 } from "../../domain/proposal/model";
@@ -117,6 +118,12 @@ import {
   ProposalNotCopyable,
   ProposalLeadDeleted,
   proposalDeletionRefusal,
+  ProposalFeeGroupEmpty,
+  ProposalFeeGroupNotEmpty,
+  ProposalFeeGroupNotFound,
+  ProposalFeeGroupTitleRequired,
+  ProposalGroupedLinePriced,
+  ProposalLineNotPriced,
 } from "../../domain/proposal/errors";
 import { zoneOfCompany } from "../../domain/calendar/model";
 import { dayInZone, isCallersToday } from "../../domain/scheduler/zone";
@@ -133,6 +140,7 @@ import type {
   PartyStanding,
   PolicyDirectory,
   ProposalFilters,
+  ProposalLinePricing,
   ProposalLinks,
   ProposalMailer,
   ProposalSenders,
@@ -389,6 +397,44 @@ export interface AddLineInput {
    *  the proposal's main currency. Any currency but the main one needs its rate
    *  on the proposal first. */
   readonly currency?: string | undefined;
+  /** The section whose fee pays for it (0394). It then takes no price,
+   *  discount or note of its own, and is in the section's currency. */
+  readonly feeGroupId?: string | undefined;
+}
+
+/** A section's terms as a caller sends them (0394). */
+export interface FeeGroupInput {
+  readonly title: string;
+  readonly billingFrequency: string;
+  /** Per billing period. */
+  readonly amount: string;
+  /** The main currency when absent, else one the proposal holds a rate for. */
+  readonly currency?: string | undefined;
+  readonly billingTiming?: string | undefined;
+  readonly billingOn?: string | undefined;
+  readonly paymentTerms?: string | undefined;
+}
+
+/** An edit of a section: absent keeps a field, null clears the timing or the
+ *  payment terms. A new currency moves its services with it. */
+export interface FeeGroupChange {
+  readonly title?: string | undefined;
+  readonly billingFrequency?: string | undefined;
+  readonly amount?: string | undefined;
+  readonly currency?: string | undefined;
+  readonly billingTiming?: string | null | undefined;
+  readonly billingOn?: string | null | undefined;
+  readonly paymentTerms?: string | null | undefined;
+}
+
+/** Into a section (`feeGroupId`) or out of one, with a price or a reason. */
+export interface LinePricingInput {
+  readonly tenantId: string;
+  readonly proposalId: string;
+  readonly lineId: string;
+  readonly feeGroupId: string | null;
+  readonly unitAmount?: string | undefined;
+  readonly pricingNote?: string | undefined;
 }
 
 /**
@@ -555,6 +601,21 @@ export class ProposalService {
       await this.deps.proposals.setRate(tenantId, copy.id, rate);
     }
 
+    // The sections first (0394), so each line can go back into its own.
+    const sections = new Map<string, string>();
+    for (const g of await this.deps.proposals.listFeeGroups(tenantId, source.id)) {
+      const added = await this.addFeeGroup(tenantId, copy.id, {
+        title: g.title,
+        billingFrequency: g.billingFrequency,
+        amount: g.amount,
+        currency: g.currency,
+        ...(g.billingTiming === null ? {} : { billingTiming: g.billingTiming }),
+        ...(g.billingOn === null ? {} : { billingOn: g.billingOn }),
+        ...(g.paymentTerms === null ? {} : { paymentTerms: g.paymentTerms }),
+      });
+      sections.set(g.id, added.id);
+    }
+
     let linesCopied = 0;
     const skipped: SkippedCopyLine[] = [];
     // IN ORDER, one at a time: `addLine` takes each line's position from what
@@ -574,6 +635,9 @@ export class ProposalService {
             discountPercent: line.discountPercent,
             ...(line.jurisdiction === null ? {} : { jurisdiction: line.jurisdiction }),
             ...(line.billingFrequency === null ? {} : { billingFrequency: line.billingFrequency }),
+            ...(line.billingTiming === null ? {} : { billingTiming: line.billingTiming }),
+            ...(line.billingOn === null ? {} : { billingOn: line.billingOn }),
+            ...(line.feeGroupId === null ? {} : { feeGroupId: sections.get(line.feeGroupId) }),
             ...(line.scopeOverride === null ? {} : { scopeOverride: line.scopeOverride }),
             ...(line.clientObligationsOverride === null
               ? {}
@@ -818,7 +882,10 @@ export class ProposalService {
       if (!isExchangeRate(fxRate) || Number(fxRate) <= 0) throw new InvalidFxRate(fxRate);
       if (currency !== proposal.currency) {
         const live = await this.deps.proposals.listLines(input.tenantId, input.proposalId);
-        const inOld = live.filter((l) => l.currency === proposal.currency).length;
+        const groups = await this.deps.proposals.listFeeGroups(input.tenantId, input.proposalId);
+        const inOld =
+          live.filter((l) => l.currency === proposal.currency).length +
+          groups.filter((g) => g.currency === proposal.currency).length;
         if (inOld > 0) throw new CurrencyLockedByLines(inOld, proposal.currency);
       }
       change.currency = currency;
@@ -1015,15 +1082,26 @@ export class ProposalService {
     // THE LINE'S CURRENCY (0344): the caller's; else, when the fee comes from
     // the list price, the list price's currency if the proposal holds it; else
     // the main currency. Whatever it is, the proposal must hold its rate.
+    // IN A SECTION (0394): the section's fee pays for it, so it takes no
+    // price, discount or note, and the section's currency.
+    const group =
+      input.feeGroupId === undefined
+        ? null
+        : await this.liveFeeGroupOrThrow(input.tenantId, proposal.id, input.feeGroupId);
+    if (group !== null && pricedAtAll(input.unitAmount, pricingNote, input.discountPercent)) {
+      throw new ProposalGroupedLinePriced();
+    }
     let unitAmount = input.unitAmount ?? null;
     const listPrice = readServiceBody(pinned.body).listPrice;
-    const fromList = unitAmount === null && pricingNote === null;
+    const fromList = group === null && unitAmount === null && pricingNote === null;
     const currency =
-      input.currency !== undefined
-        ? this.lineCurrency(input.currency)
-        : fromList && listPrice !== null && rateFor(proposal, listPrice.currency) !== null
-          ? listPrice.currency
-          : proposal.currency;
+      group !== null
+        ? group.currency
+        : input.currency !== undefined
+          ? this.lineCurrency(input.currency)
+          : fromList && listPrice !== null && rateFor(proposal, listPrice.currency) !== null
+            ? listPrice.currency
+            : proposal.currency;
     if (rateFor(proposal, currency) === null) throw new CurrencyNeedsARate(currency);
     if (fromList) {
       const service = readServiceBody(pinned.body);
@@ -1032,7 +1110,7 @@ export class ProposalService {
       }
       unitAmount = listPrice.amount;
     }
-    checkPricing(unitAmount, pricingNote, input.discountPercent);
+    if (group === null) checkPricing(unitAmount, pricingNote, input.discountPercent);
 
     const jurisdiction = this.lineJurisdiction(input.jurisdiction);
     const billingFrequency = this.statedBillingFrequency(input.billingFrequency);
@@ -1041,7 +1119,8 @@ export class ProposalService {
 
     // A new line is a discount raised from nothing: past the limit after a
     // sign-off, the sign-off no longer covers the draft (T6.18).
-    const lapse = await this.approvalLapses(proposal, "0", input.discountPercent);
+    const discountPercent = group === null ? input.discountPercent : "0";
+    const lapse = await this.approvalLapses(proposal, "0", discountPercent);
 
     const line = await this.deps.proposals.addLine({
       id: this.deps.ids.newId(),
@@ -1053,7 +1132,7 @@ export class ProposalService {
       quantity: input.quantity,
       unitAmount,
       currency,
-      discountPercent: input.discountPercent,
+      discountPercent,
       jurisdiction,
       // DEFAULTED FROM THE PIN, ONCE, AND STORED. The catalogue says how often
       // the WORK comes round; this says how often the client is INVOICED, and
@@ -1072,6 +1151,7 @@ export class ProposalService {
       exclusionsOverride: blankToNull(input.exclusionsOverride),
       oopEstimate,
       pricingNote,
+      feeGroupId: group?.id ?? null,
     }, lapse.lapses);
     if (lapse.lapses) await this.recordLapse(proposal, line, lapse.limit, actor);
     return line;
@@ -1099,6 +1179,15 @@ export class ProposalService {
     const lines = await this.deps.proposals.listLines(input.tenantId, input.proposalId);
     const current = lines.find((l) => l.id === input.lineId);
     if (current === undefined) throw new LineNotFound(input.lineId);
+    // In a section (0394) the money is the section's: only "no price" passes.
+    const grouped = current.feeGroupId !== null;
+    if (
+      grouped &&
+      (pricedAtAll(input.unitAmount ?? undefined, blankToNull(input.pricingNote ?? undefined), input.discountPercent ?? "0") ||
+        (input.currency !== undefined && this.lineCurrency(input.currency) !== current.currency))
+    ) {
+      throw new ProposalGroupedLinePriced();
+    }
 
     let description = current.description;
     if (input.description !== undefined) {
@@ -1115,7 +1204,7 @@ export class ProposalService {
     const pricingNote =
       input.pricingNote === undefined ? current.pricingNote : blankToNull(input.pricingNote ?? undefined);
     const discountPercent = input.discountPercent ?? current.discountPercent;
-    checkPricing(unitAmount, pricingNote, discountPercent);
+    if (!grouped) checkPricing(unitAmount, pricingNote, discountPercent);
 
     const jurisdiction =
       input.jurisdiction === undefined
@@ -1258,8 +1347,10 @@ export class ProposalService {
     const proposal = await this.draftOrThrow(tenantId, proposalId);
     const currency = this.lineCurrency(raw);
     if (currency === proposal.currency) throw new RateIsMainCurrency(currency);
-    const using = (await this.deps.proposals.listLines(tenantId, proposalId)).filter((l) => l.currency === currency);
-    if (using.length > 0) throw new RateInUse(currency, using.length);
+    const using =
+      (await this.deps.proposals.listLines(tenantId, proposalId)).filter((l) => l.currency === currency).length +
+      (await this.deps.proposals.listFeeGroups(tenantId, proposalId)).filter((g) => g.currency === currency).length;
+    if (using > 0) throw new RateInUse(currency, using);
     if (await this.deps.proposals.removeRate(tenantId, proposalId, currency)) {
       await this.deps.events.recordEvent({
         tenantId,
@@ -1309,6 +1400,129 @@ export class ProposalService {
     const lines = await this.deps.proposals.listLines(tenantId, proposalId);
     if (!lines.some((l) => l.id === lineId)) throw new LineNotFound(lineId);
     await this.deps.proposals.removeLine(tenantId, proposalId, lineId);
+  }
+
+  // ── One fee for several services (0394) ─────────────────────────────────
+  //
+  // A section of the quote and the one fee it charges, on a draft only. No
+  // ledger event, as for a line: drafting a document is not a transition.
+
+  async addFeeGroup(tenantId: string, proposalId: string, input: FeeGroupInput): Promise<ProposalFeeGroup> {
+    const proposal = await this.draftOrThrow(tenantId, proposalId);
+    const terms = feeGroupTerms(input.title, input.billingFrequency, input.amount);
+    const currency = input.currency === undefined ? proposal.currency : this.lineCurrency(input.currency);
+    if (rateFor(proposal, currency) === null) throw new CurrencyNeedsARate(currency);
+    const added = await this.deps.proposals.addFeeGroup({
+      id: this.deps.ids.newId(),
+      tenantId,
+      proposalId: proposal.id,
+      currency,
+      title: terms.title,
+      billingFrequency: terms.billingFrequency,
+      ...lineTiming(terms.billingFrequency, input.billingTiming, input.billingOn),
+      amount: terms.amount,
+      paymentTerms: blankToNull(input.paymentTerms),
+    });
+    if (added === null) {
+      await this.draftOrThrow(tenantId, proposalId);
+      throw new ProposalNotFound(proposalId);
+    }
+    return added;
+  }
+
+  async editFeeGroup(
+    tenantId: string,
+    proposalId: string,
+    groupId: string,
+    change: FeeGroupChange,
+  ): Promise<ProposalFeeGroup> {
+    const proposal = await this.draftOrThrow(tenantId, proposalId);
+    const current = await this.liveFeeGroupOrThrow(tenantId, proposalId, groupId);
+    const currency = change.currency === undefined ? current.currency : this.lineCurrency(change.currency);
+    if (currency !== current.currency && rateFor(proposal, currency) === null) {
+      throw new CurrencyNeedsARate(currency);
+    }
+    const terms = feeGroupTerms(
+      change.title ?? current.title,
+      change.billingFrequency ?? current.billingFrequency,
+      change.amount ?? current.amount,
+    );
+    const timingSent = change.billingTiming !== undefined || change.billingOn !== undefined;
+    const timing = timingSent
+      ? lineTiming(terms.billingFrequency, change.billingTiming, change.billingOn)
+      : lineTiming(terms.billingFrequency, current.billingTiming, current.billingOn, true);
+    const edited = await this.deps.proposals.editFeeGroup(tenantId, proposalId, groupId, {
+      title: terms.title,
+      currency,
+      billingFrequency: terms.billingFrequency,
+      ...timing,
+      amount: terms.amount,
+      paymentTerms:
+        change.paymentTerms === undefined ? current.paymentTerms : blankToNull(change.paymentTerms ?? undefined),
+    });
+    if (edited === null) {
+      await this.draftOrThrow(tenantId, proposalId);
+      throw new ProposalFeeGroupNotFound(groupId);
+    }
+    return edited;
+  }
+
+  /** Refused while it still pays for a service, which would be left with no
+   *  price; the trigger in 0394 refuses it too. */
+  async removeFeeGroup(tenantId: string, proposalId: string, groupId: string): Promise<void> {
+    await this.draftOrThrow(tenantId, proposalId);
+    const group = await this.liveFeeGroupOrThrow(tenantId, proposalId, groupId);
+    const covered = (await this.deps.proposals.listLines(tenantId, proposalId)).filter(
+      (l) => l.feeGroupId === groupId,
+    ).length;
+    if (covered > 0) throw new ProposalFeeGroupNotEmpty(group.title, covered);
+    if (!(await this.deps.proposals.removeFeeGroup(tenantId, proposalId, groupId))) {
+      await this.draftOrThrow(tenantId, proposalId);
+      throw new ProposalFeeGroupNotFound(groupId);
+    }
+  }
+
+  /**
+   * Move a line into a section, or out of one with a price or a reason. Into
+   * one it gives up its price, discount and note; out of one it keeps the
+   * section's currency and takes no discount (set one by editing the line,
+   * which judges it against the firm's limit).
+   */
+  async setLinePricing(input: LinePricingInput): Promise<ProposalLine> {
+    await this.draftOrThrow(input.tenantId, input.proposalId);
+    const line = (await this.deps.proposals.listLines(input.tenantId, input.proposalId)).find(
+      (l) => l.id === input.lineId,
+    );
+    if (line === undefined) throw new LineNotFound(input.lineId);
+    const pricingNote = blankToNull(input.pricingNote);
+    let pricing: ProposalLinePricing;
+    if (input.feeGroupId !== null) {
+      const group = await this.liveFeeGroupOrThrow(input.tenantId, input.proposalId, input.feeGroupId);
+      if (pricedAtAll(input.unitAmount, pricingNote, "0")) throw new ProposalGroupedLinePriced();
+      pricing = { feeGroupId: group.id, currency: group.currency, unitAmount: null, discountPercent: "0", pricingNote: null };
+    } else {
+      const unitAmount = input.unitAmount ?? null;
+      if (unitAmount === null && pricingNote === null) throw new ProposalLineNotPriced(line.description);
+      checkPricing(unitAmount, pricingNote, "0");
+      pricing = { feeGroupId: null, currency: line.currency, unitAmount, discountPercent: "0", pricingNote };
+    }
+    const updated = await this.deps.proposals.setLinePricing(input.tenantId, input.proposalId, line.id, pricing);
+    if (updated === null) {
+      await this.draftOrThrow(input.tenantId, input.proposalId);
+      throw new LineNotFound(input.lineId);
+    }
+    return updated;
+  }
+
+  /** A live section on THIS proposal, or a refusal naming the id. */
+  private async liveFeeGroupOrThrow(
+    tenantId: string,
+    proposalId: string,
+    groupId: string,
+  ): Promise<ProposalFeeGroup> {
+    const group = (await this.deps.proposals.listFeeGroups(tenantId, proposalId)).find((g) => g.id === groupId);
+    if (group === undefined) throw new ProposalFeeGroupNotFound(groupId);
+    return group;
   }
 
   async describe(tenantId: string, proposalId: string): Promise<ProposalView> {
@@ -1420,10 +1634,18 @@ export class ProposalService {
   async findQuote(
     tenantId: string,
     proposalId: string,
-  ): Promise<{ readonly proposal: Proposal; readonly lines: readonly ProposalLine[] } | null> {
+  ): Promise<{
+    readonly proposal: Proposal;
+    readonly lines: readonly ProposalLine[];
+    readonly feeGroups: readonly ProposalFeeGroup[];
+  } | null> {
     const record = await this.deps.proposals.describe(tenantId, proposalId);
     if (record === null) return null;
-    return { proposal: record.proposal, lines: record.lines.map((l) => l.line) };
+    return {
+      proposal: record.proposal,
+      lines: record.lines.map((l) => l.line),
+      feeGroups: record.feeGroups.map((g) => g.group),
+    };
   }
 
   /**
@@ -1500,6 +1722,9 @@ export class ProposalService {
     const request = email === undefined ? null : this.checkEmail(email);
     const lines = await this.deps.proposals.listLines(tenantId, proposalId);
     if (lines.length === 0) throw new EmptyProposal();
+    for (const group of await this.deps.proposals.listFeeGroups(tenantId, proposalId)) {
+      if (!lines.some((l) => l.feeGroupId === group.id)) throw new ProposalFeeGroupEmpty(group.title);
+    }
 
     if (proposal.discountApprovedAt === null) {
       const limit = await this.deps.policies.maxDiscountPercent(tenantId);
@@ -2195,6 +2420,14 @@ export class ProposalService {
 function planOf(record: ProposalRecord): ProposalPlan {
   return planProposal({
     depts: record.depts,
+    feeGroups: record.feeGroups.map((g) => ({
+      id: g.group.id,
+      title: g.group.title,
+      amount: g.group.amount,
+      currency: g.group.currency,
+      billingFrequency: g.group.billingFrequency,
+      paymentTerms: g.group.paymentTerms,
+    })),
     lines: record.lines.map((l) => ({
       id: l.line.id,
       position: l.line.position,
@@ -2208,6 +2441,7 @@ function planOf(record: ProposalRecord): ProposalPlan {
       currency: l.line.currency,
       pricingNote: l.line.pricingNote,
       oopEstimate: l.line.oopEstimate,
+      feeGroupId: l.line.feeGroupId,
     })),
   });
 }
@@ -2239,6 +2473,26 @@ function checkPricing(
   if (unitAmount === null && Number(discountPercent) !== 0) {
     throw new UnpricedLineHasDiscount(discountPercent);
   }
+}
+
+/** Whether a caller sent any money for a line: a price, a note or a discount. */
+function pricedAtAll(unitAmount: string | undefined, pricingNote: string | null, discountPercent: string): boolean {
+  return unitAmount !== undefined || pricingNote !== null || Number(discountPercent) !== 0;
+}
+
+/** The three things a section cannot exist without, each refused by name. */
+function feeGroupTerms(
+  title: string,
+  billingFrequency: string,
+  amount: string,
+): { title: string; billingFrequency: BillingFrequency; amount: string } {
+  const trimmed = title.trim();
+  if (trimmed === "") throw new ProposalFeeGroupTitleRequired();
+  if (!isBillingFrequency(billingFrequency)) {
+    throw new InvalidLineBillingFrequency(billingFrequency, BILLING_FREQUENCIES);
+  }
+  if (!isAmount(amount)) throw new InvalidUnitAmount(amount);
+  return { title: trimmed, billingFrequency, amount };
 }
 
 function blankToNull(value: string | undefined): string | null {

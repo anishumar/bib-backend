@@ -279,6 +279,7 @@ describe("the money adds up, in numeric", () => {
         exclusionsOverride: l.line.exclusionsOverride,
         oopEstimate: l.line.oopEstimate,
         pricingNote: l.line.pricingNote,
+        feeGroupId: l.line.feeGroupId,
       });
     }
     const fromFake = await fake.describe(tenantA, id);
@@ -462,6 +463,7 @@ describe("a line with no price — what the total MEANS then (G1.6)", () => {
         exclusionsOverride: l.line.exclusionsOverride,
         oopEstimate: l.line.oopEstimate,
         pricingNote: l.line.pricingNote,
+        feeGroupId: l.line.feeGroupId,
       });
     }
     const fromFake = await fake.describe(tenantA, id);

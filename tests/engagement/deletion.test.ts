@@ -91,6 +91,7 @@ function quote(over: Partial<QuotedProposal["proposal"]> = {}): QuotedProposal {
       ...over,
     },
     lines: [],
+    feeGroups: [],
   };
 }
 

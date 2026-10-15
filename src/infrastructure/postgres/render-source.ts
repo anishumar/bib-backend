@@ -348,7 +348,7 @@ export class PostgresRenderSource implements RenderSource {
         SELECT l.id, l.position, l.description, l.billing_frequency, l.pricing_note,
                l.scope_override, l.client_obligations_override, l.volume_limits_override,
                l.exclusions_override, l.oop_estimate_min::text, l.oop_estimate_max::text,
-               l.oop_currency, l.currency,
+               l.oop_currency, l.currency, l.fee_group_id,
                CASE WHEN l.unit_amount IS NULL THEN NULL
                     ELSE round(l.quantity * l.unit_amount * (1 - l.discount_percent / 100), 2)::text
                END AS line_total,
@@ -369,16 +369,24 @@ export class PostgresRenderSource implements RenderSource {
       const byFrequency = await db<
         { currency: string; frequency: string | null; net: string | null; unpriced: number }[]
       >`
-        SELECT l.currency, l.billing_frequency AS frequency, sum(a.net)::text AS net,
-               (count(*) FILTER (WHERE l.unit_amount IS NULL))::int AS unpriced
-        FROM crm.proposal_line l
-        JOIN crm.proposal_line_amount a ON a.id = l.id
-        WHERE l.proposal_id = ${proposalId} AND l.removed_at IS NULL
-        GROUP BY l.currency, l.billing_frequency
-        ORDER BY (l.currency = ${row.currency}) DESC, l.currency,
+        SELECT i.currency, i.billing_frequency AS frequency, sum(i.net)::text AS net,
+               (count(*) FILTER (WHERE i.unpriced))::int AS unpriced
+        FROM crm.proposal_fee_item i
+        WHERE i.proposal_id = ${proposalId}
+        GROUP BY i.currency, i.billing_frequency
+        ORDER BY (i.currency = ${row.currency}) DESC, i.currency,
                  coalesce(array_position(
                    ARRAY['monthly', 'quarterly', 'annually', 'one_time', 'custom'],
-                   l.billing_frequency::text), 99)
+                   i.billing_frequency::text), 99)
+      `;
+
+      const feeGroups = await db<
+        { id: string; title: string; amount: string; currency: string; billing_frequency: BillingFrequency; payment_terms: string | null }[]
+      >`
+        SELECT id, title, amount::text, currency, billing_frequency, payment_terms
+        FROM crm.proposal_fee_group
+        WHERE proposal_id = ${proposalId} AND removed_at IS NULL
+        ORDER BY position
       `;
 
       // The firm's Depts, retired ones included: a quote pinned to a Dept the
@@ -396,6 +404,14 @@ export class PostgresRenderSource implements RenderSource {
 
       const plan = planProposal({
         depts: depts.map((d) => ({ code: d.code, name: d.name, sortOrder: d.sort_order })),
+        feeGroups: feeGroups.map((g) => ({
+          id: g.id,
+          title: g.title,
+          amount: g.amount,
+          currency: g.currency,
+          billingFrequency: g.billing_frequency,
+          paymentTerms: g.payment_terms,
+        })),
         lines: lines.map((l) => {
           const service = readServiceBody(l.service_body);
           return {
@@ -426,6 +442,7 @@ export class PostgresRenderSource implements RenderSource {
               l.oop_estimate_min === null || l.oop_estimate_max === null || l.oop_currency === null
                 ? null
                 : { min: l.oop_estimate_min, max: l.oop_estimate_max, currency: l.oop_currency },
+            feeGroupId: l.fee_group_id,
           };
         }),
       });
@@ -1822,6 +1839,8 @@ interface ProposalLineRow {
   /** The company the line is for, by name, or null. */
   subject: string | null;
   service_body: Record<string, unknown>;
+  /** The section whose fee pays for it (0394). */
+  fee_group_id: string | null;
 }
 
 /** The firm's own words for how often a fee falls due, as its proposal writes
@@ -1838,6 +1857,15 @@ const PROPOSAL_FREQUENCY: Readonly<Record<string, string>> = {
  *  (0344). An unpriced line prints its REASON, never a blank or a zero
  *  (G1.6); a priced line keeps its note. */
 function proposalFee(item: ProposalPlan["sections"][number]["items"][number]): string {
+  // One fee for several services (0394): the section's, on its first service.
+  if (item.fee.kind === "section") {
+    if (!item.fee.isAnchor) return `Included in ${item.fee.anchorCode}`;
+    const terms = item.fee.paymentTerms === null ? "" : `, ${item.fee.paymentTerms}`;
+    return (
+      `${documentMoney(item.fee.amount, item.fee.currency)} ` +
+      `${PROPOSAL_FREQUENCY[item.fee.billingFrequency] ?? ""} (${item.fee.title}${terms})`
+    );
+  }
   if (item.net === null) return item.pricingNote ?? "To be agreed";
   const frequency =
     item.billingFrequency === null ? "" : ` ${PROPOSAL_FREQUENCY[item.billingFrequency] ?? ""}`;
@@ -1895,6 +1923,13 @@ function proposalSectionsFlow(plan: ProposalPlan): Flow[] {
   return out;
 }
 
+/** A row's Frequency: the section's on the service carrying its fee (0394),
+ *  else the service's own. */
+function summaryFrequency(i: ProposalPlan["sections"][number]["items"][number]): string {
+  const frequency = i.fee.kind === "section" && i.fee.isAnchor ? i.fee.billingFrequency : i.billingFrequency;
+  return frequency === null ? "Not stated" : (PROPOSAL_FREQUENCY[frequency] ?? frequency);
+}
+
 /** The Summary of Fees: one row per service, with both of its codes. */
 function proposalFeesFlow(plan: ProposalPlan): Flow[] {
   const rows = plan.sections.flatMap((s) =>
@@ -1902,11 +1937,15 @@ function proposalFeesFlow(plan: ProposalPlan): Flow[] {
       s.code,
       i.code,
       namedService(i),
-      i.billingFrequency === null
-        ? "Not stated"
-        : (PROPOSAL_FREQUENCY[i.billingFrequency] ?? i.billingFrequency),
+      summaryFrequency(i),
       // The fee alone: the frequency has its own column here.
-      i.net === null ? (i.pricingNote ?? "To be agreed") : documentMoney(i.net, i.currency),
+      i.fee.kind === "section"
+        ? i.fee.isAnchor
+          ? documentMoney(i.fee.amount, i.fee.currency)
+          : `Included in ${i.fee.anchorCode}`
+        : i.net === null
+          ? (i.pricingNote ?? "To be agreed")
+          : documentMoney(i.net, i.currency),
     ]),
   );
   if (rows.length === 0) {
