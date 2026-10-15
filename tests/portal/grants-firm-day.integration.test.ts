@@ -123,4 +123,10 @@ describe("a portal session's grants are the FIRM's day's, whatever day it sends 
     expect(read.companies.map((c) => c.clientPartyId)).toEqual([client]);
     expect(read.asOf).toBe(day(-1));
   });
+
+  it("the firm-wide read (People > Clients) holds only the live grant", async () => {
+    const live = await access.listInForce(tenantId);
+    expect(live.map((g) => g.contactEmail)).toEqual([`live-${stamp}@client.example`]);
+    expect(live[0]?.clientName).toBe(`Cobalt Foods ${stamp}`);
+  });
 });

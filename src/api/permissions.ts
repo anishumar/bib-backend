@@ -184,6 +184,7 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("GET", "/api/v1/portal-access/memberships/{membershipId}"), "portal:grant" as const],
   [routeKey("GET", "/api/v1/portal-access/memberships/{membershipId}/scope"), "portal:grant" as const],
   [routeKey("GET", "/api/v1/portal-access/clients/{partyId}"), "portal:grant" as const],
+  [routeKey("GET", "/api/v1/portal-access"), "portal:grant" as const],
   [routeKey("POST", "/api/v1/portal-access/memberships/{membershipId}"), "portal:grant" as const],
   // Q064: a client's group, and granting the rest of it (one grant per company).
   [routeKey("GET", "/api/v1/portal-access/clients/{partyId}/group"), "portal:grant" as const],

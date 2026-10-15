@@ -268,6 +268,24 @@ const listForClientRoute = createRoute({
   },
 });
 
+const listInForceRoute = createRoute({
+  method: "get",
+  path: "/api/v1/portal-access",
+  tags: ["portal"],
+  summary: "Who at each client can sign in today, firm-wide",
+  description:
+    "Grants in force on the firm's own day, by client name. The People screen's Clients view " +
+    "reads this once instead of once per login. Ended grants are on the per-login read.",
+  responses: {
+    200: {
+      description: "The grants",
+      content: { "application/json": { schema: PortalAccessListResponse } },
+    },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not grant access"),
+  },
+});
+
 const scopeRoute = createRoute({
   method: "get",
   path: "/api/v1/portal-access/memberships/{membershipId}/scope",
@@ -356,6 +374,13 @@ export function registerPortalAccessRoutes(
     if (!s.ok) return c.json(s.deny, s.status);
     const { partyId } = c.req.valid("param");
     const grants = await deps.service.listForClient(s.tenantId, partyId);
+    return c.json({ grants: grants.map(toWire) }, 200);
+  });
+
+  app.openapi(listInForceRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const grants = await deps.service.listInForce(s.tenantId);
     return c.json({ grants: grants.map(toWire) }, 200);
   });
 
@@ -460,6 +485,7 @@ export function registerPortalAccessRoutes(
 export const portalAccessRoutes = {
   listForMembership: listForMembershipRoute,
   listForClient: listForClientRoute,
+  listInForce: listInForceRoute,
   scope: scopeRoute,
   grant: grantRoute,
   group: groupRoute,

@@ -124,6 +124,11 @@ export class PortalAccessService {
     return this.deps.grants.listForClient(tenantId, clientPartyId);
   }
 
+  /** Who can see which client today, firm-wide, on the FIRM's day. */
+  async listInForce(tenantId: string): Promise<readonly PortalAccessRecord[]> {
+    return this.deps.grants.listInForce(tenantId, await this.today(tenantId));
+  }
+
   /**
    * What one membership could read on a day — the STAFF question ("who could
    * see this in March"), asked on the firm's screen with `portal:grant`.
