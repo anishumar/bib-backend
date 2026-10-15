@@ -651,6 +651,8 @@ export interface SignInput {
    * `recordAcceptance`; the HTTP signature route does not expose it.
    */
   readonly recorded?: NewRecordedAcceptance | undefined;
+  /** Set only by `recordAgreed`: the letter never went to the client. */
+  readonly agreedWithoutSending?: boolean | undefined;
 }
 
 /** The signature method a letter accepted outside bib is recorded under
@@ -3118,6 +3120,7 @@ export class EngagementService {
               channel: recorded.channel,
               recordedAcceptanceId: recorded.id,
             }),
+        ...(input.agreedWithoutSending === true ? { sentToClient: false } : {}),
       },
     });
 
@@ -3295,6 +3298,64 @@ export class EngagementService {
       actor,
     );
     return signed;
+  }
+
+  /**
+   * A DRAFT the client already agreed to by email or on a call, recorded as
+   * signed without being sent (the short letter, decided 2026-10-15): asking
+   * for a signature on top of the client's written yes would be asking twice.
+   * `recordAcceptance`'s rules and permission, with three differences:
+   *
+   *   * nothing goes out: no envelope, no cover page, and no
+   *     `engagement_letter.sent`, which would tell the ledger it reached the
+   *     client; the signed event says `sentToClient: false` instead;
+   *   * a draft with no terms gets the firm's standard set, because a contract
+   *     without terms is refused (`NoClauses`) and the short form never shows them;
+   *   * everything that can refuse is asked before the letter leaves draft, so
+   *     a refusal leaves an ordinary draft to finish or delete.
+   */
+  async recordAgreed(
+    input: RecordAcceptanceInput,
+    recordedByUserId: string,
+    actor: Actor,
+  ): Promise<{ letter: EngagementLetter; engagements: readonly EngagementRecord[] }> {
+    const letter = await this.editableOrThrow(input.tenantId, input.letterId);
+    const today = await this.callersDay(input.tenantId, letter.issuingEntityPartyId, input.asOf);
+    const evidence = checkAcceptance(input.statement, { today, sentOn: null, needsEvidence: true });
+    const documentId = evidence.evidenceDocumentId ?? "";
+    if (!(await this.deps.letters.isFiledAgainst(input.tenantId, letter.id, documentId))) {
+      throw new EvidenceNotFiledHere(documentId);
+    }
+    if ((await this.deps.letters.listLines(input.tenantId, letter.id)).length === 0) throw new EmptyLetter();
+    if ((await this.deps.letters.listClauses(input.tenantId, letter.id)).length === 0) {
+      await this.addStandardClauses(input.tenantId, letter.id);
+    }
+    await this.requireCompleteTerms(input.tenantId, letter.id);
+    const signer = await this.signerFor(input.tenantId, letter);
+
+    // `sent_at` is still written: the table holds every non-draft letter to
+    // one (0017), and it is the moment the firm committed.
+    const at = this.deps.clock.now().toISOString();
+    await this.deps.letters.markSent(
+      input.tenantId,
+      letter.id,
+      at,
+      today,
+      signer === null ? null : { ...signer, signedAt: at },
+    );
+    return this.sign(
+      {
+        tenantId: input.tenantId,
+        letterId: letter.id,
+        signedByName: evidence.acceptedByName,
+        signedByTitle: evidence.acceptedByTitle ?? undefined,
+        reference: `Agreed by ${evidence.channel} on ${evidence.acceptedOn}; not sent to the client, recorded by the firm`,
+        asOf: input.asOf,
+        recorded: { ...evidence, id: this.deps.ids.newId(), tenantId: input.tenantId, recordedByUserId },
+        agreedWithoutSending: true,
+      },
+      actor,
+    );
   }
 
   /**

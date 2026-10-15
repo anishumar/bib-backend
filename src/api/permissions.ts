@@ -553,6 +553,8 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // The client said yes outside bib and a partner records it (0317): it signs
   // the letter and starts the work, so it is not party:write.
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/acceptance"), "acceptance:record" as const],
+  // The same yes recorded on a draft that was never sent (the short letter).
+  [routeKey("POST", "/api/v1/engagement-letters/{letterId}/agreed"), "acceptance:record" as const],
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/signature-request"), "party:write" as const],
 
 

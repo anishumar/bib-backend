@@ -1911,7 +1911,7 @@ describe("who a letter and an invoice name, in the database (F-10-1, 0306)", () 
 
 describe("a letter the client accepted outside bib, in the database (0317)", () => {
   /** A letter sent and waiting, and the client's email filed against it. */
-  async function sentWithEvidence(): Promise<{ letterId: string; emailFile: string }> {
+  async function sentWithEvidence(sent = true): Promise<{ letterId: string; emailFile: string }> {
     const letter = await service.draft(
       {
         tenantId: tenantA,
@@ -1935,9 +1935,12 @@ describe("a letter the client accepted outside bib, in the database (0317)", () 
       unitAmount: "2000",
       discountPercent: "0",
     });
-    await service.addClause(tenantA, letter.id, scopeV1);
-    await writeOpening(documents, tenantA, letter.id);
-    await service.send(tenantA, letter.id, SYSTEM_ACTOR);
+    // The short letter's draft has no terms and no cover page of its own.
+    if (sent) {
+      await service.addClause(tenantA, letter.id, scopeV1);
+      await writeOpening(documents, tenantA, letter.id);
+      await service.send(tenantA, letter.id, SYSTEM_ACTOR);
+    }
     const [doc] = await owner<{ id: string }[]>`
       INSERT INTO files.document (tenant_id, title, origin, kind, party_id)
       VALUES (${tenantA}, 'Email from R Sharma: go ahead', 'uploaded', 'correspondence', ${partyA})
@@ -1990,6 +1993,38 @@ describe("a letter the client accepted outside bib, in the database (0317)", () 
       evidenceTitle: "Email from R Sharma: go ahead",
       recordedBy: { userId: partner, displayName: "Siddharth Kohli" },
     });
+  });
+
+  it("records a DRAFT the client agreed to as signed, with the standard terms, never sent", async () => {
+    const { letterId, emailFile } = await sentWithEvidence(false);
+    const partner = await recorder();
+
+    const result = await service.recordAgreed(
+      {
+        tenantId: tenantA,
+        letterId,
+        statement: {
+          channel: "email",
+          acceptedOn: "2026-07-01",
+          acceptedByName: "R Sharma",
+          note: "Agreed the fee by email.",
+          evidenceDocumentId: emailFile,
+        },
+      },
+      partner,
+      { type: "human", id: partner },
+    );
+
+    expect(result.letter).toMatchObject({ status: "signed", signatureMethod: RECORDED_ACCEPTANCE_METHOD });
+    expect(result.letter.signatureReference).toMatch(/not sent to the client/);
+    expect(result.engagements).toHaveLength(1);
+    const view = await service.describe(tenantA, letterId);
+    expect(view.clauses.length).toBeGreaterThan(0);
+    expect(view.recordedAcceptance).toMatchObject({ acceptedByName: "R Sharma", evidenceDocumentId: emailFile });
+    const [sent] = await owner<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM ledger.event WHERE object_id = ${letterId} AND verb = 'engagement_letter.sent'
+    `;
+    expect(sent?.n).toBe(0);
   });
 
   it("refuses a file filed against ANOTHER letter, and moves nothing", async () => {
