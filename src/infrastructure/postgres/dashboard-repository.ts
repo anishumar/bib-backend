@@ -30,6 +30,7 @@ import type {
   PersonCurrencyRow,
   ReceivableTotals,
   RevenueQuery,
+  SubjectNames,
   SummaryKind,
 } from "../../usecase/dashboard/ports";
 
@@ -939,6 +940,72 @@ export class PostgresDashboardRepository implements DashboardRepository {
           deptCode: p.code,
         })),
         depts: depts.map((d) => ({ code: d.code, name: d.name })),
+      };
+    });
+  }
+
+  async subjectNames(
+    tenantId: string,
+    engagementIds: readonly string[],
+    feeGroupIds: readonly string[],
+  ): Promise<SubjectNames> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const engagements =
+        engagementIds.length === 0
+          ? []
+          : await db<{ engagement_id: string; party_name: string; entry_key: string; name: string; dept: string | null }[]>`
+              SELECT e.id AS engagement_id, p.display_name AS party_name,
+                     coalesce(pinned.entry_id::text, 'line:' || ll.description) AS entry_key,
+                     coalesce(live.body ->> 'name', pinned.body ->> 'name', ll.description) AS name,
+                     coalesce(live.body ->> 'module', pinned.body ->> 'module') AS dept
+                FROM crm.engagement e
+                JOIN core.party p ON p.id = e.party_id AND p.tenant_id = e.tenant_id
+                JOIN crm.engagement_letter_line ll
+                  ON ll.id = e.engagement_letter_line_id AND ll.tenant_id = e.tenant_id
+                LEFT JOIN config.version pinned
+                  ON pinned.id = ll.service_version_id AND pinned.tenant_id = ll.tenant_id
+                LEFT JOIN config.version live
+                  ON live.entry_id = pinned.entry_id AND live.tenant_id = pinned.tenant_id
+                 AND live.status = 'published'
+               WHERE e.id = ANY(${engagementIds as string[]}::uuid[])
+            `;
+      const groups =
+        feeGroupIds.length === 0
+          ? []
+          : await db<{ fee_group_id: string; party_name: string; title: string; services: string[] | null; depts: string[] | null }[]>`
+              SELECT g.id AS fee_group_id, p.display_name AS party_name, g.title,
+                     array_agg(coalesce(live.body ->> 'name', pinned.body ->> 'name', ll.description)
+                               ORDER BY ll.position) FILTER (WHERE ll.id IS NOT NULL) AS services,
+                     array_remove(array_agg(DISTINCT coalesce(live.body ->> 'module', pinned.body ->> 'module')),
+                                  NULL) AS depts
+                FROM crm.engagement_letter_fee_group g
+                JOIN crm.engagement_letter l ON l.id = g.engagement_letter_id AND l.tenant_id = g.tenant_id
+                JOIN core.party p ON p.id = l.party_id AND p.tenant_id = l.tenant_id
+                LEFT JOIN crm.engagement_letter_line ll
+                  ON ll.fee_group_id = g.id AND ll.tenant_id = g.tenant_id AND ll.removed_at IS NULL
+                LEFT JOIN config.version pinned
+                  ON pinned.id = ll.service_version_id AND pinned.tenant_id = ll.tenant_id
+                LEFT JOIN config.version live
+                  ON live.entry_id = pinned.entry_id AND live.tenant_id = pinned.tenant_id
+                 AND live.status = 'published'
+               WHERE g.id = ANY(${feeGroupIds as string[]}::uuid[])
+               GROUP BY g.id, p.display_name, g.title
+            `;
+      return {
+        engagements: engagements.map((r) => ({
+          engagementId: r.engagement_id,
+          partyName: r.party_name,
+          entryKey: r.entry_key,
+          name: r.name,
+          deptCode: r.dept,
+        })),
+        feeGroups: groups.map((r) => ({
+          feeGroupId: r.fee_group_id,
+          partyName: r.party_name,
+          title: r.title,
+          services: r.services ?? [],
+          deptCodes: r.depts ?? [],
+        })),
       };
     });
   }

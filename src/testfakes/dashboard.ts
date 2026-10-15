@@ -18,6 +18,7 @@ import type {
   BillingCompany,
   ClientSummaryQuery,
   ClientSummaryRow,
+  SubjectNames,
   CompanyMonthRow,
   DashboardRepository,
   ManagerMonthRow,
@@ -168,6 +169,12 @@ export class FakeDashboardRepo implements DashboardRepository {
   clientSummary(_tenantId: string, q: ClientSummaryQuery): Promise<readonly ClientSummaryRow[]> {
     this.summaryAsked.push(q);
     return Promise.resolve(this.summaryRows);
+  }
+
+  subjects: SubjectNames = { engagements: [], feeGroups: [] };
+
+  subjectNames(): Promise<SubjectNames> {
+    return Promise.resolve(this.subjects);
   }
 
   accountTeams(_tenantId: string, clientIds: readonly string[]): Promise<AccountTeams> {

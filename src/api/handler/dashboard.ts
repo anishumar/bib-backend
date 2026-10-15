@@ -36,8 +36,11 @@ import { toEnvelope } from "../httpresp";
 import { scopeOf } from "../scope";
 import type { OriginatorService } from "../../usecase/originator/service";
 import {
+  PROJECTION_MAX_MONTHS,
   REVENUE_REPORT_MAX_DAYS,
+  type ClientProjection,
   type ClientSummary,
+  type ProjectedFigures,
   type RevenueReport,
   type SummaryFigures,
 } from "../../usecase/dashboard/service";
@@ -680,6 +683,108 @@ function summaryToWire(r: ClientSummary) {
   };
 }
 
+const ProjectedFiguresSchema = {
+  currency: z.string().openapi({ description: "Every amount on this row is in this currency, never converted." }),
+  months: z.array(AmountString).openapi({ description: "Fees to be billed, before tax, one per month of `months`." }),
+  total: AmountString,
+};
+
+const ClientProjectionResponse = z
+  .object({
+    today: ReportDay,
+    months: z.array(
+      z.object({
+        key: z.string().openapi({ description: "YYYY-MM" }),
+        label: z.string(),
+        from: ReportDay.openapi({ description: "The first month starts today." }),
+        to: ReportDay,
+      }),
+    ),
+    currencies: z.array(z.object(ProjectedFiguresSchema)).openapi({
+      description: "The firm's whole, one per currency: every client's totals of that currency add up to it.",
+    }),
+    clients: z.array(
+      z.object({
+        partyId: z.string().uuid(),
+        name: z.string(),
+        keyManager: SummaryPersonSchema.nullable(),
+        totals: z.array(z.object(ProjectedFiguresSchema)),
+        lines: z.array(
+          z.object({
+            kind: z.enum(["service", "section"]),
+            key: z.string(),
+            name: z.string(),
+            services: z.array(z.string()),
+            depts: z.array(z.object({ code: z.string(), name: z.string() })),
+            spocs: z.array(SummaryPersonSchema.extend({ deptCode: z.string() })),
+            unpriced: z.number().int().openapi({ description: "Bills in the window whose letter named no price." }),
+            ...ProjectedFiguresSchema,
+          }),
+        ),
+      }),
+    ),
+    awaitingFiscalYear: z.number().int().openapi({
+      description: "Quarterly or yearly services left out: the firm has not said when its year starts.",
+    }),
+  })
+  .openapi("ClientProjection");
+
+const clientProjectionRoute = createRoute({
+  method: "get",
+  path: "/api/v1/dashboard/client-summary/projection",
+  tags: ["dashboard"],
+  summary: "The fees each client's services will be billed in the coming months",
+  description:
+    "The billing sweep's own rule run forward: for every scheduled service (or section), the bills that will " +
+    "fall due in the rest of this month and the `months` months after it, at the letter's price, a part period " +
+    "priced as the sweep prices it, before tax, by the month the bill falls due. A service runs on until it is " +
+    "ended; an ended or paused one bills nothing past it. Bills already written are left out. Per CURRENCY, " +
+    "never converted. Requires commercial visibility.",
+  request: {
+    query: z.object({
+      months: z.coerce.number().int().min(1).max(PROJECTION_MAX_MONTHS).default(3),
+      partyId: z.string().uuid().optional(),
+      keyManagerUserId: z.string().uuid().optional(),
+      spocUserId: z.string().uuid().optional(),
+    }),
+  },
+  responses: {
+    200: { description: "The projection", content: { "application/json": { schema: ClientProjectionResponse } } },
+    400: errorResponse("Months outside 1 to 12, or a malformed id"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("No org selected, or the caller does not have commercial visibility"),
+  },
+});
+
+function projectedToWire(f: ProjectedFigures) {
+  return { currency: f.currency, months: [...f.months], total: f.total };
+}
+
+function projectionToWire(r: ClientProjection) {
+  return {
+    today: r.today,
+    months: r.months.map((m) => ({ key: m.key, label: m.label, from: m.from, to: m.to })),
+    currencies: r.currencies.map(projectedToWire),
+    clients: r.clients.map((c) => ({
+      partyId: c.partyId,
+      name: c.name,
+      keyManager: c.keyManager === null ? null : { userId: c.keyManager.userId, name: c.keyManager.name },
+      totals: c.totals.map(projectedToWire),
+      lines: c.lines.map((l) => ({
+        kind: l.kind,
+        key: l.key,
+        name: l.name,
+        services: [...l.services],
+        depts: l.depts.map((d) => ({ code: d.code, name: d.name })),
+        spocs: l.spocs.map((p) => ({ userId: p.userId, name: p.name, deptCode: p.deptCode })),
+        unpriced: l.unpriced,
+        ...projectedToWire(l),
+      })),
+    })),
+    awaitingFiscalYear: r.awaitingFiscalYear,
+  };
+}
+
 const TodaysRateSchema = z
   .object({
     fxRate: z.string().openapi({ description: "One unit of the currency, in the reporting currency." }),
@@ -869,6 +974,25 @@ export function registerDashboardRoutes(app: OpenAPIHono<AppEnv>, deps: Dashboar
     );
   });
 
+  app.openapi(clientProjectionRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const denied = denyWithoutFees(c.get("principal"));
+    if (denied !== null) return c.json(denied, 403);
+    const q = c.req.valid("query");
+    return c.json(
+      projectionToWire(
+        await deps.service.projection(s.tenantId, {
+          ahead: q.months,
+          partyId: q.partyId,
+          keyManagerUserId: q.keyManagerUserId,
+          spocUserId: q.spocUserId,
+        }),
+      ),
+      200,
+    );
+  });
+
   registerOriginatorRoutes(app, { service: deps.originators });
 
   app.openapi(revenueByManagerRoute, async (c) => {
@@ -889,4 +1013,5 @@ export const dashboardRoutes = {
   revenueByManager: revenueByManagerRoute,
   revenueReport: revenueReportRoute,
   clientSummary: clientSummaryRoute,
+  clientProjection: clientProjectionRoute,
 } as const;

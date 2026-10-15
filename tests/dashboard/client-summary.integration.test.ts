@@ -435,6 +435,29 @@ describe("the client summary", () => {
     expect(names).toEqual(["K:GST returns", "K:Retainer", "T:GST returns"]);
   });
 
+  it("names the projection's subjects: a service by its live entry, a section with its services", async () => {
+    const ids = (await owner<{ id: string }[]>`SELECT id FROM crm.engagement WHERE party_id = ${kaveri}`).map((r) => r.id);
+    const names = await repo.subjectNames(firm, ids, [groupId]);
+    const acc = names.engagements.filter((e) => e.entryKey === entries.acc);
+    expect(acc.length).toBeGreaterThan(1);
+    expect(new Set(acc.map((e) => `${e.name}|${e.deptCode ?? ""}|${e.partyName}`))).toEqual(
+      new Set([`Accounting & Books|FRC|Kaveri Foods ${stamp}`]),
+    );
+    expect(names.feeGroups).toEqual([
+      {
+        feeGroupId: groupId,
+        partyName: `Kaveri Foods ${stamp}`,
+        title: "Retainer",
+        services: ["Accounting & Books", "Payroll"],
+        deptCodes: ["FRC", "TRC"],
+      },
+    ]);
+    const [t] = await owner<{ id: string }[]>`
+      INSERT INTO tenancy.tenant (slug, name, reporting_currency) VALUES (${`cs-names-${stamp}`}, 'Other', 'INR') RETURNING id
+    `;
+    expect(await repo.subjectNames(t?.id ?? "", ids, [groupId])).toEqual({ engagements: [], feeGroups: [] });
+  });
+
   it("names the account team in force, with the Depts", async () => {
     const teams = await repo.accountTeams(firm, [kaveri, tapti], "2026-09-30");
     const km = teams.people.filter((p) => p.role === "key_manager").map((p) => [p.clientPartyId, p.name]);

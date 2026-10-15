@@ -8,6 +8,8 @@
 // TypeScript would be a second implementation of arithmetic the database
 // already does, and the two would eventually disagree.
 import type { AgeingBand, MrrByCurrency, MrrGap, Slice } from "../../domain/dashboard/model";
+import type { CompanyCalendars } from "../../domain/calendar/model";
+import type { BillingSubject } from "../billing/ports";
 
 export interface MrrTotals {
   /** Decimal string in the firm's reporting currency. "0" when nothing counts. */
@@ -107,6 +109,43 @@ export interface DashboardRepository {
   /** Who is on each client's account team on `day` (active staff only), and
    *  the names of the firm's Depts. */
   accountTeams(tenantId: string, clientIds: readonly string[], day: string): Promise<AccountTeams>;
+
+  /** What each billing subject is called, for the projection's rows: a
+   *  service under its live catalogue name, a section with its services. */
+  subjectNames(
+    tenantId: string,
+    engagementIds: readonly string[],
+    feeGroupIds: readonly string[],
+  ): Promise<SubjectNames>;
+}
+
+export interface SubjectNames {
+  readonly engagements: readonly {
+    readonly engagementId: string;
+    readonly partyName: string;
+    /** The catalogue entry, as the client summary keys a service. */
+    readonly entryKey: string;
+    readonly name: string;
+    readonly deptCode: string | null;
+  }[];
+  readonly feeGroups: readonly {
+    readonly feeGroupId: string;
+    readonly partyName: string;
+    readonly title: string;
+    readonly services: readonly string[];
+    readonly deptCodes: readonly string[];
+  }[];
+}
+
+/** The billing schedules (0318) as the sweep reads them; the projection runs
+ *  the sweep's own rule forward (structural: the billing adapter). */
+export interface BillingScheduleSource {
+  subjectsFor(tenantId: string): Promise<readonly BillingSubject[]>;
+}
+
+/** Each of the firm's companies' year and zone (0337). */
+export interface CompanyCalendarSource {
+  companyCalendars(tenantId: string): Promise<CompanyCalendars>;
 }
 
 /**

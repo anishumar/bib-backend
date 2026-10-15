@@ -186,9 +186,35 @@ export function subtractAmounts(a: Amount, b: Amount): string {
   const [ai, af] = splitDecimal(a);
   const [bi, bf] = splitDecimal(b);
   const scale = Math.max(af.length, bf.length);
-  const difference = BigInt(ai + af.padEnd(scale, "0")) - BigInt(bi + bf.padEnd(scale, "0"));
-  const negative = difference < 0n;
-  const digits = (negative ? -difference : difference).toString().padStart(scale + 1, "0");
+  return formatScaled(BigInt(ai + af.padEnd(scale, "0")) - BigInt(bi + bf.padEnd(scale, "0")), scale);
+}
+
+/** `a + b`, exactly, at the wider of the two scales. */
+export function addAmounts(a: Amount, b: Amount): string {
+  const [ai, af] = splitDecimal(a);
+  const [bi, bf] = splitDecimal(b);
+  const scale = Math.max(af.length, bf.length);
+  return formatScaled(BigInt(ai + af.padEnd(scale, "0")) + BigInt(bi + bf.padEnd(scale, "0")), scale);
+}
+
+/**
+ * `round(amount × served / days, 2)`, half away from zero: what 0318's
+ * `crm.billing_due.amount` charges for a part period, worked out exactly so a
+ * projection quotes the bill the sweep will write.
+ */
+export function proratedAmount(amount: Amount, served: number, days: number): string {
+  const [whole, fraction] = splitDecimal(amount);
+  const num = BigInt(whole + fraction) * BigInt(served) * 100n;
+  const den = BigInt(days) * 10n ** BigInt(fraction.length);
+  const negative = num < 0n;
+  const cents = ((negative ? -num : num) * 2n + den) / (2n * den);
+  return formatScaled(negative ? -cents : cents, 2);
+}
+
+/** A scaled integer back to a decimal string with `scale` places. */
+function formatScaled(value: bigint, scale: number): string {
+  const negative = value < 0n;
+  const digits = (negative ? -value : value).toString().padStart(scale + 1, "0");
   const whole = digits.slice(0, digits.length - scale);
   const fraction = scale === 0 ? "" : `.${digits.slice(digits.length - scale)}`;
   return `${negative ? "-" : ""}${whole}${fraction}`;
